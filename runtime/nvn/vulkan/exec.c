@@ -2811,6 +2811,26 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
 // ================================================================== compute
 typedef struct { Prog p; ShaderInfo *si; VkPipeline pipe; uint32_t local[3]; } CsProg;
 
+// Compute programs run in 32-lane subgroups, as Maxwell's warps do. The game's compute shaders use ballot / shuffle / vote on a 32-lane warp (Pokémon Z-A's GPU culling
+// counts the visible instances of a batch with ballot + a leader's atomicAdd); AMD drivers run compute in 64-lane waves by default (RADV), where those counts are wrong:
+// whole parts of a scene (walls, arches, lamps, their shadows) were culled, and the translated shader could hang the GPU. Vulkan 1.3 requires the subgroup size control;
+// where the device cannot run 32 lanes (min > 32) nothing changes. LARECOMP_VK_CS_SUBGROUP=0: the driver's choice.
+static bool cs_subgroup32(void) {
+    static int ok = -1;
+    if (ok < 0) {
+        const char *e = ENV("LARECOMP_VK_CS_SUBGROUP");
+        ok = 0;
+        if (g_vkc.api >= VK_API_VERSION_1_3 && !(e && !strcmp(e, "0"))) {
+            VkPhysicalDeviceSubgroupSizeControlProperties sgp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES};
+            VkPhysicalDeviceProperties2 pp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &sgp};
+            vkGetPhysicalDeviceProperties2(g_vk.phys, &pp);
+            ok = sgp.minSubgroupSize <= 32 && sgp.maxSubgroupSize >= 32 && (sgp.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT);
+            LOG("[vk] compute subgroup sizes %u..%u: %s\n", sgp.minSubgroupSize, sgp.maxSubgroupSize, ok ? "compute programs run in 32 lanes" : "left to the driver");
+        }
+    }
+    return ok;
+}
+
 static void build_compute(void *arg) {
     CsProg *cp = arg;
     size_t n = 0;
@@ -2822,8 +2842,10 @@ static void build_compute(void *arg) {
     cp->p.layout = make_layout(&cp->p, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0);
     VkSpecializationMapEntry me[3] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}};
     VkSpecializationInfo spec = {3, me, 12, cp->local};
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo req32 = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
+                                                                 .requiredSubgroupSize = 32};
     VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = cs_subgroup32() ? &req32 : NULL,
                                                 .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main",
                                                 .pSpecializationInfo = &spec},
                                       .layout = cp->p.layout};

@@ -725,6 +725,7 @@ static struct {
     uint32_t channel_mask;
     uint8_t color_state[4], ds[8], ms[0x18], poly[4];
     float poly_offset[3];
+    uint8_t depth_clamp;  // nvnCommandBufferSetDepthClamp
     uint32_t attrib[16];
     int nattrib;
     uint32_t stream[16][2];
@@ -1631,7 +1632,7 @@ typedef struct {
     uint32_t attr_mask;
     uint32_t stride[17], divisor[17], used_streams;
     uint8_t blend[8][8];
-    uint8_t blend_on, a2c, topo_class, poly_fill;
+    uint8_t blend_on, a2c, topo_class, poly_fill, depth_clamp;
     uint8_t restart;  // (no extended dynamic state 2 only: primitive restart, a strip topology)
     uint32_t write_mask[8];
     FixedState fx;    // (no extended dynamic state only: what draw_ sets as dynamic state otherwise)
@@ -1691,6 +1692,7 @@ static void build_pipeline(void *arg) {
     VkPipelineViewportStateCreateInfo vs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
     VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
                                                  .polygonMode = k->poly_fill ? VK_POLYGON_MODE_FILL : VK_POLYGON_MODE_LINE, .lineWidth = 1,
+                                                 .depthClampEnable = k->depth_clamp ? VK_TRUE : VK_FALSE,
                                                  .depthBiasEnable = g_vkc.no_eds2};
     VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
                                                .rasterizationSamples = (VkSampleCountFlagBits)k->samples, .alphaToCoverageEnable = k->a2c};
@@ -3266,6 +3268,9 @@ static void draw_(CmdRec *r, bool indexed) {
     k.a2c = st.ms[0xC] != 0;
     k.topo_class = cls;
     k.poly_fill = st.poly[2] != 1;
+    static int noclamp = -1;  // LARECOMP_VK_NO_DEPTH_CLAMP=1: ignore the game's depth clamp, as before
+    if (noclamp < 0) noclamp = ENV("LARECOMP_VK_NO_DEPTH_CLAMP") != NULL;
+    k.depth_clamp = st.depth_clamp && !noclamp;
     if (g_vkc.no_eds2) k.restart = st.prim_restart && native && (mode == 3 || mode == 5);  // (as SS_PRE below)
     FixedState fx;
     fixed_state(&fx, vkey.flip_x, vkey.flip_y, native, topo);
@@ -4500,6 +4505,7 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         }
         case CMD_SET_POLYGON_OFFSET: memcpy(st.poly_offset, r->f, sizeof st.poly_offset); break;
+        case CMD_SET_DEPTH_CLAMP: st.depth_clamp = r->x[0] & 1; break;
         case CMD_SET_PRIMITIVE_RESTART: st.prim_restart = r->x[0] != 0; st.restart_index = (uint32_t)r->x[1]; break;
         case CMD_SET_COPY_STRIDES: st.copy_row_stride = r->x[0]; st.copy_image_stride = r->x[1]; break;
         case CMD_CLEAR_COLOR: {

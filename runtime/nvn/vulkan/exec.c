@@ -2636,14 +2636,17 @@ void vc_flush(void) {
 // CPU writes as on the Switch. Falls back to copies outside the heap or without the import; LARECOMP_VK_COPY_VERTICES=1
 // forces copies.
 
-static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
+// index: an index buffer. Never read from the transform feedback mirror: transform feedback writes vertex data only, the mirror has no INDEX_BUFFER usage (the validation
+// layer: vkCmdBindIndexBuffer on it, 423 times in 15 s), and index data the game wrote into the arena's memory after a session (chunks count as written by 256-byte
+// chunk) was read from stale mirror bytes: invisible walls and empty text boxes.
+static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off, bool index) {
     static int copy = -1;
     if (copy < 0) copy = ENV("LARECOMP_VK_COPY_VERTICES") != NULL;
     if (copy || addr < gwin_base) return false;
     if (addr + size > gwin_base + gmem_size && gwin_want() != gmem_tried) { gmem_tried = gwin_want(); gmem_info(); }
     if (!gmem_buf || addr + size > gwin_base + gmem_size) return false;
     if (vcache_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }
-    if (xm_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }
+    if (!index && xm_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }
     stat_vtx_host += size;
     *buf = gmem_buf;
     *off = addr - gwin_base;
@@ -3472,7 +3475,7 @@ static void draw_(CmdRec *r, bool indexed) {
             itype_vk = itype == 1 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
             icount = count;
             ind_ok = true;
-            if (iaddr % isz == 0 && guest_direct(iaddr, (uint64_t)count * isz, &ib.buf, &ib.off)) {
+            if (iaddr % isz == 0 && guest_direct(iaddr, (uint64_t)count * isz, &ib.buf, &ib.off, true)) {
                 scan_src = src; scan_isz = isz; scan_restart = restart;  // max_index only if a stream gets copied
             } else {
                 ib = vk_transient_copy(src, (uint64_t)count * isz + 4, 4);
@@ -3513,7 +3516,7 @@ static void draw_(CmdRec *r, bool indexed) {
             Range v = st.vbuf[s];
             VkBuffer dbuf;
             VkDeviceSize doff;
-            if (v.addr && v.size && guest_direct(v.addr, v.size, &dbuf, &doff)) {
+            if (v.addr && v.size && guest_direct(v.addr, v.size, &dbuf, &doff, false)) {
                 if (ss_on && (ss.vb_known >> s & 1) && ss.vb[s] == dbuf && ss.vo[s] == doff) continue;
                 ss.vb[s] = dbuf; ss.vo[s] = doff; ss.vb_known |= 1u << s;
                 vkCmdBindVertexBuffers(cb, (uint32_t)s, 1, &dbuf, &doff);

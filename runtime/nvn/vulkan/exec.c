@@ -1366,10 +1366,10 @@ static inline const GWin *gwin(void) {
 // bytes of the window the game has set up: the heap size, or the whole physical region
 static uint64_t gwin_want(void) { return gwin()->phys ? gwin_.max : kernel_heap_size(); }
 
+static void gmem_window_get(uint64_t *lo, uint64_t *len);  // (the guest-heap import window, below)
 static void translate_program(void *arg) {
     Prog *p = arg;
-    maxwell_gmem_base = gwin_base;
-    maxwell_gmem_size = gwin_max;
+    { uint64_t wl, wn; gmem_window_get(&wl, &wn); maxwell_gmem_base = gwin_base + wl; maxwell_gmem_size = wn; }
     pthread_mutex_lock(&translate_lock);
     p->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], STAGE_VERTEX, &p->vkey);
     if (p->vi->msl) {
@@ -2164,19 +2164,39 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
 static VkBuffer gmem_buf;
 static VkDeviceMemory gmem_mem;
 static uint64_t gmem_size;
+// LARECOMP_VK_GMEM_WINDOW=<MB>: import only the top <MB> of the heap instead of all of it. On the Steam Deck the 3.2 GB host-pointer (userptr) import is
+// revalidated by amdgpu at every submit: 1.75 ms x 75 submits a frame, 87 % of the render thread (6.7 fps; 21 fps without the import). Z-A's compute
+// storage buffers all sit in an 8 MB spot near the heap's end. gmem_lo: heap offset of the import's first byte (0: the whole heap).
+static uint64_t gmem_lo, gmem_window;
+#define GM_IN(a, sz) (gmem_buf && (a) >= gwin_base + gmem_lo && (a) + (sz) <= gwin_base + gmem_lo + gmem_size)
+#define GM_OFF(a) ((a) - gwin_base - gmem_lo)
+// The window is anchored at the end of the physical region (gwin_max: constant for the session, so shaders may bake it): [lo, gwin_max).
+// Only with a physical-memory window (no heap), else the whole heap as before. The generated shader code computes ga = addr - base, ok = ga < size,
+// so translate_program / build_compute set base and size to the window too (the window changed them by lo: text and buildings read the wrong place).
+static void gmem_window_get(uint64_t *lo, uint64_t *len) {
+    static int init;
+    // default: on an integrated GPU (the Steam Deck: the full import cost 87 % of the render thread), 256 MB; LARECOMP_VK_GMEM_WINDOW=0 imports it all
+    if (!init++) {
+        const char *w = ENV("LARECOMP_VK_GMEM_WINDOW");
+        gmem_window = w ? strtoull(w, NULL, 10) << 20 : g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 256ull << 20 : 0;
+    }
+    if (!gmem_window || !gwin()->phys || gwin_max <= gmem_window) { *lo = 0; *len = gwin_max; return; }
+    *lo = (gwin_max - gmem_window) & ~0xFFFFFull;
+    *len = gwin_max - *lo;
+}
 
-static bool gmem_import(uint64_t size) {
+static bool gmem_import(uint64_t lo, uint64_t size) {
     PFN_vkGetMemoryHostPointerPropertiesEXT props =
         (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryHostPointerPropertiesEXT");
     VkMemoryHostPointerPropertiesEXT mp = {.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
-    if (!props || props(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, (void *)(uintptr_t)gwin_base, &mp) != VK_SUCCESS ||
+    if (!props || props(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, (void *)(uintptr_t)(gwin_base + lo), &mp) != VK_SUCCESS ||
         !mp.memoryTypeBits) {
         LOG("[vk] gmem import: host pointer properties failed (types %#x)\n", mp.memoryTypeBits);
         return false;
     }
     VkImportMemoryHostPointerInfoEXT imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
                                             .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
-                                            .pHostPointer = (void *)(uintptr_t)gwin_base};
+                                            .pHostPointer = (void *)(uintptr_t)(gwin_base + lo)};
     VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &imp, .allocationSize = size,
                                .memoryTypeIndex = (uint32_t)__builtin_ctz(mp.memoryTypeBits)};
     VkDeviceMemory mem;
@@ -2199,7 +2219,8 @@ static bool gmem_import(uint64_t size) {
     gmem_buf = buf;
     gmem_mem = mem;
     gmem_size = size;
-    LOG("[vk] guest heap imported for shader global memory: %llu MB\n", (unsigned long long)(size >> 20));
+    gmem_lo = lo;
+    LOG("[vk] guest heap imported for shader global memory: %llu MB from heap offset %llu MB\n", (unsigned long long)(size >> 20), (unsigned long long)(lo >> 20));
     return true;
 }
 
@@ -2210,9 +2231,12 @@ static VkDescriptorBufferInfo gmem_info(void) {
     if (off < 0) off = ENV("LARECOMP_VK_NO_GMEM") != NULL || !g_vk.host_import;
     uint64_t want = (gwin_want() + 0xFFFF) & ~0xFFFFull;
     if (want > gwin_max) want = gwin_max;
+    uint64_t wlo, wlen;
+    gmem_window_get(&wlo, &wlen);
+    if (!gmem_window) wlo = 0;
     static int nlog;
     if (!nlog++) LOG("[vk] gmem: window %llu MB, import %s\n", (unsigned long long)(want >> 20), off ? "off" : "on");
-    if (!off && want > gmem_size && !gmem_import(want)) {
+    if (!off && want > gmem_lo + gmem_size && !gmem_import(wlo, want - wlo)) {
         LOG("[vk] guest heap import failed (%llu MB): shader global memory reads return zero\n", (unsigned long long)(want >> 20));
         off = 1;
     }
@@ -2310,6 +2334,12 @@ static bool xm_prepare(void) {
             LOG("[vk] transform feedback mirror at %llx (+%llu MB)\n", (unsigned long long)xm_lo, (unsigned long long)(XM_SIZE >> 20));
         }
         if ((xfb_addr[b] & 3) || !xm_inside(xfb_addr[b], xfb_size[b])) { stat_xm_fallback++; return false; }
+        if (gmem_lo && !GM_IN(xfb_addr[b], xfb_size[b])) {
+            static int nl;
+            if (nl++ < 8) LOG("[gmem] transform feedback buffer %llx is outside the import window\n", (unsigned long long)xfb_addr[b]);
+            stat_xm_fallback++;
+            return false;
+        }
     }
     for (int b = 0; b < 4; b++) {
         if (!xfb_addr[b] || !xfb_size[b]) continue;
@@ -2325,10 +2355,10 @@ static bool xm_prepare(void) {
                     if (xm_back[k].srcOffset < lo) lo = xm_back[k].srcOffset;
                     if (xm_back[k].srcOffset + xm_back[k].size > hi) hi = xm_back[k].srcOffset + xm_back[k].size;
                 }
-                xm_back[0] = (VkBufferCopy){lo, xm_lo - gwin_base + lo, hi - lo};
+                xm_back[0] = (VkBufferCopy){lo, xm_lo - gwin_base - gmem_lo + lo, hi - lo};
                 xm_back_n = 1;
             }
-            xm_back[xm_back_n++] = (VkBufferCopy){o, xm_lo - gwin_base + o, xfb_size[b]};
+            xm_back[xm_back_n++] = (VkBufferCopy){o, xm_lo - gwin_base - gmem_lo + o, xfb_size[b]};
         }
     }
     return true;
@@ -2353,12 +2383,13 @@ static void xm_copy_back(VkCommandBuffer cb) {
 
 static void gfast_prepare(VkCommandBuffer cb) {
     static int on = -1;
-    if (on < 0) { const char *e = ENV("LARECOMP_VK_GMEM_FAST"); on = !e || atoi(e) != 0; }
+    // (on an integrated GPU the heap import is not across PCIe: the copy and the table search only cost, 234 -> 97 ms on a Steam Deck)
+    if (on < 0) { const char *e = ENV("LARECOMP_VK_GMEM_FAST"); on = e ? atoi(e) != 0 : g_vk.props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU; }
     memset(gmap_tab, 0, sizeof gmap_tab);
     gfast_n = 0;
     gmem_info();  // (the heap import, made on first use)
     gfast_info();
-    if (!on || !gmem_buf) return;
+    if (!on || !gmem_buf || gmem_lo) return;
     struct { uint64_t lo, hi; } r[16];
     int n = 0;
     for (int i = 0; i < 16; i++) {  // heap offsets of the bound storage buffers, 256-aligned
@@ -2532,7 +2563,7 @@ static bool vcache_lookup(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceS
             vc_on = 0;
         }
     }
-    if (!vc_on || !gmem_buf || size > VC_MAX_RANGE) return false;
+    if (!vc_on || !gmem_buf || gmem_lo || size > VC_MAX_RANGE) return false;
     uint64_t lo = (addr - gwin_base) & ~(VC_PAGE - 1), hi = (addr - gwin_base + size + VC_PAGE - 1) & ~(VC_PAGE - 1);
     if (hi > gmem_size) return false;
     uint64_t pend = vk_pending_seq();
@@ -2643,13 +2674,14 @@ static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSi
     static int copy = -1;
     if (copy < 0) copy = ENV("LARECOMP_VK_COPY_VERTICES") != NULL;
     if (copy || addr < gwin_base) return false;
-    if (addr + size > gwin_base + gmem_size && gwin_want() != gmem_tried) { gmem_tried = gwin_want(); gmem_info(); }
-    if (!gmem_buf || addr + size > gwin_base + gmem_size) return false;
+    if (addr + size > gwin_base + gmem_lo + gmem_size && gwin_want() != gmem_tried) { gmem_tried = gwin_want(); gmem_info(); }
+    if (gmem_lo && xm_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }  // (the mirror needs no import)
+    if (!GM_IN(addr, size)) return false;
     if (vcache_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }
     if (!index && xm_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }
     stat_vtx_host += size;
     *buf = gmem_buf;
-    *off = addr - gwin_base;
+    *off = GM_OFF(addr);
     return true;
 }
 
@@ -2670,6 +2702,7 @@ void vk_exec_reset(void) {
         gmem_mem = VK_NULL_HANDLE;
     }
     gmem_size = gmem_tried = 0;
+    gmem_lo = 0;
     xm_lo = 0, xm_back_n = 0;  // (the transform feedback mirror: placed again, nothing written yet)
     memset(xm_written, 0, sizeof xm_written);
     for (int i = 0; i < VC_TAB; i++)  // (the vertex cache: copies of the old pages)
@@ -2757,7 +2790,8 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         for (int b = 0; b < 4; b++) {
             uint64_t a = xfb_addr[b];
             if (!a || a < gwin_base || a - gwin_base + xfb_size[b] > gwin_max || (a & 3)) continue;
-            uint64_t base = xm_draw ? xm_lo : gwin_base;  // (the transform feedback mirror's offsets, or the heap's)
+            uint64_t base = xm_draw ? xm_lo : gwin_base + gmem_lo;  // (the transform feedback mirror's offsets, or the import's)
+            if (a < base) continue;
             uint32_t u[4] = {(uint32_t)((a - base) >> 2), (uint32_t)(xfb_size[b] >> 2), 1, 0};  // (offset, size in words)
             memcpy(rs[66 + b], u, 16);
         }
@@ -2846,8 +2880,7 @@ static CsProg *compute_program(NvnProgram *np) {
     for (int i = 0; i < n; i++) if (tab[i].addr == ss->code_addr) return tab[i].cp;
     CsProg *cp = calloc(1, sizeof *cp);
     if (n < 256) { tab[n].addr = ss->code_addr; tab[n].cp = cp; g_cs_n = n + 1; }
-    maxwell_gmem_base = gwin_base;
-    maxwell_gmem_size = gwin_max;
+    { uint64_t wl, wn; gmem_window_get(&wl, &wn); maxwell_gmem_base = gwin_base + wl; maxwell_gmem_size = wn; }
     ShaderKey k = {0};
     k.glsl = 1;
     pthread_mutex_lock(&translate_lock);
@@ -3591,8 +3624,8 @@ static void draw_(CmdRec *r, bool indexed) {
     dl_note("draw vs %llx fs %llx%s xfb %d", (unsigned long long)st.program->stages[0].code_addr,
             (unsigned long long)st.program->stages[1].code_addr, g_ind_gpu && ind_ok ? " indirect" : "", xfb_on);
     if (g_ind_gpu && ind_ok && dl_on > 0) {
-        dl_args[(dl_n - 1) & (DL_N - 1)] = gwin_base + g_ind_off;
-        memcpy(dl_snap[(dl_n - 1) & (DL_N - 1)], (const void *)(uintptr_t)(gwin_base + g_ind_off), 20);
+        dl_args[(dl_n - 1) & (DL_N - 1)] = gwin_base + gmem_lo + g_ind_off;
+        memcpy(dl_snap[(dl_n - 1) & (DL_N - 1)], (const void *)(uintptr_t)(gwin_base + gmem_lo + g_ind_off), 20);
     }
     if (dl_on > 0) vk_checkpoint(cb, dl_n);
     stat_draws++;
@@ -3725,7 +3758,7 @@ static void draw_indirect(CmdRec *r) {
         }
         uint64_t pa = ind + (uint64_t)i * stride;
         gmem_info();  // (the import, made on first use)
-        bool gpu = gmem_buf && pa >= gwin_base && pa - gwin_base + 20 <= gmem_size && !(pa & 3);
+        bool gpu = GM_IN(pa, 20) && !(pa & 3);
         if (gpu) {
             // The GPU fills in parts of the parameters (the instance count: Pokémon Z-A's culling compute), so the
             // draw reads them there; the CPU side covers the index range from the buffer's start (the first index
@@ -3736,7 +3769,7 @@ static void draw_indirect(CmdRec *r) {
                 gpu_args_log--;
                 vk_end_pass();
                 VkSpan rb = vk_readback(32);
-                VkBufferCopy bc = {pa - gwin_base, rb.off, 20};
+                VkBufferCopy bc = {GM_OFF(pa), rb.off, 20};
                 vk_full_barrier(vk_cmd());
                 vkCmdCopyBuffer(vk_cmd(), gmem_buf, rb.buf, 1, &bc);
                 renderer_flush();
@@ -3744,7 +3777,7 @@ static void draw_indirect(CmdRec *r) {
                 LOG("[vk] gpu args %llx: count %u instances %u first %u base %d base inst %u (cpu: %u %u)\n", (unsigned long long)pa,
                     q[0], q[1], q[2], (int)q[3], q[4], p[0], p[1]);
             }
-            g_ind_gpu = true; g_ind_off = pa - gwin_base; g_ind_stride = stride;
+            g_ind_gpu = true; g_ind_off = GM_OFF(pa); g_ind_stride = stride;
             d.x[0] = r->x[0];
             if (elements) {
                 d.x[1] = r->x[1]; d.x[2] = p[0] + p[2]; d.x[3] = r->x[2];
@@ -4588,9 +4621,9 @@ static void exec_list(uint64_t handle, int depth) {
                 vk_end_pass();
                 for (int b = 0; b < 3; b++) {
                     uint64_t a = xfb_addr[b];
-                    if (!a || a < gwin_base || a - gwin_base + 64 > gmem_size) continue;
+                    if (!a || !GM_IN(a, 64)) continue;
                     VkSpan rb = vk_readback(64);
-                    VkBufferCopy bc = {a - gwin_base, rb.off, 64};
+                    VkBufferCopy bc = {GM_OFF(a), rb.off, 64};
                     vk_full_barrier(vk_cmd());
                     vkCmdCopyBuffer(vk_cmd(), gmem_buf, rb.buf, 1, &bc);
                     renderer_flush();

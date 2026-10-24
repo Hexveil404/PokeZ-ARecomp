@@ -112,3 +112,26 @@ The aarch64 AppImage is experimental: built on x86-64, only its start screen has
 
    (Adjust the `squashfs-root` path to where you extracted it. The game itself uses SIGSEGV for memory watches, hence
    the `handle` line; a real crash still ends in the backtrace. Attach `gdb.txt`.)
+
+## Steam Deck (SteamOS, Pokémon Legends: Z-A)
+Measured 2026-10-24 on a Steam Deck (Van Gogh APU, 14 GB RAM, SteamOS kernel 6.18, Mesa 25.2.8 RADV, Vulkan 1.4), Z-A 2.0.0
+from the player's own dump, built from this repository on x86-64 Linux. Nothing from the game is in this document.
+
+What to expect: with the Vulkan fixes of pull requests #7-#12 (compute in 32-lane subgroups, index buffers not from the
+transform-feedback mirror, depth clamp, the guest-heap import as a window on integrated GPUs, the SSY/PBK scalars and BRX
+labels in the shader translator) the opening scene in Lumiose runs at about 29 fps at 1280x800 with the first station drawn
+completely (arches, lamps, walls, shadows). Measured over 1500 scripted frames: #7 alone 3 fps, #7-#10 5 fps, #7-#12 29.4 fps.
+Without #7 the translated compute shaders can hang the GPU on AMD (`sr failed -4`). The first load of a scene compiles
+shaders (a few seconds of skipped draws); later runs reuse the caches.
+
+Build: SteamOS' root file system is read-only and has no compiler, so build in a container (distrobox, Ubuntu 24.04 or
+any recent distribution) with the packages above plus SDL3 built from source into a prefix (`DEPS=<prefix>`), then
+`make gen` and `make -j8 DEPS=<prefix> B=build/o1 GENOPT="-O1 -DGUEST_VOLATILE"`. clang 18 can sit for an hour on one giant
+generated function at -O1: build such objects at -O0. Run `build/o1/lasrecomp extracted --play` inside the container (it
+shares the host's display and GPU); add the launcher script to Steam as a non-Steam game to play in Game Mode.
+Do not touch a header to force a rebuild: every generated object depends on them (1411 objects, 34 minutes on the Deck).
+
+Switches: `LARECOMP_VK_CS_SUBGROUP=0` leaves compute to the driver's 64-lane waves (wrong culling, possible hang),
+`LARECOMP_VK_GMEM_WINDOW=0` imports the whole 3.2 GB heap again (87 % of the render thread then goes into
+`vkQueueSubmit2`). `perf record -t <render thread>` sees user space only (perf_event_paranoid=2); the `[vk] t=` log line's
+`submit` ms shows the kernel time inside the submit ioctl.

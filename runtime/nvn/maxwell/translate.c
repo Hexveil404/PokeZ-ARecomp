@@ -3,7 +3,8 @@
 // The binary is an NVN header (0x30), the shader program header (SPH, 0x50; graphics stages), then
 // instructions in groups of four 64-bit words (one scheduling word + three instructions).
 // Registers are emitted as `uint` variables; float ops use as_type<> conversions. Shaders with
-// branches become a `switch (pc)` state machine with explicit SSY/PBK/PCNT stacks.
+// branches become a `switch (pc)` state machine with explicit SSY/PBK/PCNT stacks (SSY / PBK: 16 scalar variables shifted on push /
+// pop, not arrays: a dynamically indexed per-thread array lands in scratch memory on AMD, and these shaders use it constantly).
 //
 // GLSL: the instruction body is generated in the MSL spelling and converted by glsl_rewrite() (a token-aware
 // pass: as_type<T>() -> as_u/as_f overloads, float4 -> vec4, ulong -> uint64_t, char()/short() casts -> sx8/sx16,
@@ -1092,19 +1093,19 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         sp(&c->body, "    pc = %uu; continue;\n", target);
     } else if (OPM(0xe290000000000000ull, 0xfff0000000000020ull)) {  // SSY
         c->uses_branches = true;
-        sp(&c->body, "    ssy[ssy_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
+        sp(&c->body, "    ssy_15 = ssy_14; ssy_14 = ssy_13; ssy_13 = ssy_12; ssy_12 = ssy_11; ssy_11 = ssy_10; ssy_10 = ssy_9; ssy_9 = ssy_8; ssy_8 = ssy_7; ssy_7 = ssy_6; ssy_6 = ssy_5; ssy_5 = ssy_4; ssy_4 = ssy_3; ssy_3 = ssy_2; ssy_2 = ssy_1; ssy_1 = ssy_0; ssy_0 = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
     } else if (OPM(0xe2a0000000000000ull, 0xfff0000000000020ull)) {  // PBK
         c->uses_branches = true;
-        sp(&c->body, "    pbk[pbk_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
+        sp(&c->body, "    pbk_15 = pbk_14; pbk_14 = pbk_13; pbk_13 = pbk_12; pbk_12 = pbk_11; pbk_11 = pbk_10; pbk_10 = pbk_9; pbk_9 = pbk_8; pbk_8 = pbk_7; pbk_7 = pbk_6; pbk_6 = pbk_5; pbk_5 = pbk_4; pbk_4 = pbk_3; pbk_3 = pbk_2; pbk_2 = pbk_1; pbk_1 = pbk_0; pbk_0 = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
     } else if (OPM(0xe2b0000000000000ull, 0xfff0000000000020ull)) {  // PCNT
         c->uses_branches = true;
-        sp(&c->body, "    pcnt[pcnt_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
+        sp(&c->body, "    pcnt_0 = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
     } else if (OPM(0xf0f8000000000000ull, 0xfff8000000000000ull)) {  // SYNC
-        sp(&c->body, "    pc = ssy[--ssy_n]; continue;\n");
+        sp(&c->body, "    pc = ssy_0; ssy_0 = ssy_1; ssy_1 = ssy_2; ssy_2 = ssy_3; ssy_3 = ssy_4; ssy_4 = ssy_5; ssy_5 = ssy_6; ssy_6 = ssy_7; ssy_7 = ssy_8; ssy_8 = ssy_9; ssy_9 = ssy_10; ssy_10 = ssy_11; ssy_11 = ssy_12; ssy_12 = ssy_13; ssy_13 = ssy_14; ssy_14 = ssy_15; continue;\n");
     } else if (OPM(0xe340000000000000ull, 0xfff0000000000000ull)) {  // BRK
-        sp(&c->body, "    pc = pbk[--pbk_n]; continue;\n");
+        sp(&c->body, "    pc = pbk_0; pbk_0 = pbk_1; pbk_1 = pbk_2; pbk_2 = pbk_3; pbk_3 = pbk_4; pbk_4 = pbk_5; pbk_5 = pbk_6; pbk_6 = pbk_7; pbk_7 = pbk_8; pbk_8 = pbk_9; pbk_9 = pbk_10; pbk_10 = pbk_11; pbk_11 = pbk_12; pbk_12 = pbk_13; pbk_13 = pbk_14; pbk_14 = pbk_15; continue;\n");
     } else if (OPM(0xe350000000000000ull, 0xfff0000000000000ull)) {  // CONT
-        sp(&c->body, "    pc = pcnt[pcnt_n - 1]; continue;\n");
+        sp(&c->body, "    pc = pcnt_0; continue;\n");
     } else if (OPM(0xf0f0000000000000ull, 0xfff8000000000000ull) || OPM(0x50b0000000000000ull, 0xfff8000000000000ull) ||
                OPM(0xef98000000000000ull, 0xfff8000000000000ull)) {
         // DEPBAR / NOP / MEMBAR
@@ -2191,7 +2192,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->uses_local) sp(&s, "  uint lmem[%d]; for (int li_ = 0; li_ < %d; li_++) lmem[li_] = 0u;\n", LMEM_WORDS, LMEM_WORDS);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch) {
-        sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0u; uint pbk[16]; uint pbk_n = 0u; uint pcnt[16]; uint pcnt_n = 0u;\n");
+        sp(&s, "  uint pc = 8u; uint ssy_0 = 0u; uint ssy_1 = 0u; uint ssy_2 = 0u; uint ssy_3 = 0u; uint ssy_4 = 0u; uint ssy_5 = 0u; uint ssy_6 = 0u; uint ssy_7 = 0u; uint ssy_8 = 0u; uint ssy_9 = 0u; uint ssy_10 = 0u; uint ssy_11 = 0u; uint ssy_12 = 0u; uint ssy_13 = 0u; uint ssy_14 = 0u; uint ssy_15 = 0u; uint pbk_0 = 0u; uint pbk_1 = 0u; uint pbk_2 = 0u; uint pbk_3 = 0u; uint pbk_4 = 0u; uint pbk_5 = 0u; uint pbk_6 = 0u; uint pbk_7 = 0u; uint pbk_8 = 0u; uint pbk_9 = 0u; uint pbk_10 = 0u; uint pbk_11 = 0u; uint pbk_12 = 0u; uint pbk_13 = 0u; uint pbk_14 = 0u; uint pbk_15 = 0u; uint pcnt_0 = 0u;\n");
         sp(&s, "  bool exit_now = false;\n");
         sp(&s, "  for (uint guard = 0u; guard < 100000u; guard++) {\n  switch (pc) {\n");
         sp(&s, "%s", body.buf ? body.buf : "");
@@ -2257,6 +2258,57 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     return info;
 }
 
+// BRX (indirect branch, Vulkan / GLSL only): label just the targets its jump table can name. A BRX used to make every
+// instruction a case of the dispatcher switch (any one may be a target): hundreds of cases falling into each other
+// inside the dispatcher loop. Suspected of what AMD's Windows driver never finishes building (issue #237: the dialogue
+// body text's vertex shader stayed "building", its draws skipped - Tarin's name showed, the message stayed blank).
+// The compiler puts the table in the program's own constants (cb1, after the code: blob + const_offset), loaded into
+// the BRX register by an LDC c[0x1][Rx + table] shortly before: BRX Ra, imm goes to pc + 8 + table[k] + imm. Entries
+// are read until one isn't an instruction of this shader (the end of the table; a word past it that still looks like
+// one only adds a harmless case). False: not that shape (the register set some other way, no constants, nothing
+// valid) - the caller labels every instruction as before. LARECOMP_BRX_ALL_LABELS=1: always every instruction.
+static bool brx_table_labels(const uint8_t *code, size_t i, size_t end, const uint8_t *blob, size_t const_offset, uint8_t *label) {
+    static int all = -1;
+    if (all < 0) { const char *e = getenv("LARECOMP_BRX_ALL_LABELS"); all = e && atoi(e) != 0; }
+    if (all || const_offset >= 0x10000 || const_offset < 0x80) return false;  // (0x10000: no constants known)
+    uint64_t brx = ((const uint64_t *)code)[i];
+    int ra = (int)bits(brx, 8, 8);
+    int64_t imm = sbits(brx, 20, 24);
+    if (ra == RZ) return false;
+    // the instruction that set ra: an LDC from cb1 within the few before, nothing else writing ra (or a branch) between
+    int64_t table = -1;
+    for (size_t k = i, seen = 0; k-- > 0 && seen < 32;) {
+        if (k % 4 == 0) continue;  // (scheduling words)
+        seen++;
+        uint64_t w = ((const uint64_t *)code)[k];
+        if ((w & 0xfff0000000000000ull) >= 0xe200000000000000ull && (w & 0xfff0000000000000ull) <= 0xe350000000000000ull)
+            return false;  // flow control between: not straight-line
+        if ((w & 0xfff8000000000000ull) == 0xef90000000000000ull && (int)bits(w, 0, 8) == ra) {  // LDC ra, c[idx][Rx + off]
+            if (bits(w, 36, 5) != 1 || bits(w, 48, 3) != 4) return false;  // (cb1, 32-bit)
+            table = (int64_t)bits(w, 20, 16);
+            break;
+        }
+        if ((int)bits(w, 0, 8) == ra) return false;  // (something else may write ra: unknown)
+    }
+    if (table < 0) return false;
+    const uint8_t *tab = blob + const_offset + table;
+    uint8_t *mark = calloc(end + 4, 1);
+    int n = 0;
+    for (int k = 0; k < 256; k++) {
+        int32_t v;
+        memcpy(&v, tab + 4 * k, 4);
+        int64_t t = (int64_t)i * 8 + 8 + v + imm;
+        if (t < 8 || (t & 7) || (size_t)(t / 8) >= end) break;
+        t = norm_target(t);  // (as the BRX itself does at run time)
+        if ((size_t)(t / 8) >= end) break;
+        mark[t / 8] = 1;
+        n++;
+    }
+    if (n) for (size_t k = 0; k < end; k++) label[k] |= mark[k];
+    free(mark);
+    return n > 0;
+}
+
 ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key) {
     ShaderInfo *info = calloc(1, sizeof *info);
     info->stage = stage;
@@ -2303,9 +2355,9 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
             if (t >= 0 && (size_t)(t / 8) < end) label[t / 8] = 1;
             any_branch = true;
         }
-        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: any instruction may be a target
+        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: its jump table's targets, else any instruction
             any_branch = true;
-            memset(label, 1, end);
+            if (!c->glsl || !brx_table_labels(code, i, end, blob, max_size, label)) memset(label, 1, end);
         }
         if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || (w & 0xfff0000000000000ull) == 0xe340000000000000ull ||
             (w & 0xfff0000000000000ull) == 0xe350000000000000ull)
@@ -2437,7 +2489,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     if (c->uses_local) sp(&s, "  uint lmem[%d] = {};\n", LMEM_WORDS);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch) {
-        sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0; uint pbk[16]; uint pbk_n = 0; uint pcnt[16]; uint pcnt_n = 0;\n");
+        sp(&s, "  uint pc = 8u; uint ssy_0 = 0u; uint ssy_1 = 0u; uint ssy_2 = 0u; uint ssy_3 = 0u; uint ssy_4 = 0u; uint ssy_5 = 0u; uint ssy_6 = 0u; uint ssy_7 = 0u; uint ssy_8 = 0u; uint ssy_9 = 0u; uint ssy_10 = 0u; uint ssy_11 = 0u; uint ssy_12 = 0u; uint ssy_13 = 0u; uint ssy_14 = 0u; uint ssy_15 = 0u; uint pbk_0 = 0u; uint pbk_1 = 0u; uint pbk_2 = 0u; uint pbk_3 = 0u; uint pbk_4 = 0u; uint pbk_5 = 0u; uint pbk_6 = 0u; uint pbk_7 = 0u; uint pbk_8 = 0u; uint pbk_9 = 0u; uint pbk_10 = 0u; uint pbk_11 = 0u; uint pbk_12 = 0u; uint pbk_13 = 0u; uint pbk_14 = 0u; uint pbk_15 = 0u; uint pcnt_0 = 0u;\n");
         sp(&s, "  bool exit_now = false;\n");
         sp(&s, "  for (uint guard = 0; guard < 100000u; guard++) {\n  switch (pc) {\n");
         sp(&s, "%s", c->body.buf ? c->body.buf : "");

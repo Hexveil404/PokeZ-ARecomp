@@ -120,7 +120,7 @@ void settings_load(void) {
         else if (!strcmp(key, "hide_hero_icon")) g_settings.hide_hero_icon = atoi(val) != 0;
         else if (!strcmp(key, "mirror_mode")) g_settings.mirror_mode = atoi(val) != 0;
         else if (!strcmp(key, "prompts")) g_settings.prompts = !strcmp(val, "nintendo") ? PROMPTS_NINTENDO : !strcmp(val, "xbox") ?
-                                                              PROMPTS_XBOX : !strcmp(val, "playstation") ? PROMPTS_PLAYSTATION : !strcmp(val, "keyboard") ? PROMPTS_KEYBOARD : PROMPTS_AUTO;
+                                                              PROMPTS_XBOX : !strcmp(val, "playstation") ? PROMPTS_PLAYSTATION : !strcmp(val, "keyboard") ? PROMPTS_KEYBOARD : !strcmp(val, "steamdeck") ? PROMPTS_STEAMDECK : PROMPTS_AUTO;
         else if (!strcmp(key, "language")) {  // ("auto" or one of the game's codes; anything else: auto)
             g_settings.language = LANG_AUTO;
             for (int i = 1; i < N_LANGUAGES; i++)
@@ -183,8 +183,8 @@ void settings_save(void) {
             g_settings.mouse_sens);
     fprintf(f, "move_360 = %d\nblur_removal = %d\nhide_hero_icon = %d\n", g_settings.move_360, g_settings.blur_removal,
             g_settings.hide_hero_icon);
-    static const char *const prompts[] = {"auto", "nintendo", "xbox", "playstation", "keyboard"};
-    fprintf(f, "prompts = %s\n", prompts[g_settings.prompts <= 4 ? g_settings.prompts : 0]);
+    static const char *const prompts[] = {"auto", "nintendo", "xbox", "playstation", "keyboard", "steamdeck"};
+    fprintf(f, "prompts = %s\n", prompts[g_settings.prompts <= 5 ? g_settings.prompts : 0]);
     fprintf(f, "mirror_mode = %d\n", g_settings.mirror_mode);
     fprintf(f, "language = %s\n", g_language_codes[g_settings.language > LANG_AUTO && g_settings.language < N_LANGUAGES
                                                      ? g_settings.language : LANG_AUTO]);
@@ -203,4 +203,16 @@ void settings_save(void) {
     bind_settings_save(f);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
     fclose(f);
+}
+
+/// True on a Steam Deck (DMI vendor "Valve"): "Auto" button icons then use the Deck's own names (L1 R1 L2 R2 L3 R3).
+int settings_on_steam_deck(void) {
+    static int deck = -1;
+    if (deck < 0) {
+        char v[32] = "";
+        FILE *f = fopen("/sys/class/dmi/id/sys_vendor", "r");
+        if (f) { if (!fgets(v, sizeof v, f)) v[0] = 0; fclose(f); }
+        deck = !strncmp(v, "Valve", 5);
+    }
+    return deck;
 }

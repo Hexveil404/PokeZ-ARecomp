@@ -38,7 +38,7 @@
 enum { K_BC5, K_BC3, K_ASTC4, K_RGBA8, K_BC1 };
 enum { R_A = 1, R_B, R_X, R_Y, R_L, R_R, R_ZL, R_ZR, R_PLUS, R_MINUS, R_HERO, R_SHEET, R_BOTTLE, R_BOTTLE_MODEL, R_FAIRY_MODEL,
        R_ITEM_CURSOR, R_TUNIC, R_TUNIC_RED, R_TUNIC_BLUE, R_HEART, R_POWDER_MODEL };
-enum { STYLE_NINTENDO, STYLE_XBOX, STYLE_PS };
+enum { STYLE_NINTENDO, STYLE_XBOX, STYLE_PS, STYLE_DECK };  // (DECK: Xbox's faces, Steam Deck's names for the rest)
 // labels: R_A..R_MINUS = the button that role is on by default; or these
 enum { L_LS = 32, L_RS, L_DUP, L_DDOWN, L_DLEFT, L_DRIGHT, L_OTHER };
 
@@ -276,16 +276,19 @@ static int prompt_style(void) {
     if (env == -2) {
         const char *e = getenv("LARECOMP_PROMPTS");
         env = !e ? -1 : !strcmp(e, "xbox") ? PROMPTS_XBOX : !strcmp(e, "playstation") ? PROMPTS_PLAYSTATION :
-              !strcmp(e, "nintendo") ? PROMPTS_NINTENDO : PROMPTS_AUTO;
+              !strcmp(e, "nintendo") ? PROMPTS_NINTENDO : !strcmp(e, "steamdeck") ? PROMPTS_STEAMDECK : PROMPTS_AUTO;
         until = getenv("LARECOMP_PROMPTS_UNTIL") ? atol(getenv("LARECOMP_PROMPTS_UNTIL")) : -1;
     }
     extern uint64_t renderer_present_count(void);
     int p = env >= 0 && (until < 0 || (long)renderer_present_count() < until) ? env : g_settings.prompts;
+    extern int settings_on_steam_deck(void);
+    if (p == PROMPTS_STEAMDECK) return STYLE_DECK;
     if (p == PROMPTS_XBOX) return STYLE_XBOX;
     if (p == PROMPTS_PLAYSTATION) return STYLE_PS;
     if (p == PROMPTS_NINTENDO) return STYLE_NINTENDO;
     extern int input_pad_family(void);  // runtime/hle/input.c: the controller SDL reports
     int f = input_pad_family();
+    if (settings_on_steam_deck() && f != 2) return STYLE_DECK;
     return f == 1 ? STYLE_XBOX : f == 2 ? STYLE_PS : STYLE_NINTENDO;
 }
 
@@ -612,7 +615,7 @@ static bool draw_label(int role, int style, float *cv, bool *symbol) {
     }
     if (role == L_OTHER) { draw_ring(cv, 128, 128, 40, 80); return true; }  // a paddle / extra button: a dot
     if (role == L_LS || role == L_RS)
-        return draw_text(cv, style == STYLE_PS ? (role == L_LS ? "L3" : "R3") : (role == L_LS ? "LS" : "RS"));
+        return draw_text(cv, style == STYLE_PS || style == STYLE_DECK ? (role == L_LS ? "L3" : "R3") : (role == L_LS ? "LS" : "RS"));
     if (style == STYLE_NINTENDO && role == R_PLUS) {
         Seg s[2] = {{128, 40, 128, 216}, {40, 128, 216, 128}};
         draw_segs(cv, s, 2, 18);
@@ -629,7 +632,7 @@ static bool draw_label(int role, int style, float *cv, bool *symbol) {
         return true;
     }
     if (role == R_MINUS) {
-        if (style == STYLE_XBOX) {  // View: two overlapping windows
+        if (style == STYLE_XBOX || style == STYLE_DECK) {  // View: two overlapping windows
             draw_rect(cv, 92, 40, 220, 140, 22);
             for (int y = 104; y < 228; y++) for (int x = 24; x < 164; x++) cv[y * CV + x] = 0;  // (front window hides the back)
             draw_rect(cv, 36, 116, 152, 216, 22);
@@ -650,9 +653,10 @@ static bool draw_label(int role, int style, float *cv, bool *symbol) {
     }
     static const char *const xbox[] = {"", "B", "A", "Y", "X", "LB", "RB", "LT", "RT"};
     static const char *const ps[] = {"", "", "", "", "", "L1", "R1", "L2", "R2"};
+    static const char *const deck[] = {"", "B", "A", "Y", "X", "L1", "R1", "L2", "R2"};
     static const char *const nin[] = {"", "A", "B", "X", "Y", "L", "R", "ZL", "ZR"};
     if (role > R_ZR) return false;
-    return draw_text(cv, style == STYLE_XBOX ? xbox[role] : style == STYLE_PS ? ps[role] : nin[role]);
+    return draw_text(cv, style == STYLE_DECK ? deck[role] : style == STYLE_XBOX ? xbox[role] : style == STYLE_PS ? ps[role] : nin[role]);
 }
 
 // Relabel one glyph: img (W x H RGBA8, alpha channel `ach` = the shape), region x0,y0 w,h. flip: the region is

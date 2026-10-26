@@ -6,6 +6,7 @@
 # settings file's bindings (else the defaults): each icon names what the player presses for that input.
 #   keyboard     - keys with the bound keys' names (bind_key_*)
 #   xbox         - the Xbox pad's button bound to each input (bind_pad_*): A B X Y, LB RB LT RT, Menu View
+#   steamdeck    - the Xbox faces with the Deck's own names: A B X Y, L1 R1 L2 R2, L3 R3, Menu View
 #   playstation  - the same in PlayStation's: cross circle square triangle, L1 R1 L2 R2, Options Share
 #   nintendo     - a Nintendo controller: only inputs moved off their own button get a new label
 #
@@ -28,7 +29,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument('--romfs', action='append', help='game files: a folder or a RomFS image (default extracted/romfs, else '
                                                   'extracted/romfs.bin); more than once: several game versions')
 ap.add_argument('--ooz', help='ooz shared library (ooz_decompress export; default: ooz.dll / libooz.so next to this program)')
-ap.add_argument('--styles', default='keyboard,xbox,playstation,nintendo', help='the sets to make')
+ap.add_argument('--styles', default='keyboard,xbox,steamdeck,playstation,nintendo', help='the sets to make')
 ap.add_argument('--list', metavar='REGEX', help="print the UI archives' textures whose name matches (then make nothing)")
 ap.add_argument('--list-dir', help='with --list: save the BC5 ones there as PNG (red = label, green = shape)')
 ap.add_argument('--install', metavar='VERSION', help='made into <out>.new, then <out>/.made = VERSION and swapped in '
@@ -281,6 +282,10 @@ PAD_LABEL = {
     'xbox': {'south': 'A', 'east': 'B', 'west': 'X', 'north': 'Y', 'lshoulder': 'LB', 'rshoulder': 'RB',
              'ltrigger': 'LT', 'rtrigger': 'RT', 'start': ('menu',), 'back': ('view',), 'lstick': 'LS', 'rstick': 'RS',
              'guide': 'XB', 'misc1': 'SH', 'rpaddle1': 'P1', 'lpaddle1': 'P3', 'rpaddle2': 'P2', 'lpaddle2': 'P4'},
+    # the Deck: Xbox's faces and Menu / View, its own names for the shoulders, triggers, sticks and back buttons
+    'steamdeck': {'south': 'A', 'east': 'B', 'west': 'X', 'north': 'Y', 'lshoulder': 'L1', 'rshoulder': 'R1',
+                  'ltrigger': 'L2', 'rtrigger': 'R2', 'start': ('menu',), 'back': ('view',), 'lstick': 'L3', 'rstick': 'R3',
+                  'guide': 'ST', 'misc1': 'QA', 'rpaddle1': 'R4', 'lpaddle1': 'L4', 'rpaddle2': 'R5', 'lpaddle2': 'L5'},
     'playstation': {'south': ('cross',), 'east': ('circle',), 'west': ('square',), 'north': ('triangle',),
                     'lshoulder': 'L1', 'rshoulder': 'R1', 'ltrigger': 'L2', 'rtrigger': 'R2', 'start': ('options',),
                     'back': ('share',), 'lstick': 'L3', 'rstick': 'R3', 'guide': 'PS', 'touchpad': 'TP',

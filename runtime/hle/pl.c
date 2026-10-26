@@ -154,11 +154,13 @@ const char *pl_prompt_set(void) {
     extern int16_t g_bind_pad[];
     bool pad = SDL_HasGamepad();
     int fam = pad ? bind_label_family() : 0;
-    bool xbox = g_settings.prompts == PROMPTS_XBOX || (g_settings.prompts == PROMPTS_AUTO && fam == 1);
+    extern int settings_on_steam_deck(void);
+    bool deck = g_settings.prompts == PROMPTS_STEAMDECK || (g_settings.prompts == PROMPTS_AUTO && fam != 2 && settings_on_steam_deck());  // (a Deck is a pad, also when SDL has not opened its controller yet at boot)
+    bool xbox = !deck && (g_settings.prompts == PROMPTS_XBOX || (g_settings.prompts == PROMPTS_AUTO && fam == 1));
     bool ps = g_settings.prompts == PROMPTS_PLAYSTATION || (g_settings.prompts == PROMPTS_AUTO && fam == 2);
-    bool keys = g_settings.prompts == PROMPTS_KEYBOARD || (g_settings.prompts == PROMPTS_AUTO && !pad);
+    bool keys = g_settings.prompts == PROMPTS_KEYBOARD || (g_settings.prompts == PROMPTS_AUTO && !pad && !deck);
     (void)g_bind_pad;  // (each set is made for the bindings: runtime/ui/launcher.mm remakes them when those change)
-    set = keys ? "keyboard" : xbox ? "xbox" : ps ? "playstation" : pad ? "nintendo" : NULL;
+    set = keys ? "keyboard" : deck ? "steamdeck" : xbox ? "xbox" : ps ? "playstation" : pad ? "nintendo" : NULL;
     return set;
 }
 

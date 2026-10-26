@@ -1,6 +1,7 @@
 # Makes the Xbox button glyph fonts from your NintendoExt / Standard font dumps (tools/za/nca_font.py):
 #   fonts/nintendo_ext_003_xbox.ttf       controls by position (default: the Switch's A on the east button = Xbox B):
 #                                         the circled A/B and X/Y glyphs trade places
+#   fonts/nintendo_ext_003_steamdeck.ttf   the same by position, with the Deck's L1 R1 L2 R2
 #   fonts/nintendo_ext_003_xboxlabel.ttf  controls by letter (bind_pad_a = south ...): A B X Y as they are
 # In both, the shoulder / trigger / menu glyphs get the Xbox pad's names: L R ZL ZR -> LB RB LT RT, + - -> Menu / View
 # (outline U+E0A0.., filled U+E0E0..), as keys lettered with the Standard font. runtime/hle/pl.c picks one when the
@@ -35,7 +36,10 @@ def rect(pen, x0, y0, x1, y1, r, cw):
     pen.closePath()
 
 
-def build(out, swap):
+DECK = {'LB': 'L1', 'RB': 'R1', 'LT': 'L2', 'RT': 'R2'}  # the Steam Deck's names for the same four
+
+
+def build(out, swap, names=None):
     ext = bfttf('fonts/nintendo_ext_003.bfttf')
     std = bfttf('fonts/nintendo_udsg-r_std_003.bfttf')
     ecmap, scmap = ext.getBestCmap(), std.getBestCmap()
@@ -43,6 +47,7 @@ def build(out, swap):
     glyf, hmtx = ext['glyf'], ext['hmtx']
     upm_s = std['head'].unitsPerEm
     for cps, label in RELABEL.items():
+        label = (names or {}).get(label, label)
         for filled, cp in zip((False, True), cps):
             name = ecmap.get(cp)
             if not name:
@@ -83,3 +88,4 @@ def build(out, swap):
 
 build('fonts/nintendo_ext_003_xbox.ttf', swap=True)
 build('fonts/nintendo_ext_003_xboxlabel.ttf', swap=False)
+build('fonts/nintendo_ext_003_steamdeck.ttf', swap=True, names=DECK)

@@ -478,7 +478,7 @@ static bool import_packages(const std::vector<std::string> &pkgs, const std::str
 // Controls tab (both in the background: from the next start). zaprompts --install draws them into textures/prompts.new
 // and swaps that in whole itself (a game never sees half a set). Up to 3 tries per stamp (textures/prompts.tried):
 // failing leaves the game's own icons. Log: textures/prompts.log.
-#define PROMPTS_VERSION "2"
+#define PROMPTS_VERSION "3"
 static std::atomic<bool> g_prompts_busy{false};
 static PlatProc g_prompts_proc;  // (the one left running: a newer rebind ends it and starts over)
 static std::string prompts_stamp(void) {

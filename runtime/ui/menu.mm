@@ -33,6 +33,7 @@ void save_editor_on_open(void);
 void rando_tab_draw(float scale);
 bool warp_tab_draw(float scale);  // warp_tab.mm: true when a warp started
 extern "C" void cheats_draw(float scale);  // cheats.mm
+extern "C" int settings_on_steam_deck(void);  // settings.c
 extern "C" void difficulty_draw(float scale);  // difficulty.mm
 void controls_bindings_draw(float scale);  // controls_ui.mm
 #include "../input_bind.h"
@@ -624,9 +625,9 @@ static void tab_about(void) {
     {
         static const char *const fam[] = {"Nintendo", "Xbox", "PlayStation"};
         char autol[64];
-        snprintf(autol, sizeof autol, "Auto (%s)", fam[input_pad_family() % 3]);
-        const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation", "Keyboard"};  // (Keyboard: Z-A, from the next boot)
-        choice("Button icons", &g_settings.prompts, names, 5);
+        snprintf(autol, sizeof autol, "Auto (%s)", input_pad_family() == 1 && settings_on_steam_deck() ? "Steam Deck" : fam[input_pad_family() % 3]);
+        const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation", "Keyboard", "Steam Deck"};  // (Keyboard, Steam Deck: Z-A, from the next boot)
+        choice("Button icons", &g_settings.prompts, names, 6);
     }
     ImGui::Spacing();
     header("System language");

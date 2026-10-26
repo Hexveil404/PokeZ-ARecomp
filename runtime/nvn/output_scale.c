@@ -15,6 +15,9 @@
 #include "../settings.h"
 #include "output_scale.h"
 
+extern bool g_za_frame_hook;  // (hle/framepace.c) the game is Pokémon Z-A
+extern bool am_handheld(void);  // (services/am.c) the mode the game was told
+
 #define MAX_TEX 16384.0
 
 // Dynamic resolution: a factor on the Match display scale, 0.5 .. 1 in 0.05 steps.
@@ -77,14 +80,20 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
     else if (mode == RES_X15) h = 1.5;  // (between 1x and 2x: most of 2x's smoothing for about half its cost)
     else {
         h = reshape ? dh / 1080.0 : fit;  // Match display
+        if (g_za_frame_hook && am_handheld()) h *= 1080.0 / 720.0;
         if (mode == RES_DYNAMIC) { dyn_update(now, gpu_ms); h *= g_dyn; }
         else if (mode == RES_Q75) h *= 0.75;
         else if (mode == RES_Q25) h *= 0.25;
         else if (mode == RES_Q50) h *= 0.5;
     }
     h = fmax(h, 0.1);  // (.25x of a small window)
+    // The game sizes its render targets for the screen of the mode it was told (handheld: 1280x720, else 1920x1080), and
+    // sx/sy are relative to that size. A fixed N x means N times the game's own image; only "match the display" and dynamic
+    // resolution come from the window in units of the docked 1080 lines and need 1080/720 for a handheld game.
+    bool hh = g_za_frame_hook && am_handheld();
+    double base_w = hh ? 1280.0 : 1920.0, base_h = hh ? 720.0 : 1080.0;
     double sx = h * shape, sy = h;
-    double cap = fmin(MAX_TEX / (1920.0 * sx), MAX_TEX / (1080.0 * sy));
+    double cap = fmin(MAX_TEX / (base_w * sx), MAX_TEX / (base_h * sy));
     if (cap < 1.0) { sx *= cap; sy *= cap; }
     o->sx = sx; o->sy = sy; o->shape = shape;
     // where the image goes in the window: fills it when reshaped, else a fitted 16:9 box

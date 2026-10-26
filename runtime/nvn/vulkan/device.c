@@ -725,6 +725,14 @@ void backend_present(NvnTexture *t) {
         extern void widescreen_present_crop(uint64_t, double, float *, double *, double *, double *, double *);
         float crop[4];  // uv origin and size
         widescreen_present_crop(total_frames, shape, crop, &vx, &vy, &vw, &vh);
+        {   // the game's own crop of its window texture (handheld: 1280x720 of a 1920x1080 texture): only that part is the picture
+            extern int g_present_crop[4], g_present_tex[2];
+            const int *wc = g_present_crop, tw = g_present_tex[0], th = g_present_tex[1];
+            if (!ENV("LARECOMP_NO_WINDOW_CROP") && wc[2] > 0 && wc[3] > 0 && tw > 0 && th > 0 && (wc[2] < tw || wc[3] < th || wc[0] || wc[1])) {
+                float cx = (float)wc[0] / tw, cy = (float)wc[1] / th, cw = (float)wc[2] / tw, ch = (float)wc[3] / th;
+                crop[0] = cx + crop[0] * cw; crop[1] = cy + crop[1] * ch; crop[2] *= cw; crop[3] *= ch;
+            }
+        }
         widescreen_set_factor((float)shape);
         renderer_set_scale((float)sx, (float)sy);
         VkCommandBuffer cb = vk_cmd();

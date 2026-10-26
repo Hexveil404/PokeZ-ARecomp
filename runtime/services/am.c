@@ -39,6 +39,19 @@ static uint32_t new_event(void) {
 
 #define UNHANDLED(iface) LOG("[am] %s cmd %u (unhandled, ok)\n", iface, req->cmd)
 
+// The mode the game is told: docked (1080p, performance boost) or handheld (720p, normal). Handheld draws far fewer pixels, which is what
+// a Steam Deck's GPU can carry (docked: ~140 ms of GPU per frame in the city at 1920x1080, 1600 MHz).
+bool am_handheld(void) {   // (also the render scale's: runtime/nvn/output_scale.c)
+    static int v = -1;
+    extern int settings_on_steam_deck(void);
+    if (v < 0) {
+        const char *e = getenv("LARECOMP_OPERATION_MODE");
+        v = e ? !strcmp(e, "handheld") : g_settings.opmode == 2 || (g_settings.opmode == 0 && settings_on_steam_deck());
+        LOG("[am] game mode: %s (%s)\n", v ? "handheld" : "docked", e ? "LARECOMP_OPERATION_MODE" : g_settings.opmode ? "chosen" : "auto");
+    }
+    return v;
+}
+
 static void common_state_getter(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     switch (req->cmd) {
@@ -55,15 +68,15 @@ static void common_state_getter(Service *s, IpcReq *req, IpcResp *resp) {
         }
         pthread_mutex_unlock(&g_klock);
         break;
-    case 5: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;   // GetOperationMode: docked
-    case 6: OUT(uint32_t, 0) = 1; resp_size(resp, 4); break;  // GetPerformanceMode: boost
+    case 5: OUT(uint8_t, 0) = am_handheld() ? 0 : 1; resp_size(resp, 1); break;   // GetOperationMode: docked (handheld: LARECOMP_OPERATION_MODE=handheld, operation_mode in the ini)
+    case 6: OUT(uint32_t, 0) = am_handheld() ? 0 : 1; resp_size(resp, 4); break;  // GetPerformanceMode: boost (handheld: normal)
     case 8: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;   // GetBootMode
     case 9: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;   // GetCurrentFocusState: in focus
     case 13: case 61: resp->copy_handles[resp->ncopy++] = new_event(); break;
     case 60: {  // GetDefaultDisplayResolution
-        int w = getenv("LARECOMP_DISPLAY_W") ? atoi(getenv("LARECOMP_DISPLAY_W")) : 1920;
-        LOG("[am] GetDefaultDisplayResolution -> %dx1080\n", w);
-        OUT(int32_t, 0) = w; OUT(int32_t, 4) = 1080; resp_size(resp, 8); break;
+        int h = am_handheld() ? 720 : 1080, w = getenv("LARECOMP_DISPLAY_W") ? atoi(getenv("LARECOMP_DISPLAY_W")) : h * 16 / 9;
+        LOG("[am] GetDefaultDisplayResolution -> %dx%d (%s)\n", w, h, am_handheld() ? "handheld" : "docked");
+        OUT(int32_t, 0) = w; OUT(int32_t, 4) = h; resp_size(resp, 8); break;
     }
     default: UNHANDLED("ICommonStateGetter");
     }

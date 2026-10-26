@@ -486,6 +486,18 @@ static void tab_display(void) {
                 g_settings.game_drs = dr == 1;
         }
     }
+    {   // the mode the game is told it runs in (runtime/services/am.c): read when the game starts
+        extern bool g_za_frame_hook;
+        if (g_za_frame_hook) {
+            int hh = g_settings.opmode;
+            static const char *modes[] = {"Auto (handheld on a Steam Deck)", "Docked (1080p)", "Handheld (720p)"};
+            if (opt_choice("Game mode", &hh, modes, 3, 0,
+                           "The mode the game believes it runs in, from the next start. Handheld: the game draws 720p and lighter "
+                           "effects, like on the Switch's own screen - far less for the GPU (a Steam Deck: ~25 fps instead of ~12). "
+                           "Docked: 1080p. Auto picks handheld on a Steam Deck."))
+                g_settings.opmode = hh;
+        }
+    }
     {   // HD texture pack (textures/hd: runtime/nvn/vulkan/textures.c hd_switch, tools/za/hd_pack.py): switches at once
         int tx = g_settings.tex_hd ? 1 : 0;
         static const char *tex[] = {"Original", "HD"};

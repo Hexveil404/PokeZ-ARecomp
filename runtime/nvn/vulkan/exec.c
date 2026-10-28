@@ -6414,10 +6414,14 @@ static void draw_(CmdRec *r, bool indexed) {
     // the light's planes - and in passes without depth - the UI: its quads ask for it, and some lie outside the depth
     // range, the item-count window after using a candy stayed hidden; not in colour passes with depth: Vulkan's clamp
     // also turns off near clipping, and a big mesh with triangles behind the camera spread across the screen as huge
-    // dark sheets), primitive restart and the depth / stencil state in the pipeline on Vulkan 1.2 drivers
+    // dark sheets; but in colour passes onto a square depth target - Pokémon Z-A's sun shadow maps, 1024x1024 x 3
+    // cascades drawn with an 8-bit colour target beside: unclamped, the buildings past the nearest cascade's light planes
+    // were clipped from it and their shadows cut off at a line that moved with the player, #43), primitive restart and
+    // the depth / stencil state in the pipeline on Vulkan 1.2 drivers
     static int noclamp = -1, clamp_color = -1;  // LARECOMP_VK_NO_DEPTH_CLAMP=1: ignored; LARECOMP_VK_CLAMP_COLOR=1: in every pass
     if (noclamp < 0) noclamp = ENV("LARECOMP_VK_NO_DEPTH_CLAMP") != NULL, clamp_color = ENV("LARECOMP_VK_CLAMP_COLOR") != NULL;
-    uint8_t dclamp = st.depth_clamp && !noclamp && (!pass_ncolor || !pass_depth || clamp_color);
+    bool square_depth = st.rt.depth && st.rt.depth->width == st.rt.depth->height;
+    uint8_t dclamp = st.depth_clamp && !noclamp && (!pass_ncolor || !pass_depth || square_depth || clamp_color);
     uint8_t restart = g_vkc.no_eds2 && st.prim_restart && native && (mode == 3 || mode == 5);  // (as SS_PRE below)
     FixedState fx;
     fixed_state(&fx, vkey.flip_x, vkey.flip_y, native, topo);

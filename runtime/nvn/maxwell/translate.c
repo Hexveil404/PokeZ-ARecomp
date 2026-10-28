@@ -873,10 +873,23 @@ static void emit_atom(Ctx *c, uint64_t w, bool red) {
     static const char *const direct[] = {"atomicAdd", "atomicMin", "atomicMax", NULL, NULL, "atomicAnd", "atomicOr",
                                          "atomicXor", "atomicExchange"};
     bool sgn = size == 1;
+    static const char *const gma[] = {"GMA_ADD", "GMA_MIN", "GMA_MAX", NULL, NULL, "GMA_AND", "GMA_OR", "GMA_XOR", "GMA_XCH"};
+    const bool lazy = maxwell_gmem_chunk_shift && maxwell_gmem_lazy;  // (chunks imported lazily: no gmem_ buffer, the GMA_ functions)
     for (int k = 0; k < (fast ? 2 : 1); k++) {
         const char *m = fast && k == 0 ? "gfast_.w[fw]" : "gmem_.w[uint(ga >> 2)]";
         const char *guard = fast && k == 0 ? "if (fw != 0xFFFFFFFFu)" : fast ? "else if (ok)" : "if (ok)";
-        if (direct[op] && !(sgn && (op == 1 || op == 2))) {
+        const bool chunked = lazy && !(fast && k == 0);
+        if (chunked && direct[op] && !(sgn && (op == 1 || op == 2))) {
+            sp(&c->body, "      %s old = %s(uint(ga >> 2), %s);\n", guard, gma[op], v);
+        } else if (chunked) {
+            char nv[300];
+            if (op == 1) sprintf(nv, "uint(min(int(o_), int(%s)))", v);
+            else if (op == 2) sprintf(nv, "uint(max(int(o_), int(%s)))", v);
+            else if (op == 3) sprintf(nv, "(o_ >= %s ? 0u : o_ + 1u)", v);
+            else sprintf(nv, "(o_ == 0u || o_ > %s ? %s : o_ - 1u)", v, v);
+            sp(&c->body, "      %s { uint o_ = GMR(uint(ga >> 2)); for (;;) { uint r_ = GMCAS(uint(ga >> 2), o_, %s); if (r_ == o_) break; "
+               "o_ = r_; } old = o_; }\n", guard, nv);
+        } else if (direct[op] && !(sgn && (op == 1 || op == 2))) {
             sp(&c->body, "      %s old = %s(%s, %s);\n", guard, direct[op], m, v);
         } else {
             char nv[300];
@@ -2626,6 +2639,16 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             if (fn[f].last) snprintf(lim, sizeof lim, "o + %du", fn[f].last); else snprintf(lim, sizeof lim, "o");
             sp(&s, " uint c = GMC(i); o = GMO(i); uvec4 e = gchunk[c]; if (%s < e.z) { GW p = GW((uint64_t(e.y) << 32) | uint64_t(e.x)); %s } "
                        "gmiss(c, i); %s }\n", lim, fn[f].act, fn[f].miss);
+        }
+        if (c->uses_gmem_store) {  // ATOM / RED on the heap: the old value comes back (GMiss counts what the chunk table lacks)
+            static const char *const ops[][2] = {{"GMA_ADD", "atomicAdd"}, {"GMA_MIN", "atomicMin"}, {"GMA_MAX", "atomicMax"},
+                                                 {"GMA_AND", "atomicAnd"}, {"GMA_OR", "atomicOr"}, {"GMA_XOR", "atomicXor"},
+                                                 {"GMA_XCH", "atomicExchange"}};
+            for (int f = 0; f < (int)(sizeof ops / sizeof ops[0]); f++)
+                sp(&s, "uint %s(uint i, uint v) { uint c = GMC(i), o = GMO(i); uvec4 e = gchunk[c]; if (o < e.z) { "
+                       "GW p = GW((uint64_t(e.y) << 32) | uint64_t(e.x)); return %s(p.w[o], v); } gmiss(c, i); return 0u; }\n", ops[f][0], ops[f][1]);
+            sp(&s, "uint GMCAS(uint i, uint cmp, uint v) { uint c = GMC(i), o = GMO(i); uvec4 e = gchunk[c]; if (o < e.z) { "
+                   "GW p = GW((uint64_t(e.y) << 32) | uint64_t(e.x)); return atomicCompSwap(p.w[o], cmp, v); } gmiss(c, i); return cmp; }\n");
         }
         sp(&s, "#define GMR(i) GMR1(i)\n");
         if (c->uses_gmem_store) sp(&s, "#define GMW(i, v) GMW1(i, v)\n#define GMAND(i, m) GMAND1(i, m)\n#define GMOR(i, m) GMOR1(i, m)\n");

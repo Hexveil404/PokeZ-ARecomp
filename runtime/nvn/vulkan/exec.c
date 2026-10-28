@@ -5354,6 +5354,14 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
                 if (sb && sb->shadow_k > 1 && (sb->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
                     float d = sharp < sb->shadow_k ? (float)sharp : sb->shadow_k;
                     sc[0] /= d; sc[1] /= d;
+                } else if (sb && sb->shadow_k > 1) {
+                    // The 8-bit object-id map drawn beside it (Z-A's self-shadowing guard: a tap on the same object at
+                    // about the same depth counts as lit) is read with texelFetch at trunc(its queried size x the
+                    // tap's uv): at the game's size that is the 4x4 block's centre, up to 2 texels from where the depth
+                    // tap is - with the taps narrowed (sharpness 3-4) the id no longer belongs to the depth's texel and
+                    // the guard fails along a character's inner edges (dark streaks across a shirt, a Pokémon's
+                    // belly). Its real size and no scale instead: the id is read at the depth tap's own texel.
+                    sc[0] = sc[1] = 1;
                 }
             }
             for (int k = 0; k < nfeedback; k++)

@@ -32,6 +32,12 @@
 
 #include "ffx_fsr2_maximum_bias.h"
 
+#ifndef _WIN32  // (ZA Recomp: the two MSVC helpers used below, for Linux / macOS builds)
+#include <wchar.h>
+#define _countof(a) (sizeof(a) / sizeof((a)[0]))
+#define wcscpy_s(dst, src) wcscpy(dst, src)
+#endif
+
 #ifdef __clang__
 #pragma clang diagnostic ignored "-Wunused-variable"
 #endif

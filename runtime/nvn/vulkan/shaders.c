@@ -701,6 +701,202 @@ static const char *builtin_src(const char *name, int *stage) {
         }
         return src;
     }
+    // ---- screen-space indirect light (exec.c ssgi_apply), with GTAO's camera and push constants (gtao_common):
+    // prm.x the reach in metres, prm.y the strength, prj.z debug (1: the bounce light alone), prj.w the slices.
+    // ssgi.frag (half size; t0 = the scene depth, t1 = the lit image): per slice and side, marching away from the pixel,
+    // each surface seen above the horizon so far lights it with its own lit colour over the angle it newly covers
+    // (cos-weighted: the band between the old and the new horizon, cos a_old - cos a_new) - one bounce of the game's
+    // light from what is on screen. Sky (no depth) and things past the reach give nothing: the game's own ambient
+    // light covers them. Out .rgb: the cos-weighted mean incoming light (x the albedo: the light it reflects).
+    if (!strcmp(name, "ssgi.frag")) {
+        *stage = STAGE_FRAGMENT;
+        static char *src;
+        if (!src) {
+            static const char body[] =
+                "vec3 pos_at(vec2 uv) { return wpos(uv, depth_at(t0, uv)); }\n"
+                "float ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }\n"
+                "void main() {\n"
+                "  vec2 uv = gl_FragCoord.xy / pc.sz.xy;\n"
+                "  float d = depth_at(t0, uv);\n"
+                "  vec4 P4 = wpos4(uv, d);\n"
+                "  if (abs(P4.w) < 1e-7) { o = vec4(0.0); return; }\n"
+                "  vec3 P = P4.xyz / P4.w;\n"
+                "  float dist = length(pc.cam.xyz - P);\n"
+                "  if (!(dist > 0.05 && dist < 300.0)) { o = vec4(0.0); return; }\n"
+                "  vec3 V = (pc.cam.xyz - P) / dist;\n"
+                "  vec2 px = 1.0 / pc.sz.zw;\n"
+                "  vec3 Pl = pos_at(uv - vec2(px.x * 2.0, 0.0)), Pr = pos_at(uv + vec2(px.x * 2.0, 0.0));\n"
+                "  vec3 Pu = pos_at(uv - vec2(0.0, px.y * 2.0)), Pd = pos_at(uv + vec2(0.0, px.y * 2.0));\n"
+                "  vec3 dx = length(Pr - P) < length(P - Pl) ? Pr - P : P - Pl;\n"
+                "  vec3 dy = length(Pd - P) < length(P - Pu) ? Pd - P : P - Pu;\n"
+                "  vec3 N = normalize(cross(dy, dx));\n"
+                "  if (dot(N, V) < 0.0) N = -N;\n"
+                "  float radius = pc.prm.x;\n"
+                "  vec2 rUV = 0.5 * radius / (dist * pc.prj.xy);\n"
+                "  if (rUV.x * pc.sz.x < 2.0) { o = vec4(0.0); return; }\n"
+                "  rUV = min(rUV, vec2(0.25));\n"  // (close up: at most a quarter of the screen)
+                "  float n0 = ign(gl_FragCoord.xy), n1 = ign(gl_FragCoord.yx * 1.37 + 17.0);\n"
+                "  int SLICES = int(pc.prj.w), STEPS = SLICES * 3;\n"
+                "  vec3 sum = vec3(0.0);\n"
+                "  for (int s = 0; s < SLICES; s++) {\n"
+                "    float phi = (float(s) + n0) * PI / float(SLICES);\n"
+                "    vec2 dir = vec2(cos(phi), sin(phi));\n"
+                "    for (int side = -1; side <= 1; side += 2) {\n"
+                "      float hs = 0.0;\n"  // (the horizon so far: the sine of its elevation above the surface)
+                "      for (int j = 0; j < STEPS; j++) {\n"
+                "        float t = (float(j) + fract(n1 + float(j) * 0.618034)) / float(STEPS);\n"
+                "        t = t * t;\n"
+                "        vec2 su = uv + float(side) * dir * (rUV * t + 2.0 / pc.sz.xy);\n"
+                "        if (any(lessThan(su, vec2(0.0))) || any(greaterThan(su, vec2(1.0)))) break;\n"
+                "        float sd = depth_at(t0, su);\n"
+                "        vec4 Q4 = wpos4(su, sd);\n"
+                "        if (abs(Q4.w) < 1e-7) continue;\n"
+                "        vec3 dq = Q4.xyz / Q4.w - P;\n"
+                "        float l = length(dq);\n"
+                "        if (l < 1e-3 || l > radius) continue;\n"
+                "        float e = dot(dq / l, N);\n"
+                "        if (e <= hs) continue;\n"
+                "        float band = sqrt(max(1.0 - hs * hs, 0.0)) - sqrt(max(1.0 - e * e, 0.0));\n"
+                "        float fall = 1.0 - l / radius;\n"
+                "        sum += textureLod(t1, su, 0.0).rgb * band * fall;\n"
+                "        hs = e;\n"
+                "      }\n"
+                "    }\n"
+                "  }\n"
+                "  o = vec4(sum / float(2 * SLICES), 1.0);\n"
+                "}\n";
+            size_t n = strlen(gtao_common) + strlen(body) + 1;
+            src = malloc(n);
+            snprintf(src, n, "%s%s", gtao_common, body);
+        }
+        return src;
+    }
+    if (!strcmp(name, "ssgi_blur.frag")) {  // t0 = the raw bounce light, t1 = the scene depth: a 5x5 depth-aware average
+        *stage = STAGE_FRAGMENT;
+        static char *src;
+        if (!src) {
+            static const char body[] =
+                "void main() {\n"
+                "  vec2 uv = gl_FragCoord.xy / pc.sz.xy;\n"
+                "  vec4 c4 = wpos4(uv, depth_at(t1, uv));\n"
+                "  if (abs(c4.w) < 1e-7) { o = vec4(0.0); return; }\n"
+                "  float cd = length(c4.xyz / c4.w - pc.cam.xyz);\n"
+                "  vec3 sum = vec3(0.0);\n"
+                "  float wsum = 0.0;\n"
+                "  for (int y = -2; y <= 2; y++) for (int x = -2; x <= 2; x++) {\n"
+                "    vec2 u = uv + vec2(x, y) / pc.sz.xy;\n"
+                "    vec4 p4 = wpos4(u, depth_at(t1, u));\n"
+                "    float sd = abs(p4.w) < 1e-7 ? 1e9 : length(p4.xyz / p4.w - pc.cam.xyz);\n"
+                "    float w = exp(-abs(sd - cd) / (0.03 * cd + 0.01)) * (1.0 / (1.0 + float(x * x + y * y) * 0.25));\n"
+                "    sum += texelFetch(t0, clamp(ivec2(gl_FragCoord.xy) + ivec2(x, y), ivec2(0), ivec2(pc.sz.xy) - 1), 0).rgb * w;\n"
+                "    wsum += w;\n"
+                "  }\n"
+                "  o = vec4(sum / max(wsum, 1e-6), 1.0);\n"
+                "}\n";
+            size_t n = strlen(gtao_common) + strlen(body) + 1;
+            src = malloc(n);
+            snprintf(src, n, "%s%s", gtao_common, body);
+        }
+        return src;
+    }
+    // t0 = the filtered bounce light (half size), t1 = the scene depth, t2 = the G-buffer's albedo: drawn with an
+    // additive blend onto the lit image (debug: the bounce light alone, replacing it)
+    if (!strcmp(name, "ssgi_apply.frag")) {
+        *stage = STAGE_FRAGMENT;
+        static char *src;
+        if (!src) {
+            static const char body[] =
+                "layout(set = 0, binding = 2) uniform sampler2D t2;\n"
+                "void main() {\n"
+                "  vec2 uv = gl_FragCoord.xy / pc.sz.zw;\n"
+                "  vec4 c4 = wpos4(uv, depth_at(t1, uv));\n"
+                "  float cd = abs(c4.w) < 1e-7 ? 1e9 : length(c4.xyz / c4.w - pc.cam.xyz);\n"
+                "  vec2 hp = uv * pc.sz.xy - 0.5, b = floor(hp), fr = hp - b;\n"
+                "  vec3 v = vec3(0.0);\n"
+                "  float ws = 0.0;\n"
+                "  for (int k = 0; k < 4; k++) {\n"
+                "    vec2 o2 = vec2(k & 1, k >> 1), tc = b + o2;\n"
+                "    vec2 tuv = (tc + 0.5) / pc.sz.xy;\n"
+                "    vec4 t4 = wpos4(tuv, depth_at(t1, tuv));\n"
+                "    float td = abs(t4.w) < 1e-7 ? 1e9 : length(t4.xyz / t4.w - pc.cam.xyz);\n"
+                "    float bw = (o2.x > 0.5 ? fr.x : 1.0 - fr.x) * (o2.y > 0.5 ? fr.y : 1.0 - fr.y) + 1e-3;\n"
+                "    float w = bw * exp(-abs(td - cd) / (0.02 * cd + 0.02));\n"
+                "    v += w * texelFetch(t0, clamp(ivec2(tc), ivec2(0), ivec2(pc.sz.xy) - 1), 0).rgb; ws += w;\n"
+                "  }\n"
+                "  v = ws > 1e-5 ? v / ws : texture(t0, uv).rgb;\n"
+                "  if (pc.prj.z != 0.0) { o = vec4(v, 1.0); return; }\n"
+                "  o = vec4(texture(t2, uv).rgb * v * pc.prm.y, 1.0);\n"
+                "}\n";
+            size_t n = strlen(gtao_common) + strlen(body) + 1;
+            src = malloc(n);
+            snprintf(src, n, "%s%s", gtao_common, body);
+        }
+        return src;
+    }
+    // ---- water reflections (exec.c water_apply), with GTAO's camera (gtao_common; sz.xy = sz.zw = the image's size):
+    // t0 = the depth now (the water's surface in it), t1 = the depth before the water, t2 = the lit image before it,
+    // t3 = the lighting's reflection cube (where the ray leaves the picture).
+    // Where the water drew (its depth in front of the one before), the mirror ray from its surface is marched in the
+    // world and projected into the picture (the camera's view-projection: the inverse of the depth -> world matrix)
+    // until it passes behind the scene without the water: that colour is what the water reflects, blended over it with
+    // Schlick's Fresnel (a little straight down, most at grazing angles) times prm.x, the strength. Rays that leave the
+    // picture fade out at its edges; past the scene, the sky where it is on screen. prj.z 1: the reflection alone.
+    if (!strcmp(name, "water_ssr.frag")) {
+        *stage = STAGE_FRAGMENT;
+        static char *src;
+        if (!src) {
+            static const char body[] =
+                "layout(set = 0, binding = 2) uniform sampler2D t2;\n"
+                "layout(set = 0, binding = 3) uniform samplerCube t3;\n"
+                "vec2 to_uv(mat4 vp, vec3 w, out float dz) {\n"
+                "  vec4 c = vp * vec4(w, 1.0);\n"
+                "  dz = c.z / c.w;\n"
+                "  return vec2(c.x / c.w * 0.5 + 0.5, c.y / c.w * pc.prm.z * 0.5 + 0.5);\n"
+                "}\n"
+                "void main() {\n"
+                "  vec2 uv = gl_FragCoord.xy / pc.sz.xy;\n"
+                "  float dn = depth_at(t0, uv), db = depth_at(t1, uv);\n"
+                "  if (!(dn > db + 1e-7)) discard;\n"  // (no water here: reversed depth, the nearer the larger)
+                "  mat4 vp = inverse(mat4(pc.m0, pc.m1, pc.m2, pc.m3));\n"
+                "  vec3 P = wpos(uv, dn);\n"
+                "  vec3 V = normalize(pc.cam.xyz - P);\n"
+                // (Z-A's water is level: straight up - the depth's own slope left thin lines at its triangles' seams -
+                // tilted by gentle moving ripples, prm.w the time)
+                "  float tm = pc.prm.w;\n"
+                "  vec2 rp = vec2(sin(P.x * 7.3 + tm * 2.9) + 0.6 * sin(P.z * 11.7 - tm * 2.3),\n"
+                "                 cos(P.z * 6.1 + tm * 2.6) + 0.6 * cos(P.x * 12.1 + tm * 3.2));\n"
+                "  vec3 N = normalize(vec3(rp.x * 0.008, 1.0, rp.y * 0.008));\n"
+                "  vec3 R = reflect(-V, N);\n"
+                "  float F = 0.05 + 0.95 * pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 5.0);\n"
+                "  float t = 0.1, found = 0.0, dz;\n"
+                "  vec2 hit = uv;\n"
+                "  for (int i = 0; i < 48; i++) {\n"
+                "    vec3 Q = P + R * t;\n"
+                "    vec2 q = to_uv(vp, Q, dz);\n"
+                "    if (any(lessThan(q, vec2(0.0))) || any(greaterThan(q, vec2(1.0))) || dz <= 0.0) break;\n"
+                "    float ds = depth_at(t1, q);\n"
+                "    if (ds > dz) {\n"  // (the scene is in front of the ray here: it passed behind something)
+                "      if (length(wpos(q, ds) - Q) < t * 0.2 + 0.25) { found = 1.0; hit = q; }\n"
+                "      break;\n"
+                "    }\n"
+                "    t *= 1.13;\n"
+                "  }\n"
+                "  if (found == 0.0) {\n"  // (nothing hit: the sky, where the far end of the ray is on screen and is sky)
+                "    vec2 q = to_uv(vp, P + R * 5000.0, dz);\n"
+                "    if (all(greaterThanEqual(q, vec2(0.0))) && all(lessThanEqual(q, vec2(1.0))) && depth_at(t1, q) <= 0.0) { found = 1.0; hit = q; }\n"
+                "  }\n"
+                "  vec2 e = min(hit, 1.0 - hit);\n"
+                "  float edge = found * clamp(min(e.x, e.y) * 12.0, 0.0, 1.0);\n"
+                "  vec3 col = mix(textureLod(t3, R, 1.0).rgb, textureLod(t2, hit, 0.0).rgb, edge);\n"  // (off the picture: the game's reflection cube)
+                "  if (pc.prj.z != 0.0) { o = vec4(col, 1.0); return; }\n"
+                "  o = vec4(col, clamp(F * pc.prm.x, 0.0, 1.0));\n"
+                "}\n";
+            size_t n = strlen(gtao_common) + strlen(body) + 1;
+            src = malloc(n);
+            snprintf(src, n, "%s%s", gtao_common, body);
+        }
+        return src;
+    }
     if (!strcmp(name, "clear.vert")) {
         *stage = STAGE_VERTEX;
         return "#version 450\n"

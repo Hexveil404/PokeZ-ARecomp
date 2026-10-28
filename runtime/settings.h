@@ -51,6 +51,9 @@ typedef struct {
     bool game_drs;  // Pokémon Z-A: its own dynamic resolution (else always full: runtime/nvn/vulkan/exec.c)
     int gtao;            // ambient occlusion (GTAO): 0 off, 1 low, 2 medium, 3 high (vulkan/exec.c)
     int gtao_strength;   // its strength, percent (25-100; 100 the default look)
+    int ssgi;            // indirect light (screen-space GI): 0 off, 1 low, 2 medium, 3 high (vulkan/exec.c ssgi_apply)
+    int ssgi_strength;   // its strength, percent (50-300; 100 one physical bounce)
+    bool water_ssr;      // water reflections (vulkan/exec.c water_apply)
     bool tex_hd, tex_dump;  // HD texture packs (textures/hd) on; dump the game's textures (textures/dump): vulkan/textures.c
     int shadow_res;    // 1-4: shadow maps drawn at that many times the game's size, from the next start (vulkan/textures.c)
     int shadow_sharp;  // 1-4: the game's shadow filter that many times narrower, up to shadow_res (vulkan/exec.c)

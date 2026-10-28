@@ -1493,10 +1493,13 @@ static int content_extent(int e, bool scalable, float sc, float al) {
 
 static bool heap_whole_userptr(void);
 static void gtao_apply_pending(void);
+static void water_apply_pending(void);
+static void gtao_forget(NvnTexture *t);  // (vk_exec_texture_destroyed: the AO and water passes' saved targets)
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     vk_end_pass();
     gtao_apply_pending();  // (the lighting pass just ended: its image times the ambient occlusion)
+    water_apply_pending();  // (the water drawn: its reflections)
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each pass its own submission)
     else {
         // Submit the frame in chunks (as Metal, renderer.m begin_pass): the game puts a whole frame in one command
@@ -3102,6 +3105,7 @@ void vk_exec_texture_destroyed(NvnTexture *t) {
     for (int i = 0; i < 2; i++) if (hdr_snaps[i].shown == t) hdr_snaps[i].shown = NULL;
     if (hdr_game && hdr_game == t->backend) hdr_game = NULL;
     if (mv_depth == t) mv_depth = NULL;
+    gtao_forget(t);
 }
 void vk_alias_reset(void) { naliases = 0; }  // (reboot: every texture goes)
 
@@ -6424,6 +6428,8 @@ static void draw(CmdRec *r, bool indexed) {
 }
 static uint64_t prof_tp_;
 static bool fsr2_copy(Prog *pr);
+static bool water_is_surface(Prog *pr);
+static void water_before(void);
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
     if (!st.program) { SKIP(SK_NO_PROGRAM); return; }
@@ -6531,6 +6537,7 @@ static void draw_(CmdRec *r, bool indexed) {
         if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
     bool lighting = gtao_is_lighting(pr);
     if (lighting) gtao_before_lighting(pr);  // (GTAO from the scene depth, before the lighting reads the G-buffer)
+    if (water_is_surface(pr)) water_before();  // (the depth and the lit image before the water: water_apply)
     begin_pass();
     if (lighting) gtao_mark(st.rt.ncolor ? st.rt.color[0] : NULL);
     VkCommandBuffer cb = vk_cmd();
@@ -7712,10 +7719,10 @@ static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt, V
     for (int i = 0; i < 24; i++)
         if (cache[i].p && cache[i].fs == fs && cache[i].kind == kind && cache[i].f == dsfmt && cache[i].cf == cfmt) return cache[i].p;
     if (!post_layout) {
-        VkDescriptorSetLayoutBinding b[3];
-        for (uint32_t i = 0; i < 3; i++)
+        VkDescriptorSetLayoutBinding b[4];
+        for (uint32_t i = 0; i < 4; i++)
             b[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
-        VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 3, .pBindings = b};
+        VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 4, .pBindings = b};
         VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &post_set_layout));
         VkPushConstantRange r = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 128};  // (32 bytes but for GTAO's camera: 128)
         VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
@@ -7739,6 +7746,16 @@ static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt, V
     if (kind == 3)  // (colour = dst x src; alpha kept)
         cba = (VkPipelineColorBlendAttachmentState){.blendEnable = VK_TRUE, .srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR,
                                                     .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO, .colorBlendOp = VK_BLEND_OP_ADD,
+                                                    .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO, .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+                                                    .alphaBlendOp = VK_BLEND_OP_ADD, .colorWriteMask = 0xF};
+    else if (kind == 5)  // (colour = mix(dst, src, src alpha); alpha kept: the water's reflections)
+        cba = (VkPipelineColorBlendAttachmentState){.blendEnable = VK_TRUE, .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+                                                    .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, .colorBlendOp = VK_BLEND_OP_ADD,
+                                                    .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO, .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+                                                    .alphaBlendOp = VK_BLEND_OP_ADD, .colorWriteMask = 0xF};
+    else if (kind == 4)  // (colour = dst + src; alpha kept: the indirect light onto the lit image)
+        cba = (VkPipelineColorBlendAttachmentState){.blendEnable = VK_TRUE, .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+                                                    .dstColorBlendFactor = VK_BLEND_FACTOR_ONE, .colorBlendOp = VK_BLEND_OP_ADD,
                                                     .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO, .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
                                                     .alphaBlendOp = VK_BLEND_OP_ADD, .colorWriteMask = 0xF};
     VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1,
@@ -7772,11 +7789,11 @@ static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt, V
 
 // Post image `i` at w x h (RGBA8, kept until the size changes). 0, 1: SMAA edges / weights, 2: SMAA output,
 // 3, 4: FSR EASU / RCAS (also the sharpening after the box downscale), 5: box downscale, 6: the sharpening at the
-// image's own size, 7, 8: GTAO raw / filtered.
-static TexBackend *post_image(int i, uint32_t w, uint32_t h) {
-    static TexBackend img[9];
+// image's own size, 7, 8: GTAO raw / filtered. (f: its format - 9, 10, the indirect light: RGBA16F)
+static TexBackend *post_image_f(int i, uint32_t w, uint32_t h, VkFormat f) {
+    static TexBackend img[11];
     TexBackend *d = &img[i];
-    if (d->image && (d->width != w || d->height != h)) {
+    if (d->image && (d->width != w || d->height != h || d->format != f)) {
         vk_views_forget(d);
         vk_defer_image(d->image, d->mem);
         d->image = VK_NULL_HANDLE;
@@ -7784,17 +7801,18 @@ static TexBackend *post_image(int i, uint32_t w, uint32_t h) {
     }
     if (!d->image) {
         VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
-                                .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1,
+                                .format = f, .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1,
                                 .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
                                 .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &d->image, &d->mem, NULL));
-        d->format = VK_FORMAT_R8G8B8A8_UNORM; d->width = w; d->height = h; d->depth = 1; d->layers = 1; d->levels = 1;
+        d->format = f; d->width = w; d->height = h; d->depth = 1; d->layers = 1; d->levels = 1;
         d->samples = 1; d->aspect = VK_IMAGE_ASPECT_COLOR_BIT; d->base_type = VK_IMAGE_VIEW_TYPE_2D;
         vk_image_init_layout(vk_cmd(), d->image, d->aspect);
     }
     return d;
 }
+static TexBackend *post_image(int i, uint32_t w, uint32_t h) { return post_image_f(i, w, h, VK_FORMAT_R8G8B8A8_UNORM); }
 
 static VkImageView post_view(TexBackend *d) {
     static const VkComponentMapping id = {0};
@@ -8125,7 +8143,7 @@ static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *src
 static const float *post_pc_big;  // (GTAO) 32 floats pushed instead of pc's 8
 static void post_pass_ex(VkCommandBuffer cb, const char *fs, const VkImageView *srcs, int n, TexBackend *dst, const float pc[8],
                          bool clear, TexBackend *sten, int kind) {
-    if (!sten && kind != 3) kind = 0;
+    if (!sten && kind < 3) kind = 0;
     uint32_t aw = post_area_w && post_area_w < dst->width ? post_area_w : dst->width;
     uint32_t ah = post_area_h && post_area_h < dst->height ? post_area_h : dst->height;
     // (before the rendering begins: created inside it, the NVIDIA driver crashed)
@@ -8134,7 +8152,7 @@ static void post_pass_ex(VkCommandBuffer cb, const char *fs, const VkImageView *
     vk_full_barrier(cb);
     VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = post_view(dst),
                                     .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-                                    .loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : kind == 3 ? VK_ATTACHMENT_LOAD_OP_LOAD
+                                    .loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : kind >= 3 ? VK_ATTACHMENT_LOAD_OP_LOAD
                                             : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                                     .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {aw, ah}},
@@ -8150,8 +8168,8 @@ static void post_pass_ex(VkCommandBuffer cb, const char *fs, const VkImageView *
     }
     rec_CmdBeginRendering(cb, &ri);
     VkDescriptorSet ds = vk_alloc_set(post_set_layout);
-    VkDescriptorImageInfo ii[3];
-    VkWriteDescriptorSet w[3];
+    VkDescriptorImageInfo ii[4];  // (up to 4 inputs: the water's reflections take 4)
+    VkWriteDescriptorSet w[4];
     for (int i = 0; i < n; i++) {
         ii[i] = (VkDescriptorImageInfo){vk_default_sampler(true), srcs[i], VK_IMAGE_LAYOUT_GENERAL};
         w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = (uint32_t)i,
@@ -8199,6 +8217,21 @@ static int gtao_level(void) {
 }
 static bool gtao_on(void) { return gtao_level() > 0; }
 
+// Screen-space indirect light (SSGI: ssgi_apply below): one bounce of the game's light from what is on screen, onto the
+// lit image after the AO. F1 > Indirect light (LARECOMP_SSGI=<0-3>: off, 2 / 3 / 4 slices) and its strength
+// (_STRENGTH, 1 = 100%: one physical bounce), _RADIUS (metres, 4),
+// _DEBUG=1 (the bounce light alone).
+static struct { VkImageView albedo; } ssgi;
+static VkImageView water_probe;  // (gtao_before_lighting: the lighting's reflection cube, for water_apply_pending)
+static int ssgi_level(void) {  // (F1 > Indirect light; LARECOMP_SSGI=<0-3> overrides it)
+    static int env = -2;  // (read once: asked on every draw)
+    if (env == -2) { const char *e = getenv("LARECOMP_SSGI"); env = e ? atoi(e) : -1; }
+    int l = env >= 0 ? env : g_settings.ssgi;
+    return l < 0 ? 0 : l > 3 ? 3 : l;
+}
+static bool ssgi_on(void) { return ssgi_level() > 0; }
+static bool water_on(void);  // (water reflections: below)
+
 // The lighting shader's texture i: its pool entry (as texture_info resolves it), or NULL
 static NvnTexEntry *gtao_tex_entry(ShaderInfo *si, int i) {
     if (!si || i >= si->ntex) return NULL;
@@ -8215,7 +8248,7 @@ static NvnTexEntry *gtao_tex_entry(ShaderInfo *si, int i) {
 // depth texture (the scene depth, read twice) and a camera in constant buffer 2. Decided once per shader.
 static bool gtao_is_lighting(Prog *pr) {
     if (g_cur_fs_hash == GTAO_LIGHTING) return true;
-    if (!gtao_on() || !pr || !pr->fi || pr->fi->ntex < 10 || !st.program) return false;
+    if (!(gtao_on() || ssgi_on() || water_on()) || !pr || !pr->fi || pr->fi->ntex < 10 || !st.program) return false;
     static uint64_t known[64]; static bool verdict[64]; static int nk;
     uint64_t fs = st.program->stages[1].code_addr;
     for (int i = 0; i < nk; i++) if (known[i] == fs) return verdict[i];
@@ -8231,7 +8264,7 @@ static bool gtao_is_lighting(Prog *pr) {
 static void gtao_before_lighting(Prog *pr) {
     extern uint64_t renderer_exec_frame(void);
     uint64_t frame = renderer_exec_frame();
-    if (!gtao_on() || gtao.frame == frame + 1 || frame < (uint64_t)gtao_env("LARECOMP_GTAO_FROM", 0)) return;  // (_FROM: on from that frame - A/B tests)
+    if (!(gtao_on() || ssgi_on() || water_on()) || gtao.frame == frame + 1 || frame < (uint64_t)gtao_env("LARECOMP_GTAO_FROM", 0)) return;  // (_FROM: on from that frame - A/B tests)
     gtao.frame = frame + 1;
     NvnTexEntry *de = gtao_tex_entry(pr->fi, 1);
     const Range *cam = &st.ubuf[1][2];
@@ -8259,6 +8292,29 @@ static void gtao_before_lighting(Prog *pr) {
     pc[30] = gtao_env("LARECOMP_GTAO_DEBUG", 0);
     pc[31] = (float)(gtao_level() + 1);  // (slices: 2 / 3 / 4, twice as many steps each)  // (1: the lit image replaced by the AO alone, to check it)
     if (pc[28] <= 0 || pc[29] <= 0) return;
+    gtao.depth = dv;
+    if (ssgi_on()) {  // (SSGI: the G-buffer's albedo - its sRGB colour target at the depth's size - for ssgi_apply)
+        ssgi.albedo = VK_NULL_HANDLE;
+        for (int i = 2; i < pr->fi->ntex; i++) {
+            NvnTexEntry *e = gtao_tex_entry(pr->fi, i);
+            if (e && e->tex->format == 0x38 && e->tex->width == de->tex->width && e->tex->height == de->tex->height) {
+                ssgi.albedo = vk_view(e->tex, &e->view, e->has_view, false, pr->fi->tex[i].type);
+                break;
+            }
+        }
+    }
+    if (water_on()) {  // (water: the lighting's biggest reflection cube, for where its mirror ray leaves the picture)
+        water_probe = VK_NULL_HANDLE;
+        uint32_t best = 0;
+        for (int i = 2; i < pr->fi->ntex; i++) {
+            NvnTexEntry *e = gtao_tex_entry(pr->fi, i);
+            if (e && pr->fi->tex[i].type == TEXTYPE_CUBE && e->tex->width > best) {
+                VkImageView v = vk_view(e->tex, &e->view, e->has_view, false, TEXTYPE_CUBE);
+                if (v) water_probe = v, best = e->tex->width;
+            }
+        }
+    }
+    if (!gtao_on()) { gtao.ao = VK_NULL_HANDLE; return; }
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     TexBackend *raw = post_image(7, aw, ah), *filt = post_image(8, aw, ah);
@@ -8277,24 +8333,154 @@ static void gtao_before_lighting(Prog *pr) {
 
 // The lighting pass has begun drawing into target: its contents are multiplied when it ends
 static void gtao_mark(NvnTexture *target) {
-    if (!gtao_on() || !gtao.ao || !target || gtao.frame == 0) return;
+    if (!(gtao.ao || (ssgi_on() && ssgi.albedo) || water_on()) || !target || gtao.frame == 0) return;
     gtao.pending = true;
     gtao.target = target;
 }
 
 // (begin_pass, outside any pass) the lighting pass has ended: the lit image times the AO
+static void ssgi_apply(TexBackend *tb);
 static void gtao_apply_pending(void) {
     if (!gtao.pending) return;
     gtao.pending = false;
     TexBackend *tb = gtao.target ? gtao.target->backend : NULL;
-    if (!tb || !tb->image || !gtao.ao) return;
-    float *pc = gtao.pc;
-    pc[26] = (float)tb->width; pc[27] = (float)tb->height;  // (apply: the lit image's size)
+    if (!tb || !tb->image) return;
+    if (gtao.ao) {
+        float *pc = gtao.pc;
+        pc[26] = (float)tb->width; pc[27] = (float)tb->height;  // (apply: the lit image's size)
+        VkCommandBuffer cb = vk_cmd();
+        post_pc_big = pc;
+        VkImageView ain[2] = {gtao.ao, gtao.depth};
+        post_pass_ex(cb, "gtao_apply.frag", ain, 2, tb, NULL, false, NULL, pc[30] != 0 ? 0 : 3);
+        post_pc_big = NULL;
+    }
+    if (ssgi_on() && ssgi.albedo) ssgi_apply(tb);
+    ssgi.albedo = VK_NULL_HANDLE;  // (this frame's G-buffer's: its texture may be gone by the next)
+}
+
+// SSGI, when the lighting pass has ended (its image tb is the bounce light's source and its target): the bounce light
+// at half size from the depth and the lit image, a depth-aware filter, then x the albedo, added onto the lit image
+static void ssgi_apply(TexBackend *tb) {
+    float pc[32];
+    memcpy(pc, gtao.pc, sizeof pc);  // (the camera: gtao_before_lighting)
+    uint32_t w = (uint32_t)pc[26], h = (uint32_t)pc[27], hw = (w + 1) / 2, hh = (h + 1) / 2;
+    if (!w || !h || !gtao.depth) return;
+    pc[20] = gtao_env("LARECOMP_SSGI_RADIUS", 4.0f);
+    pc[21] = getenv("LARECOMP_SSGI_STRENGTH") ? gtao_env("LARECOMP_SSGI_STRENGTH", 1.0f) : g_settings.ssgi_strength / 100.0f;
+    pc[24] = (float)hw, pc[25] = (float)hh;
+    pc[30] = gtao_env("LARECOMP_SSGI_DEBUG", 0);
+    pc[31] = (float)(ssgi_level() + 1);
+    static const VkComponentMapping id = {0};
+    VkImageView lit = vk_image_view(tb, VK_IMAGE_VIEW_TYPE_2D, tb->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (!lit) return;
     VkCommandBuffer cb = vk_cmd();
+    TexBackend *raw = post_image_f(9, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT), *filt = post_image_f(10, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT);
     post_pc_big = pc;
-    VkImageView ain[2] = {gtao.ao, gtao.depth};
-    post_pass_ex(cb, "gtao_apply.frag", ain, 2, tb, NULL, false, NULL, pc[30] != 0 ? 0 : 3);
+    VkImageView in[2] = {gtao.depth, lit};
+    post_pass(cb, "ssgi.frag", in, 2, raw, NULL, false);
+    VkImageView bin[2] = {post_view(raw), gtao.depth};
+    post_pass(cb, "ssgi_blur.frag", bin, 2, filt, NULL, false);
+    pc[26] = (float)tb->width, pc[27] = (float)tb->height;
+    VkImageView ain[3] = {post_view(filt), gtao.depth, ssgi.albedo};
+    post_pass_ex(cb, "ssgi_apply.frag", ain, 3, tb, NULL, false, NULL, pc[30] != 0 ? 0 : 4);
     post_pc_big = NULL;
+    static int nlog;
+    if (nlog++ < 2) LOG("[ssgi] on: %ux%u (bounce light %ux%u), reach %.1f m, strength %.2f\n", w, h, hw, hh, pc[20], pc[21]);
+}
+
+// ================================================================== water reflections
+// Pokémon Z-A's water (fountains, ponds...) is a see-through surface drawn onto the lit image after the lighting -
+// blended, writing its depth, and reading the scene's depth (for its soft edges) - with no reflection of the world
+// around it. Before the frame's first such draw the depth and the lit image are copied (water_before); once the
+// game moves on to another target (begin_pass), wherever the depth changed is the water's surface, and
+// water_ssr.frag blends what it mirrors onto it (water_apply). F1 > Water reflections; LARECOMP_WATER=0 / 1 overrides
+// it, _STRENGTH (1), _DEBUG=1 (the reflection alone).
+static struct { bool pending; uint64_t frame; NvnTexture *target, *depth; TexBackend dsnap, csnap; } water;
+
+static bool water_on(void) {
+    static int env = -2;
+    if (env == -2) { const char *e = getenv("LARECOMP_WATER"); env = e ? atoi(e) != 0 : -1; }
+    return env >= 0 ? env : g_settings.water_ssr;
+}
+
+// A water surface: blended onto the lit image, writing depth, reading a depth texture
+static bool water_is_surface(Prog *pr) {
+    if (!water_on() || !gtao.target || st.rt.color[0] != gtao.target || !st.color_state[0] || !st.ds[0] || !st.ds[1] ||
+        !st.rt.depth || !pr || !pr->fi)
+        return false;
+    for (int i = 0; i < pr->fi->ntex; i++) {
+        NvnTexEntry *e = gtao_tex_entry(pr->fi, i);
+        if (e && renderer_format_is_depth(e->tex->format)) return true;
+    }
+    return false;
+}
+
+// d: an image like s (its format and size: made again when they change); copies s's aspect (colour or depth) into it
+static bool water_copy(TexBackend *d, TexBackend *s, VkImageAspectFlags aspect) {
+    if (d->image && (d->width != s->width || d->height != s->height || d->format != s->format)) {
+        vk_views_forget(d);
+        vk_defer_image(d->image, d->mem);
+        d->image = VK_NULL_HANDLE;
+        d->mem = VK_NULL_HANDLE;
+    }
+    if (!d->image) {
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = s->format,
+                                .extent = {s->width, s->height, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+                                .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateImage(g_vk.vma, &ci, &ai, &d->image, &d->mem, NULL) != VK_SUCCESS) { d->image = VK_NULL_HANDLE; return false; }
+        d->format = s->format; d->width = s->width; d->height = s->height; d->depth = 1; d->layers = 1; d->levels = 1;
+        d->samples = 1; d->aspect = s->aspect; d->base_type = VK_IMAGE_VIEW_TYPE_2D;
+        vk_image_init_layout(vk_cmd(), d->image, d->aspect);
+    }
+    VkImageCopy c = {.srcSubresource = {aspect, 0, 0, 1}, .dstSubresource = {aspect, 0, 0, 1}, .extent = {s->width, s->height, 1}};
+    rec_CmdCopyImage(vk_cmd(), s->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    return true;
+}
+
+static void water_before(void) {
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t frame = renderer_exec_frame();
+    if (water.frame == frame + 1) return;  // (the frame's first water only)
+    water.frame = frame + 1;
+    TexBackend *db = st.rt.depth->backend, *cb = gtao.target->backend;
+    if (!db || !cb || !db->image || !cb->image || db->levels < 1) return;
+    vk_end_pass();
+    vk_full_barrier(vk_cmd());
+    if (!water_copy(&water.dsnap, db, VK_IMAGE_ASPECT_DEPTH_BIT) || !water_copy(&water.csnap, cb, VK_IMAGE_ASPECT_COLOR_BIT)) return;
+    vk_full_barrier(vk_cmd());
+    water.pending = true, water.target = gtao.target, water.depth = st.rt.depth;
+}
+
+static void water_apply_pending(void) {
+    if (!water.pending || st.rt.color[0] == water.target) return;  // (still drawing onto the lit image: later)
+    water.pending = false;
+    TexBackend *tb = water.target ? water.target->backend : NULL, *db = water.depth ? water.depth->backend : NULL;
+    if (!tb || !db || !tb->image || !db->image) return;
+    static const VkComponentMapping id = {0};
+    VkImageView dnow = vk_image_view(db, VK_IMAGE_VIEW_TYPE_2D, db->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
+    VkImageView dpre = vk_image_view(&water.dsnap, VK_IMAGE_VIEW_TYPE_2D, water.dsnap.format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
+    VkImageView cpre = post_view(&water.csnap), probe = water_probe;
+    water_probe = VK_NULL_HANDLE;  // (this frame's lighting's: its texture may be gone by the next)
+    if (!dnow || !dpre || !cpre || !probe) return;  // (no reflection cube in this frame's lighting: none)
+    extern uint64_t renderer_exec_frame(void);
+    float pc[32];
+    memcpy(pc, gtao.pc, sizeof pc);
+    pc[20] = gtao_env("LARECOMP_WATER_STRENGTH", 1.0f);
+    pc[23] = (float)(renderer_exec_frame() % 36000) / 60.0f;  // (the ripples' time, in seconds)
+    pc[24] = pc[26] = (float)tb->width, pc[25] = pc[27] = (float)tb->height;
+    pc[30] = gtao_env("LARECOMP_WATER_DEBUG", 0);
+    post_pc_big = pc;
+    VkImageView in[4] = {dnow, dpre, cpre, probe};
+    post_pass_ex(vk_cmd(), "water_ssr.frag", in, 4, tb, NULL, false, NULL, pc[30] != 0 ? 0 : 5);
+    post_pc_big = NULL;
+    static int nlog;
+    if (nlog++ < 2) LOG("[water] reflections on: %ux%u, strength %.2f\n", tb->width, tb->height, pc[20]);
+}
+
+static void gtao_forget(NvnTexture *t) {
+    if (gtao.target == t) gtao.target = NULL;
+    if (water.target == t || water.depth == t) water.pending = false, water.target = water.depth = NULL;
 }
 
 // The view the present samples: the game image, or its anti-aliased / upscaled version. ow x oh: the whole image's

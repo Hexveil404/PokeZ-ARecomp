@@ -164,6 +164,20 @@ $(B)/inc/smaa_hlsl.inc: third_party/smaa/SMAA.hlsl
 $(B)/rt/nvn/smaa_data.o: $(B)/inc/smaa_hlsl.inc
 $(B)/rt/nvn/smaa_data.o: RTFLAGS += -I$(B)/inc -Ithird_party/smaa/Textures
 
+# AMD FSR 2 (third_party/fsr2, MIT): its API and Vulkan backend, and its GLSL shaders as {name, text} pairs for
+# runtime/nvn/vulkan/fsr2_shaders.cpp (compiled at run time with shaderc: no precompiled permutations)
+FSR2_SHADERS := $(wildcard third_party/fsr2/shaders/*.h third_party/fsr2/shaders/*.glsl)
+$(B)/inc/fsr2_shaders.inc: $(FSR2_SHADERS)
+	@mkdir -p $(dir $@)
+	for f in $(FSR2_SHADERS); do echo "{\"$$(basename $$f)\","; LC_ALL=C tr -d '\r' < $$f | LC_ALL=C tr '\200-\377' '?' | \
+	  sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/'; echo "},"; done > $@
+$(B)/rt/nvn/vulkan/fsr2_shaders.o: $(B)/inc/fsr2_shaders.inc
+$(B)/rt/nvn/vulkan/fsr2_shaders.o: CXXFLAGS += -I$(B)/inc
+FSR2_OBJ := $(B)/fsr2/ffx_fsr2.o $(B)/fsr2/ffx_assert.o $(B)/fsr2/vk/ffx_fsr2_vk.o
+$(B)/fsr2/%.o: third_party/fsr2/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -Wno-absolute-value -c $< -o $@
+
 # The shader preparation's variant list (runtime/nvn/shader_prep.h: no shader code, hashes and pipeline state only)
 # as a C string for runtime/nvn/shader_prep.c
 $(B)/inc/shader_variants.inc: runtime/nvn/shader_variants.txt
@@ -189,7 +203,7 @@ $(B)/rt/%.o: runtime/%.m $(RT_HDRS)
 # linked to a temp file, then renamed over: a copy of the game still running keeps its (old) file - relinking in
 # place gets running copies killed by macOS (code signature of the changed pages). The temp file keeps the real name
 # (in a folder of its own): on Windows the import library records the name the game code library loads it by.
-$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ)
+$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(if $(filter %vulkan/exec.o,$(BACKEND_OBJ)),$(FSR2_OBJ))
 	@mkdir -p $(dir $@)link
 	$(CXX) -o $(dir $@)link/$(notdir $@) $^ $(LDFLAGS)
 	mv -f $(dir $@)link/$(notdir $@) $@

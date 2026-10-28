@@ -632,6 +632,20 @@ static void tab_display(void) {
                           "mesmo tempo da GPU em qualquer intensidade. Muda na hora.")))
             g_settings.gtao_strength = pct[pi];
     }
+#ifndef __APPLE__
+    if (!la) {  // (runtime/nvn/vulkan/exec.c fsr2_copy: applies at once)
+        int t = g_settings.taa ? 1 : 0;
+        const char *taa[] = {TR("Game's", "Do jogo"), "AMD FSR 2"};
+        if (opt_choice(TR("Temporal anti-aliasing", "Anti-aliasing temporal"), &t, taa, 2, 0,
+                       TR("AMD FSR 2 in place of the game's own edge smoothing: it combines several frames, so fences, "
+                          "railings, leaves and thin lines stay smooth and stop flickering as you move. Uses a little GPU "
+                          "time. With it on, Anti-aliasing (SMAA) above isn't needed.",
+                          "AMD FSR 2 no lugar da suavização de bordas do próprio jogo: ele combina vários quadros, então "
+                          "grades, corrimões, folhas e linhas finas ficam lisos e param de tremular quando você anda. Usa um "
+                          "pouco da GPU. Com ele ligado, o Anti-aliasing (SMAA) acima não é necessário.")))
+            g_settings.taa = t == 1;
+    }
+#endif
 
     if (la) {
         opt_section("Game");

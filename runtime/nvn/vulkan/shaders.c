@@ -328,6 +328,31 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(pow((0.8359375 + 18.8515625 * n) / (1.0 + 18.6875 * n), vec3(78.84375)), 1.0);\n"
                "}\n";
     }
+    // ---- FSR 2's inputs (exec.c fsr2_frame): camera motion vectors and the reactive mask, at the scene's size. The
+    // depth (reversed, infinite far plane) at each pixel, its point unjittered (jit.xy: the frame's jitter in pixels,
+    // jit.zw: 1 / size), back through this frame's view-projection (inv_cur) and forward through the last frame's
+    // (prev): where it was, in pixels from here (FSR 2: current -> previous). The game's clip space has y up (the
+    // negative-height viewport). Only the camera moves things: characters (stencil 0x30-0x3F) and foliage (2) also
+    // move on their own, so FSR 2 leans on the current frame there (react.x, react.y).
+    if (!strcmp(name, "fsr2_mv.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D dep;\n"
+               "layout(set = 0, binding = 1) uniform usampler2D sten;\n"
+               "layout(set = 0, binding = 2) uniform U { mat4 inv_cur; mat4 prev; vec4 jit; vec4 react; } u;\n"
+               "layout(location = 0) out vec2 mv;\n"
+               "layout(location = 1) out float rx;\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+               "  float d = max(texelFetch(dep, p, 0).r, 1e-7);\n"
+               "  vec2 uv = (gl_FragCoord.xy - u.jit.xy) * u.jit.zw;\n"
+               "  vec4 c = u.prev * (u.inv_cur * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0));\n"
+               "  vec2 puv = vec2(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);\n"
+               "  mv = c.w > 0.0 ? (puv - uv) / u.jit.zw : vec2(0.0);\n"
+               "  uint s = texelFetch(sten, p, 0).r;\n"
+               "  rx = (s & 0xF0u) == 0x30u ? u.react.x : s == 2u ? u.react.y : 0.0;\n"
+               "}\n";
+    }
     // ---- post passes before the present (Video tab "Anti-aliasing" / "Upscaler"): exec.c vk_present_draw.
     // Each draws a fullscreen triangle into an image the size of its output; push constants: two vec4.
     if (!strcmp(name, "post.vert")) {

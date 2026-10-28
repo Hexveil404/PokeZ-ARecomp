@@ -34,6 +34,7 @@ Settings g_settings = {
     .show_fps = false,
     .tex_hd = true,
     .gtao_strength = 100,
+    .ssgi_strength = 100,
     .inv_keys = true,
     .tracker = true,
     .tracker_filters = -1,
@@ -178,6 +179,9 @@ void settings_load(void) {
         else if (!strcmp(key, "tex_hd")) g_settings.tex_hd = atoi(val) != 0;
         else if (!strcmp(key, "ambient_occlusion")) { int v = atoi(val); g_settings.gtao = v < 0 ? 0 : v > 3 ? 3 : v; }
         else if (!strcmp(key, "ambient_occlusion_strength")) { int v = atoi(val); g_settings.gtao_strength = v < 25 ? 25 : v > 100 ? 100 : v; }
+        else if (!strcmp(key, "indirect_light")) { int v = atoi(val); g_settings.ssgi = v < 0 ? 0 : v > 3 ? 3 : v; }
+        else if (!strcmp(key, "indirect_light_strength")) { int v = atoi(val); g_settings.ssgi_strength = v < 50 ? 50 : v > 300 ? 300 : v; }
+        else if (!strcmp(key, "water_reflections")) g_settings.water_ssr = atoi(val) != 0;
         else if (!strcmp(key, "tex_dump")) g_settings.tex_dump = atoi(val) != 0;
         else if (!strcmp(key, "resolution")) {  // (auto: never chosen, the GPU's default)
             int n = atoi(val);
@@ -289,6 +293,9 @@ void settings_save(void) {
     fprintf(f, "tex_hd = %d\n", g_settings.tex_hd);
     fprintf(f, "ambient_occlusion = %d\n", g_settings.gtao);
     fprintf(f, "ambient_occlusion_strength = %d\n", g_settings.gtao_strength);
+    fprintf(f, "indirect_light = %d\n", g_settings.ssgi);
+    fprintf(f, "indirect_light_strength = %d\n", g_settings.ssgi_strength);
+    fprintf(f, "water_reflections = %d\n", g_settings.water_ssr);
     fprintf(f, "tex_dump = %d\n", g_settings.tex_dump);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
                                    g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");

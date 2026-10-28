@@ -632,6 +632,34 @@ static void tab_display(void) {
                           "mesmo tempo da GPU em qualquer intensidade. Muda na hora.")))
             g_settings.gtao_strength = pct[pi];
     }
+    {   // indirect light (vulkan/exec.c ssgi_apply): one bounce of the game's light from what is on screen
+        const char *gi[] = {TR("Off", "Desligada"), TR("Low", "Baixa"), TR("Medium", "Média"), TR("High", "Alta")};
+        opt_choice(TR("Indirect light", "Luz indireta"), &g_settings.ssgi, gi, 4, 0,
+                   TR("Light bouncing off what is on screen (screen-space global illumination): sunlit ground and walls "
+                      "light up shaded corners, characters and walls nearby in their own colour. Strongest in shade and "
+                      "near colourful walls. Higher: smoother, at more GPU time (about 0.5 ms). Changes at once.",
+                      "Luz refletida pelo que está na tela (iluminação global em espaço de tela): chão e paredes ao sol "
+                      "iluminam cantos na sombra, personagens e paredes próximas com a sua cor. Mais forte na sombra e "
+                      "perto de paredes coloridas. Maior: mais suave, por mais tempo da GPU (cerca de 0,5 ms). Muda na hora."));
+        static const int gp[] = {50, 100, 150, 200, 300};
+        const char *gps[] = {"50%", "100%", "150%", "200%", "300%"};
+        int gpi = 1;
+        for (int i = 0; i < 5; i++) if (gp[i] == g_settings.ssgi_strength) gpi = i;
+        if (g_settings.ssgi == 0) opt_disable_next();
+        if (opt_choice(TR("Indirect light strength", "Intensidade da luz indireta"), &gpi, gps, 5, 1,
+                       TR("How much light bounces: 100% one physical bounce, more for a brighter, more colourful look. "
+                          "The same GPU time at any strength. Changes at once.",
+                          "Quanta luz é refletida: 100% um reflexo físico, mais para um visual mais claro e colorido. O "
+                          "mesmo tempo da GPU em qualquer intensidade. Muda na hora.")))
+            g_settings.ssgi_strength = gp[gpi];
+    }
+    opt_toggle(TR("Water reflections", "Reflexos na água"), &g_settings.water_ssr, false,  // (vulkan/exec.c water_apply)
+               TR("Fountains, ponds and the sea mirror the buildings, characters and sky around them, with gentle "
+                  "moving ripples; where the picture has nothing to mirror, the game's own sky reflection. Most visible "
+                  "at low angles. Changes at once.",
+                  "Fontes, lagos e o mar refletem os prédios, personagens e o céu ao redor, com ondulações suaves; onde "
+                  "a imagem não tem o que refletir, o reflexo do céu do próprio jogo. Mais visível em ângulos baixos. "
+                  "Muda na hora."));
 #ifndef __APPLE__
     if (!la) {  // (runtime/nvn/vulkan/exec.c fsr2_copy: applies at once)
         int t = g_settings.taa ? 1 : 0;

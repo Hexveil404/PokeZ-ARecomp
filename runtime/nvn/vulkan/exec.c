@@ -7858,8 +7858,9 @@ static float gtao_env(const char *name, float def) {
 
 // F1 > Ambient occlusion (ambient_occlusion: 0 off, 1 low, 2 medium, 3 high; LARECOMP_GTAO=<0-3> overrides it)
 static int gtao_level(void) {
-    const char *e = getenv("LARECOMP_GTAO");
-    int l = e ? atoi(e) : g_settings.gtao;
+    static int env = -2;  // (read once: it is asked on every draw, and getenv is slow on Windows)
+    if (env == -2) { const char *e = getenv("LARECOMP_GTAO"); env = e ? atoi(e) : -1; }
+    int l = env >= 0 ? env : g_settings.gtao;
     return l < 0 ? 0 : l > 3 ? 3 : l;
 }
 static bool gtao_on(void) { return gtao_level() > 0; }

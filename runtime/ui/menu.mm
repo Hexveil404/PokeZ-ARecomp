@@ -512,6 +512,22 @@ static void tab_display(void) {
         }
     }
 #endif
+#ifndef __APPLE__
+    {   // Frame pacing (runtime/nvn/vulkan/device.c present_mode): a new swapchain at once
+        int fp = g_settings.present_fifo ? 1 : 0;
+        const char *fps_[] = {TR("Standard", "Padrão"), TR("Smooth", "Suave")};
+        if (opt_choice(TR("Frame pacing", "Ritmo dos quadros"), &fp, fps_, 2, 0,
+                       TR("Smooth: every frame waits for its own refresh of the display (FIFO). Try it if the game "
+                          "sometimes stutters for a few seconds while the counter still shows 60 fps. Standard: the "
+                          "newest frame is shown at each refresh (mailbox) - keeps the game at full speed when Windows "
+                          "is slow to show the window (screen recording, a busy desktop).",
+                          "Suave: cada quadro espera a sua própria atualização da tela (FIFO). Experimente se o jogo às "
+                          "vezes engasga por alguns segundos enquanto o contador ainda mostra 60 fps. Padrão: o quadro mais "
+                          "novo aparece a cada atualização (mailbox) - mantém o jogo na velocidade total quando o Windows "
+                          "demora para mostrar a janela (gravação de tela, área de trabalho ocupada).")))
+            g_settings.present_fifo = fp == 1;
+    }
+#endif
     {   // Pokémon Z-A's dynamic resolution (runtime/nvn/vulkan/exec.c vk_counter_mode)
         extern bool g_za_frame_hook;
         if (g_za_frame_hook) {

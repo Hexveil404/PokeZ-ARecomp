@@ -754,14 +754,20 @@ void vk_pipeline_cache_save(void) {
 }
 
 // ================================================================== swapchain
+static bool present_fifo_made;  // (the Frame pacing setting the swapchain was made with: vk_frame_begin)
 static VkPresentModeKHR present_mode(void) {
+    present_fifo_made = g_settings.present_fifo;
     if (g_present_fifo) return VK_PRESENT_MODE_FIFO_KHR;  // (present_watch: the display stopped taking the frames twice)
     // MAILBOX by default: the game paces itself (vi.c's emulated 60 Hz vsync), and with FIFO every submission
     // queued behind the one waiting for a window image, so the game's fence waits followed the presentation engine:
     // a throttled / captured / busy compositor slowed the whole game (4-21 fps with the GPU mostly idle; mailbox:
     // 60). No tearing. LARECOMP_VK_PRESENT=fifo|immediate|mailbox to choose.
+    // F1 > Video > Frame pacing Smooth: FIFO. With MAILBOX the game's own 60 Hz clock (vi.c) and the display's drift
+    // apart, and while they cross, frames are dropped and shown twice for a few seconds at a steady 60 fps (judder
+    // running through the city); FIFO shows every frame on its own refresh.
     const char *e = ENV("LARECOMP_VK_PRESENT");
-    VkPresentModeKHR want = !e || !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
+    VkPresentModeKHR want = !e ? (g_settings.present_fifo ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_MAILBOX_KHR)
+                          : !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
                           : !strcmp(e, "immediate") ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
     uint32_t n = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(g_vk.phys, g_vk.surface, &n, NULL);
@@ -926,6 +932,7 @@ bool vk_frame_begin(const float clear[4]) {
     if (rec_present_recreate()) recreate_swapchain();
     if (!g_vk.swapchain || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height) recreate_swapchain();
     else if (g_vk.hdr != (g_vk.hdr_capable && g_settings.hdr && !ENV("LARECOMP_NO_HDR"))) recreate_swapchain();  // (HDR switched)
+    else if (present_fifo_made != g_settings.present_fifo) recreate_swapchain();  // (Frame pacing switched)
     if (!g_vk.swapchain) return false;
     static int trace = -1;
     if (trace < 0) trace = ENV("LARECOMP_VK_TRACE") != NULL;

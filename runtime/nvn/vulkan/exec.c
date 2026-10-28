@@ -8088,6 +8088,18 @@ static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *src
 }
 // sten / kind (g_vk.smaa_stencil): kind 1 clears sten and writes 1 where the pass draws, kind 2 draws only there
 static const float *post_pc_big;  // (GTAO) 32 floats pushed instead of pc's 8
+static bool post_mips_last;  // (water) the last input sampled with its mip levels (the others: level 0 only)
+static VkSampler post_mip_sampler(void) {
+    static VkSampler s;
+    if (!s) {
+        VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR,
+                                  .minFilter = VK_FILTER_LINEAR, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                                  .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                                  .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .maxLod = VK_LOD_CLAMP_NONE};
+        VK_CHECK(vkCreateSampler(g_vk.dev, &si, NULL, &s));
+    }
+    return s;
+}
 static void post_pass_ex(VkCommandBuffer cb, const char *fs, const VkImageView *srcs, int n, TexBackend *dst, const float pc[8],
                          bool clear, TexBackend *sten, int kind) {
     if (!sten && kind < 3) kind = 0;
@@ -8118,7 +8130,8 @@ static void post_pass_ex(VkCommandBuffer cb, const char *fs, const VkImageView *
     VkDescriptorImageInfo ii[4];  // (up to 4 inputs: the water's reflections take 4)
     VkWriteDescriptorSet w[4];
     for (int i = 0; i < n; i++) {
-        ii[i] = (VkDescriptorImageInfo){vk_default_sampler(true), srcs[i], VK_IMAGE_LAYOUT_GENERAL};
+        ii[i] = (VkDescriptorImageInfo){post_mips_last && i == n - 1 ? post_mip_sampler() : vk_default_sampler(true), srcs[i],
+                                        VK_IMAGE_LAYOUT_GENERAL};
         w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = (uint32_t)i,
                                       .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                       .pImageInfo = &ii[i]};
@@ -8257,8 +8270,7 @@ static void gtao_before_lighting(Prog *pr) {
             NvnTexEntry *e = gtao_tex_entry(pr->fi, i);
             if (e && pr->fi->tex[i].type == TEXTYPE_CUBE && e->tex->width > best) {
                 VkImageView v = vk_view(e->tex, &e->view, e->has_view, false, TEXTYPE_CUBE);
-                if (v) water_probe = v, best = e->tex->width;
-            }
+                if (v) water_probe = v, best = e->tex->width;            }
         }
     }
     if (!gtao_on()) { gtao.ao = VK_NULL_HANDLE; return; }
@@ -8419,8 +8431,9 @@ static void water_apply_pending(void) {
     pc[30] = gtao_env("LARECOMP_WATER_DEBUG", 0);
     post_pc_big = pc;
     VkImageView in[4] = {dnow, dpre, cpre, probe};
+    post_mips_last = true;  // (the cube: its smaller levels for the blur and the cap)
     post_pass_ex(vk_cmd(), "water_ssr.frag", in, 4, tb, NULL, false, NULL, pc[30] != 0 ? 0 : 5);
-    post_pc_big = NULL;
+    post_pc_big = NULL, post_mips_last = false;
     static int nlog;
     if (nlog++ < 2) LOG("[water] reflections on: %ux%u, strength %.2f\n", tb->width, tb->height, pc[20]);
 }

@@ -887,8 +887,12 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  }\n"
                 "  vec2 e = min(hit, 1.0 - hit);\n"
                 "  float edge = found * clamp(min(e.x, e.y) * 12.0, 0.0, 1.0);\n"
-                "  vec3 col = mix(textureLod(t3, R, 1.0).rgb, textureLod(t2, hit, 0.0).rgb, edge);\n"  // (off the picture: the game's reflection cube)
-                "  if (pc.prj.z != 0.0) { o = vec4(col, 1.0); return; }\n"
+                // (off the picture: the game's reflection cube. Its probe sits elsewhere, and at night it holds the lamps
+                // around it as bright spots that would show up where there is no lamp: capped at 3x its face's mean)
+                "  vec3 env = textureLod(t3, R, 0.0).rgb, avg = textureLod(t3, R, 16.0).rgb;\n"
+                "  env *= min(1.0, 3.0 * max(avg.r, max(avg.g, avg.b)) / max(max(env.r, max(env.g, env.b)), 1e-4));\n"
+                "  vec3 col = mix(env, textureLod(t2, hit, 0.0).rgb, edge);\n"
+                "  if (pc.prj.z != 0.0) { o = vec4(pc.prj.z > 1.5 ? env : col, 1.0); return; }\n"  // (2: the cube alone)
                 "  o = vec4(col, clamp(F * pc.prm.x, 0.0, 1.0));\n"
                 "}\n";
             size_t n = strlen(gtao_common) + strlen(body) + 1;

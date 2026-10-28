@@ -320,6 +320,12 @@ void vk_device_fault_report(void) {
     for (uint32_t i = 0; i < c.vendorInfoCount; i++)
         LOG("[vk]   vendor: %s (code %#llx data %#llx)\n", vend[i].description, (unsigned long long)vend[i].vendorFaultCode,
             (unsigned long long)vend[i].vendorFaultData);
+    // the switches the AMD faults have been bisected with (#22, #39, #54): the next report names its own state
+    const char *fl = getenv("LARECOMP_SHADER_FLAT"), *xm = getenv("LARECOMP_VK_XFB_MIRROR"), *rt = getenv("LARECOMP_RENDER_THREAD");
+    bool amd = g_vk.props.vendorID == 0x1002;
+    LOG("[vk]   state: straight-line shaders %s, xfb mirror %s, render thread %s\n",
+        fl ? fl : amd ? "off (AMD default)" : "on (default)", xm ? xm : amd ? "off (AMD default)" : "on (default)",
+        rt ? rt : "on (default)");
 }
 
 // Each memory heap: its size, the driver's budget for this process (smaller when other programs hold that memory),

@@ -1321,6 +1321,14 @@ static void st_defaults(void) {
 static VkPipeline pipe_resolve(void *obj, bool wait);
 void vk_exec_init(void) {
     maxwell_disk_cache = true;  // (translate.c: the game's translations kept in cache/maxwell)
+    // The straight-line shader form (translate.c glsl_flatten, v0.1.10) off on AMD GPUs: an RX 7600 and an RX 9070 XT
+    // (AMD 26.10.1) both lost the device on v0.1.10 at the first frames in the world, "read invalid 0xbeefdeadc000"
+    // (#54, #39), where v0.1.9 played; and RADV crashed in the driver with it on the whole-window import (#51).
+    // LARECOMP_SHADER_FLAT=1: on, =0: off everywhere
+    if (g_vk.props.vendorID == 0x1002) {
+        maxwell_flat_default = false;
+        if (!getenv("LARECOMP_SHADER_FLAT")) LOG("[vk] straight-line shader form off on this AMD GPU (LARECOMP_SHADER_FLAT=1: on)\n");
+    }
     prof = getenv("LARECOMP_VK_PROF") != NULL;
     if (prof) prof_up_ns = 0;
     // the GPU timer (LARECOMP_VK_GPU_TIMER=0: off - dynamic resolution then goes by the frame times)

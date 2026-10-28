@@ -30,6 +30,7 @@
 uint64_t maxwell_gmem_base, maxwell_gmem_size;
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 bool maxwell_gmem_lazy;
+bool maxwell_flat_default = true;
 bool maxwell_gmem_fs_miss;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
@@ -2516,6 +2517,13 @@ static bool glsl_flatten(Ctx *c, const char *body, Str *out) {
     return ok;
 }
 
+// the straight-line form on? LARECOMP_SHADER_FLAT=0/1, else the runtime's default (shader.h maxwell_flat_default)
+static int maxwell_flat_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("LARECOMP_SHADER_FLAT"); on = e ? atoi(e) != 0 : maxwell_flat_default; }
+    return on;
+}
+
 static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     ShaderInfo *info = c->info;
     const ShaderKey *key = c->key;
@@ -2727,8 +2735,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->uses_cc) sp(&s, "  uint cc = 0u; bool ccz = false, ccs = false;\n");
     if (c->uses_local) sp(&s, "  uint lmem[%d]; for (int li_ = 0; li_ < %d; li_++) lmem[li_] = 0u;\n", LMEM_WORDS, LMEM_WORDS);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
-    static int flat_on = -1;
-    if (flat_on < 0) { const char *e = getenv("LARECOMP_SHADER_FLAT"); flat_on = !e || atoi(e) != 0; }
+    int flat_on = maxwell_flat_on();
     Str flat = {0};
     if (any_branch && flat_on && !dbg && glsl_flatten(c, body.buf ? body.buf : "", &flat)) {
         sp(&s, "  uint tgt = 0u;  // (straight-line form: the address being skipped to, 0 running - glsl_flatten)\n");
@@ -3185,8 +3192,7 @@ static uint64_t cache_key(const uint8_t *blob, size_t max_size, int stage, const
     static int on = -1;
     if (on < 0) {
         on = maxwell_disk_cache && !getenv("LARECOMP_NO_TRANSLATE_CACHE") && !getenv("LARECOMP_NO_DISCARD") &&
-             !getenv("LARECOMP_LANE_COMPUTE_ONLY") && !getenv("LARECOMP_BRX_ALL_LABELS") && !getenv("LARECOMP_SAVE_MSL") &&
-             !getenv("LARECOMP_SHADER_FLAT");  // (its translations aren't in the key: a kill switch must translate)
+             !getenv("LARECOMP_LANE_COMPUTE_ONLY") && !getenv("LARECOMP_BRX_ALL_LABELS") && !getenv("LARECOMP_SAVE_MSL");
         if (on) cache_open();
     }
     if (!on || !key || maxwell_dbg_code || maxwell_dbg_vs) return 0;
@@ -3195,7 +3201,9 @@ static uint64_t cache_key(const uint8_t *blob, size_t max_size, int stage, const
     size_t end = code_end(blob, code, max_size);
     for (size_t i = 0; i < end; i++)
         if ((((const uint64_t *)code)[i] & 0xfff0000000000000ull) == 0xe250000000000000ull) return 0;  // BRX
-    uint64_t v[4] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size};
+    // (the straight-line switch is in the key: on and off translations of one shader differ, and a GPU that changes
+    // the default - AMD - or a player's LARECOMP_SHADER_FLAT must not load the other form)
+    uint64_t v[5] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size, (uint64_t)maxwell_flat_on()};
     uint64_t h = fnv(fnv(fnv(0xcbf29ce484222325ull, cache_build, sizeof cache_build), v, sizeof v), key, sizeof *key);
     h = fnv(h, blob, (size_t)(code - blob) + end * 8);
     return h ? h : 1;

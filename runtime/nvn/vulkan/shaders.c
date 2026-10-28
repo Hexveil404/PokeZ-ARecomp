@@ -290,6 +290,44 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(location = 0) out vec4 o;\n"
                "void main() { o = texture(t, uv); }\n";
     }
+    // ---- HDR output (F1 > Video > HDR; exec.c vk_hdr_encode): the window's SDR image -> its HDR10 / scRGB image.
+    // Everything is paper white bright (cfg.x, in scRGB units of 80 nits) except the game's highlights: above the knee
+    // (cfg.z, linear, on the brightest channel) the scene brightens smoothly up to the peak (cfg.y x paper white) - an
+    // inverse tone map of the game's SDR picture, as Windows' Auto HDR does. Kept at paper white: what the overlay drew
+    // (the window image against `base`, its copy from before the overlay; flags.y) and the game's HUD (the game's shown
+    // image against its scene from before the HUD, at the game image's place vp / crop; flags.z, without them nothing is
+    // brightened). flags.x: 1 scRGB (linear BT.709), 0 HDR10 (BT.2020, PQ); flags.w: the game image is upside down.
+    if (!strcmp(name, "hdr.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D sdr;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D base;\n"
+               "layout(set = 0, binding = 2) uniform sampler2D shown;\n"
+               "layout(set = 0, binding = 3) uniform sampler2D scene;\n"
+               "layout(push_constant) uniform P { vec4 vp; vec4 crop; vec4 cfg; vec4 flags; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "vec3 lin(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }\n"
+               "float mx(vec3 v) { return max(v.r, max(v.g, v.b)); }\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+               "  vec3 c = texelFetch(sdr, p, 0).rgb, l = lin(c);\n"
+               "  float ui = pc.flags.y > 0.5 && mx(abs(c - texelFetch(base, p, 0).rgb)) > 1.5 / 255.0 ? 1.0 : 0.0, g = 1.0;\n"
+               "  vec2 u = (gl_FragCoord.xy - pc.vp.xy) * pc.vp.zw;\n"
+               "  if (pc.flags.z > 0.5 && all(greaterThanEqual(u, vec2(0.0))) && all(lessThanEqual(u, vec2(1.0)))) {\n"
+               "    if (pc.flags.w > 0.5) u.y = 1.0 - u.y;\n"
+               "    vec2 t = pc.crop.xy + u * pc.crop.zw;\n"
+               "    float d = mx(abs(textureLod(shown, t, 0.0).rgb - textureLod(scene, t, 0.0).rgb));\n"
+               "    ui = max(ui, smoothstep(2.0 / 255.0, 10.0 / 255.0, d));\n"
+               "    float s = clamp((mx(l) - pc.cfg.z) / (1.0 - pc.cfg.z), 0.0, 1.0);\n"
+               "    g = mix(1.0 + (pc.cfg.y - 1.0) * s * s, 1.0, ui);\n"
+               "  }\n"
+               "  l *= g * pc.cfg.x;\n"
+               "  if (pc.flags.x > 0.5) { o = vec4(l, 1.0); return; }\n"
+               "  const mat3 to2020 = mat3(0.6274, 0.0691, 0.0164, 0.3293, 0.9195, 0.0880, 0.0433, 0.0114, 0.8956);\n"
+               "  vec3 n = pow(max(to2020 * l * (80.0 / 10000.0), vec3(0.0)), vec3(0.1593017578125));\n"
+               "  o = vec4(pow((0.8359375 + 18.8515625 * n) / (1.0 + 18.6875 * n), vec3(78.84375)), 1.0);\n"
+               "}\n";
+    }
     // ---- post passes before the present (Video tab "Anti-aliasing" / "Upscaler"): exec.c vk_present_draw.
     // Each draws a fullscreen triangle into an image the size of its output; push constants: two vec4.
     if (!strcmp(name, "post.vert")) {

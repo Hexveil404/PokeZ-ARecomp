@@ -43,6 +43,9 @@ typedef struct {
     bool show_fps;
     bool fps60;  // Pokémon Z-A: its frame clock at 1/60 s per frame (runtime/hle/framepace.c)
     bool aniso16;  // Texture filtering High: 16x anisotropic and trilinear on every mipmapped sampler (runtime/nvn/vulkan/textures.c)
+    bool hdr;            // HDR output when Windows has the display in HDR mode (vulkan/device.c, exec.c vk_hdr_encode)
+    int hdr_peak;        // HDR: the brightest highlights, nits
+    int hdr_paper;       // HDR: white in the HUD and menus, and the scene below its highlights, nits ("paper white")
     int opmode;     // the mode the game is told it runs in (runtime/services/am.c): 0 auto (handheld on a Steam Deck), 1 docked (1080p), 2 handheld (720p)
     bool game_drs;  // Pokémon Z-A: its own dynamic resolution (else always full: runtime/nvn/vulkan/exec.c)
     int gtao;            // ambient occlusion (GTAO): 0 off, 1 low, 2 medium, 3 high (vulkan/exec.c)

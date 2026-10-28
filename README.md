@@ -84,7 +84,7 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 | **GPU** | Vulkan 1.2 or newer (1.3 recommended) with an up-to-date driver |
 | **RAM** | 8 GB (16 GB recommended) |
 | **Disk** | About 12 GB free |
-| **Game** | Pokémon Legends: Z-A **1.0.0, 2.0.0 or 2.0.2**, optionally with the DLC |
+| **Game** | Pokémon Legends: Z-A **1.0.0, 2.0.0 or 2.0.2**, optionally with the *Mega Dimension* DLC |
 
 Linux is not officially supported yet. On a Mac, use [MonZaMac](https://github.com/lucabravi/MonZaMac) by
 [@lucabravi](https://github.com/lucabravi), a native macOS port based on this project.
@@ -95,7 +95,7 @@ Linux is not officially supported yet. On a Mac, use [MonZaMac](https://github.c
    and extract it to a folder of your choice (for example `C:\Games\ZA Recomp`).
 2. Prepare your own copy of the game in a folder, in one of two ways:
    - **Extracted game**: the `exefs` and `romfs` folders, as an emulator or your Switch extracts them. No keys needed.
-   - **Dump**: the base game (`.xci` or `.nsp`), optionally the update and the DLC (`.nsp`), together with the
+   - **Dump**: the base game (`.xci` or `.nsp`), optionally the update and the *Mega Dimension* DLC (`.nsp`), together with the
      `prod.keys` from your own Switch.
 3. Run `lasrecomp.exe`. On the start screen, choose that folder (or drag it onto the window) and click
    **Set up the game**.

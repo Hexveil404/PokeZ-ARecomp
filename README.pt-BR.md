@@ -84,7 +84,7 @@ para *The Legend of Zelda: Link's Awakening*.
 | **GPU** | Vulkan 1.2 ou mais novo (1.3 recomendado), com driver atualizado |
 | **RAM** | 8 GB (16 GB recomendado) |
 | **Disco** | Cerca de 12 GB livres |
-| **Jogo** | Pokémon Legends: Z-A **1.0.0, 2.0.0 ou 2.0.2**, com ou sem a DLC |
+| **Jogo** | Pokémon Legends: Z-A **1.0.0, 2.0.0 ou 2.0.2**, com ou sem a DLC *Mega Dimension* |
 
 O Linux ainda não é suportado oficialmente. No Mac, use o [MonZaMac](https://github.com/lucabravi/MonZaMac), do
 [@lucabravi](https://github.com/lucabravi), um port nativo para macOS baseado neste projeto.
@@ -95,7 +95,7 @@ O Linux ainda não é suportado oficialmente. No Mac, use o [MonZaMac](https://g
    e extraia em uma pasta à sua escolha (por exemplo `C:\Jogos\ZA Recomp`).
 2. Deixe a sua própria cópia do jogo em uma pasta, de um destes jeitos:
    - **Jogo extraído**: as pastas `exefs` e `romfs`, como um emulador ou o seu Switch extraem. Não precisa de keys.
-   - **Dump**: o jogo base (`.xci` ou `.nsp`), se quiser a atualização e a DLC (`.nsp`), junto com o `prod.keys` do seu
+   - **Dump**: o jogo base (`.xci` ou `.nsp`), se quiser a atualização e a DLC *Mega Dimension* (`.nsp`), junto com o `prod.keys` do seu
      próprio Switch.
 3. Abra o `lasrecomp.exe`. Na tela inicial, escolha essa pasta (ou arraste para a janela) e clique em
    **Preparar o jogo**.

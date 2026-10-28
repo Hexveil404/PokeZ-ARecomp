@@ -5351,6 +5351,23 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
         if (stage == 5 && dummy_cs && st.program && (dummy_cs == 1 || st.program->stages[5].code_addr == dummy_cs))
             view = VK_NULL_HANDLE;  // (1: every compute shader - code addresses change between runs)
     }
+    {   // A compute shader reading a scaled depth target with a mip chain at a non-integer scale (1.5x, Match display,
+        // Dynamic, the shares) gets a 1x1 dummy: no occluder, so nothing is culled for being hidden. That is Pokémon
+        // Z-A's GPU occlusion culling reading its depth pyramid (the scene depth's own mip levels). Scaled by 1.5 the
+        // levels don't keep the ratio (135 -> 202, 33 -> 50, 16 -> 25), the culling read the wrong depths and dropped
+        // visible objects - lamp posts, hedges, parts of buildings vanishing as the player walked. Integer scales are
+        // exact and keep it. The game's frustum and distance culling still run. LARECOMP_FRACTIONAL_OCCLUSION=1: keep it.
+        static int keep = -1;
+        if (keep < 0) keep = ENV("LARECOMP_FRACTIONAL_OCCLUSION") && atoi(ENV("LARECOMP_FRACTIONAL_OCCLUSION"));
+        TexBackend *pb = stage == 5 && view && !keep && ent && ent->tex ? (TexBackend *)ent->tex->backend : NULL;
+        if (pb && pb->scalable && pb->levels > 1 && (pb->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) &&
+            (pb->sx != floorf(pb->sx) || pb->sy != floorf(pb->sy))) {
+            static int nlog;
+            if (nlog++ < 3) LOG("[vk] non-integer scale %.2f: occlusion culling's depth pyramid (%ux%u, %u levels) off for this compute shader\n",
+                                pb->sx, ent->tex->width, ent->tex->height, pb->levels);
+            view = VK_NULL_HANDLE;
+        }
+    }
     if (st_->shadow)
         shadow_slot_check(stage, st_, i, h, tic, ent, ent && ent->tex ? (naliases ? alias_read(ent->tex) : ent->tex) : NULL, &view);
     if (!view) view = vk_dummy_view(st_->type);

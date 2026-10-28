@@ -194,6 +194,8 @@ static void recompute_keyboard(void) {
 }
 
 // Controller buttons (and the triggers as buttons) -> Switch buttons through g_bind_pad; the sticks stay the sticks.
+static bool pad_by_pos;  // (battle_abxy_position: ZL held at the last recompute_pad)
+static int pad_host(int i, bool by_pos) { return by_pos && i <= BIND_Y ? bind_pad_default(i) : g_bind_pad[i]; }
 static void recompute_pad(void) {
     uint32_t host = test_pad;
     if (pad && !host_test) {
@@ -206,10 +208,10 @@ static void recompute_pad(void) {
     // so with A/B/X/Y bound by letter (Xbox A = the Switch's A) they read swapped. While ZL is held those four go by
     // position, as in the defaults; the rest of the game keeps the player's bindings (#26).
     int zl = g_bind_pad[BIND_ZL];
-    bool by_pos = g_settings.battle_abxy_position && zl >= 0 && zl < PADB_HOST_COUNT && (host >> zl & 1);
+    bool by_pos = pad_by_pos = g_settings.battle_abxy_position && zl >= 0 && zl < PADB_HOST_COUNT && (host >> zl & 1);
     uint64_t b = 0;
     for (int i = 0; i < BIND_PAD_COUNT; i++) {
-        int h = by_pos && i <= BIND_Y ? bind_pad_default(i) : g_bind_pad[i];
+        int h = pad_host(i, by_pos);
         if (h >= 0 && h < PADB_HOST_COUNT && (host >> h & 1)) b |= 1ull << i;
     }
     pad_buttons = b;
@@ -240,10 +242,13 @@ static void recompute_pad(void) {
 // that is released is still given to the game's next polls (fill_state). UI thread: note_press; game thread: the rest.
 static _Atomic uint64_t press_unseen;  // pressed (events), not yet in a state the game polled
 static _Atomic uint64_t tap_buttons;   // released while unseen: the game's next poll gets them
+// The same mapping as recompute_pad's, ZL by position included: by letter here, a move pressed with ZL held left its
+// by-letter button unseen, and the release gave the game a tap of it - the move on the other side, used when the
+// pressed one was cooling down (#42)
 static uint64_t pad_bits(int host) {   // the game buttons bound to host button `host` (SDL button / PADB_*TRIGGER)
     uint64_t b = 0;
     for (int i = 0; i < BIND_PAD_COUNT; i++)
-        if (g_bind_pad[i] == host) b |= 1ull << i;
+        if (pad_host(i, pad_by_pos) == host) b |= 1ull << i;
     return b;
 }
 static void note_press(uint64_t down, uint64_t up) {

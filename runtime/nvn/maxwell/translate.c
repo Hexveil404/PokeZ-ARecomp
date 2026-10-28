@@ -2524,6 +2524,8 @@ static int maxwell_flat_on(void) {
     return on;
 }
 
+bool maxwell_flat_state(void) { return maxwell_flat_on() != 0; }  // (vulkan/device.c: the device fault's state line)
+
 static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     ShaderInfo *info = c->info;
     const ShaderKey *key = c->key;

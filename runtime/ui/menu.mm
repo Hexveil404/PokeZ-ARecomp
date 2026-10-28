@@ -731,6 +731,24 @@ static void tab_display(void) {
             g_settings.taa = t == 1;
     }
 #endif
+#ifndef __APPLE__
+    {   // F1 > Rendering > Compatibility (settings.h GPU_*): GPU features some drivers fail with; from the next start
+        opt_section(TR("Compatibility", "Compatibilidade"));
+        const char *aoo[] = {"Auto", TR("On", "Ligado"), TR("Off", "Desligado")};
+        static const char *const what[GPU_COMPAT_N][2] = {
+            {"Dynamic vertex input", "Vertex input dinâmico"},
+            {"CPU / GPU overlap", "Sobreposição CPU / GPU"},
+            {"Straight-line shaders", "Shaders em linha reta"},
+            {"Skinning mirror", "Espelho do skinning"}};
+        for (int i = 0; i < GPU_COMPAT_N; i++)
+            opt_choice(TR(what[i][0], what[i][1]), &g_settings.gpu_compat[i], aoo, 3, GPU_AUTO,
+                       TR("For crashes with a graphics driver error (\"Your graphics driver crashed\", a GPU page fault): "
+                          "turn these off one at a time. Auto: off on AMD GPUs, on elsewhere. Applies from the next start.",
+                          "Para travamentos com erro do driver de vídeo (\"Your graphics driver crashed\", falha de página "
+                          "da GPU): desligue um de cada vez. Auto: desligado em GPUs AMD, ligado nas outras. Vale a partir do "
+                          "próximo início."));
+    }
+#endif
 
     if (la) {
         opt_section("Game");

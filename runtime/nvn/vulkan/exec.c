@@ -127,12 +127,14 @@ static bool overlap_on(void) {
         const char *e = getenv("LARECOMP_GPU_OVERLAP"), *w = getenv("LARECOMP_OVERLAP_WATCH");
         uint32_t g;
         bool tracked = (!w || atoi(w) != 0) && pages_cpu_written(HEAP_BASE, 4096, 0, &g) >= 0;
+        int cs = g_settings.gpu_compat[GPU_OVERLAP];  // (F1 > Compatibility)
         if (e) on = atoi(e) != 0;
+        else if (cs != GPU_AUTO) on = cs == GPU_ON;
         else if (VK_OVERLAP_DEFAULT && g_vk.props.vendorID == 0x1002) {
             // AMD: off by default - new in v0.1.10 with the dynamic vertex input (device.c), and AMD GPUs lose the device
             // there at the first frames in the world, "read invalid 0xbeefdeadc000" (#39, #54)
             on = 0;
-            LOG("[vk] GPU overlap off on this AMD GPU (#39; LARECOMP_GPU_OVERLAP=1: on)\n");
+            LOG("[vk] GPU overlap off on this AMD GPU (#39; F1 > Compatibility or LARECOMP_GPU_OVERLAP=1: on)\n");
             return on;
         } else if (VK_OVERLAP_DEFAULT && !tracked) {
             on = 0;
@@ -146,6 +148,8 @@ static bool overlap_on(void) {
     return on;
 }
 bool vk_overlap_state(void) { return overlap_on(); }  // (device.c vk_device_fault_report)
+static bool xm_on(void);
+bool vk_xfb_mirror_state(void) { return xm_on(); }  // (device.c vk_device_fault_report)
 static _Atomic uint64_t g_last_gpu_frame_ticks;  // (overlap) the latest resolved counter pair's GPU span, in Switch GPU ticks
 static const uint64_t *cq_last_out;              // (cq_lock) the counter resolved last and its GPU ticks: a pair may straddle
 static uint64_t cq_last_ticks;                   // two submissions
@@ -1333,10 +1337,12 @@ void vk_exec_init(void) {
     // (AMD 26.10.1) both lost the device on v0.1.10 at the first frames in the world, "read invalid 0xbeefdeadc000"
     // (#54, #39), where v0.1.9 played; and RADV crashed in the driver with it on the whole-window import (#51).
     // LARECOMP_SHADER_FLAT=1: on, =0: off everywhere
-    if (g_vk.props.vendorID == 0x1002) {
-        maxwell_flat_default = false;
-        if (!getenv("LARECOMP_SHADER_FLAT")) LOG("[vk] straight-line shader form off on this AMD GPU (LARECOMP_SHADER_FLAT=1: on)\n");
-    }
+    // (F1 > Compatibility: On / Off over the per-GPU default)
+    int fcs = g_settings.gpu_compat[GPU_STRAIGHT];
+    maxwell_flat_default = fcs != GPU_AUTO ? fcs == GPU_ON : g_vk.props.vendorID != 0x1002;
+    if (!getenv("LARECOMP_SHADER_FLAT") && !maxwell_flat_default)
+        LOG("[vk] straight-line shader form off (%s; LARECOMP_SHADER_FLAT=1: on)\n",
+            fcs == GPU_OFF ? "F1 > Compatibility" : "this AMD GPU, F1 > Compatibility to turn it on");
     prof = getenv("LARECOMP_VK_PROF") != NULL;
     if (prof) prof_up_ns = 0;
     // the GPU timer (LARECOMP_VK_GPU_TIMER=0: off - dynamic resolution then goes by the frame times)
@@ -4807,8 +4813,10 @@ static bool xm_on(void) {
     static int on = -1;
     if (on < 0) {
         const char *e = ENV("LARECOMP_VK_XFB_MIRROR");
-        on = e ? atoi(e) != 0 : g_vk.props.vendorID != 0x1002;
-        if (!on && !e) LOG("[vk] transform feedback mirror off on this AMD GPU (LARECOMP_VK_XFB_MIRROR=1: on)\n");
+        int cs = g_settings.gpu_compat[GPU_XFB_MIRROR];  // (F1 > Compatibility)
+        on = e ? atoi(e) != 0 : cs != GPU_AUTO ? cs == GPU_ON : g_vk.props.vendorID != 0x1002;
+        if (!on && !e) LOG("[vk] transform feedback mirror off (%s; LARECOMP_VK_XFB_MIRROR=1: on)\n",
+                           cs == GPU_OFF ? "F1 > Compatibility" : "this AMD GPU, F1 > Compatibility to turn it on");
     }
     return on && g_vk.host_import;
 }

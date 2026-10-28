@@ -330,11 +330,11 @@ void vk_device_fault_report(void) {
         LOG("[vk]   vendor: %s (code %#llx data %#llx)\n", vend[i].description, (unsigned long long)vend[i].vendorFaultCode,
             (unsigned long long)vend[i].vendorFaultData);
     // the switches the AMD faults have been bisected with (#22, #39, #54): the next report names its own state
-    const char *fl = getenv("LARECOMP_SHADER_FLAT"), *xm = getenv("LARECOMP_VK_XFB_MIRROR"), *rt = getenv("LARECOMP_RENDER_THREAD");
-    bool amd = g_vk.props.vendorID == 0x1002;
-    extern bool vk_overlap_state(void);
-    LOG("[vk]   state: straight-line shaders %s, xfb mirror %s, render thread %s, dynamic vertex input %s, GPU overlap %s\n",
-        fl ? fl : amd ? "off (AMD default)" : "on (default)", xm ? xm : amd ? "off (AMD default)" : "on (default)",
+    // (as they ran: F1 > Compatibility, the LARECOMP_* variables and the per-GPU defaults all applied)
+    extern bool vk_overlap_state(void), vk_xfb_mirror_state(void), maxwell_flat_state(void);
+    const char *rt = getenv("LARECOMP_RENDER_THREAD");
+    LOG("[vk]   state: straight-line shaders %s, xfb mirror %s, render thread %s, dynamic vertex input %s, GPU overlap %s"
+        " (F1 > Rendering > Compatibility)\n", maxwell_flat_state() ? "on" : "off", vk_xfb_mirror_state() ? "on" : "off",
         rt ? rt : "on (default)", g_vk.vids ? "on" : "off", vk_overlap_state() ? "on" : "off");
 }
 
@@ -526,11 +526,14 @@ static void create_device(void) {
         // as the GPU overlap (exec.c overlap_on); LARECOMP_VK_DYN_VERTEX=1 turns it on
         bool amd = g_vk.props.vendorID == 0x1002;
         if (amd && !(e && *e)) off = true;
+        int cs = g_settings.gpu_compat[GPU_DYN_VERTEX];  // (F1 > Compatibility: Auto keeps the rules above)
+        if (!(e && *e) && cs != GPU_AUTO) off = cs == GPU_OFF;
         g_vk.vids = vids_ext && have_vids.vertexInputDynamicState && !off;
         if (g_vk.vids) ext[n_ext++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
         else LOG("[vk] vertex input: in each pipeline (%s)\n",
+                 !(e && *e) && cs == GPU_OFF ? "F1 > Compatibility" :
                  intel_legacy && !(e && *e) ? "Intel's older Windows driver: drew nothing with it" :
-                 amd && !(e && *e) ? "off on AMD GPUs, #39; LARECOMP_VK_DYN_VERTEX=1: on" :
+                 amd && !(e && *e) ? "off on AMD GPUs, #39; F1 > Compatibility or LARECOMP_VK_DYN_VERTEX=1: on" :
                  off ? "LARECOMP_VK_DYN_VERTEX=0" :
                  !vids_ext ? "no VK_EXT_vertex_input_dynamic_state" : "vertexInputDynamicState not supported");
     }

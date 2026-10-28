@@ -19,6 +19,11 @@ enum { PROMPTS_AUTO = 0, PROMPTS_NINTENDO = 1, PROMPTS_XBOX = 2, PROMPTS_PLAYSTA
 enum { MOUSE_CAM_OFF = 0, MOUSE_CAM_HOLD = 1 /* right button held */, MOUSE_CAM_CAPTURED = 2 /* cursor held by the window */ };
 // Which face button confirms in our own menus (runtime/ui/pad_nav.mm); the game's input is never affected
 enum { MENU_CONFIRM_GAME = 0, MENU_CONFIRM_CONTROLLER = 1 };
+// F1 > Rendering > Compatibility (Vulkan): GPU features some drivers fail with, each Auto / On / Off from the next start;
+// the LARECOMP_* variable named in each still wins
+enum { GPU_DYN_VERTEX = 0 /* LARECOMP_VK_DYN_VERTEX */, GPU_OVERLAP /* LARECOMP_GPU_OVERLAP */,
+       GPU_STRAIGHT /* LARECOMP_SHADER_FLAT */, GPU_XFB_MIRROR /* LARECOMP_VK_XFB_MIRROR */, GPU_COMPAT_N };
+enum { GPU_AUTO = 0, GPU_ON = 1, GPU_OFF = 2 };
 enum { TIMER_POS_LEFT = 0, TIMER_POS_RIGHT = 1 };  // the run timer's corner (bottom left / right)
 enum { CHAOS_LETTERS_OFF = 0, CHAOS_LETTERS_EXPLORED = 1, CHAOS_LETTERS_MAP = 2 /* explored, all with the Map */ };
 // System language served to the game (runtime/services/am.c GetDesiredLanguage, services/hid_set.c GetLanguageCode):
@@ -38,6 +43,7 @@ typedef struct {
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     int sharpen;         // SHARPEN_*: sharpening of the image in the window (Vulkan)
     bool taa;            // Pokémon Z-A: AMD FSR 2's temporal anti-aliasing in place of the game's own (vulkan/exec.c fsr2_copy)
+    int gpu_compat[GPU_COMPAT_N];  // GPU_AUTO / GPU_ON / GPU_OFF per GPU_* feature (Compatibility)
     float volume;        // master volume, 1 = 100%
     bool reverb;         // room reverb effect
     bool movie_audio;

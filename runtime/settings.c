@@ -177,6 +177,11 @@ void settings_load(void) {
         else if (!strcmp(key, "hdr_peak_nits")) { int n = atoi(val); g_settings.hdr_peak = n < 200 ? 200 : n > 10000 ? 10000 : n; }
         else if (!strcmp(key, "hdr_paper_white_nits")) { int n = atoi(val); g_settings.hdr_paper = n < 80 ? 80 : n > 500 ? 500 : n; }
         else if (!strcmp(key, "present_mode")) g_settings.present_fifo = !strcmp(val, "fifo");
+        else if (!strncmp(key, "gpu_", 4)) {  // Compatibility: gpu_dynamic_vertex / gpu_overlap / ... = auto|on|off
+            static const char *const names[GPU_COMPAT_N] = {"gpu_dynamic_vertex", "gpu_overlap", "gpu_straight_shaders", "gpu_xfb_mirror"};
+            for (int i = 0; i < GPU_COMPAT_N; i++)
+                if (!strcmp(key, names[i])) g_settings.gpu_compat[i] = !strcmp(val, "on") ? GPU_ON : !strcmp(val, "off") ? GPU_OFF : GPU_AUTO;
+        }
         else if (!strcmp(key, "aniso16")) g_settings.aniso16 = atoi(val) != 0;
         else if (!strcmp(key, "operation_mode")) g_settings.opmode = !strcmp(val, "handheld") ? 2 : !strcmp(val, "docked") ? 1 : 0;
         else if (!strcmp(key, "dynamic_res")) g_settings.game_drs = !strcmp(val, "game");
@@ -298,6 +303,11 @@ void settings_save(void) {
     fprintf(f, "hdr_peak_nits = %d\n", g_settings.hdr_peak);
     fprintf(f, "hdr_paper_white_nits = %d\n", g_settings.hdr_paper);
     fprintf(f, "present_mode = %s\n", g_settings.present_fifo ? "fifo" : "mailbox");
+    {
+        static const char *const names[GPU_COMPAT_N] = {"gpu_dynamic_vertex", "gpu_overlap", "gpu_straight_shaders", "gpu_xfb_mirror"};
+        for (int i = 0; i < GPU_COMPAT_N; i++)
+            fprintf(f, "%s = %s\n", names[i], g_settings.gpu_compat[i] == GPU_ON ? "on" : g_settings.gpu_compat[i] == GPU_OFF ? "off" : "auto");
+    }
     fprintf(f, "operation_mode = %s\n", g_settings.opmode == 2 ? "handheld" : g_settings.opmode == 1 ? "docked" : "auto");
     fprintf(f, "dynamic_res = %s\n", g_settings.game_drs ? "game" : "off");
     fprintf(f, "tex_hd = %d\n", g_settings.tex_hd);

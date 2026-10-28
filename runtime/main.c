@@ -318,7 +318,11 @@ int main(int argc, char **argv) {
                 SDL_CreateDirectory("logs");
                 remove("logs/play-anterior.log");
                 rename("logs/play.log", "logs/play-anterior.log");
-                if (freopen("logs/play.log", "w", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
+                if (freopen("logs/play.log", "w", stderr)) {
+                    setvbuf(stderr, NULL, _IONBF, 0);
+                    extern void rt_log_moved(const char *path);
+                    rt_log_moved("logs/play.log");  // (the crash dialog's "Log file:")
+                }
             }
 #endif
             // the button icons, if this copy never got them (set up before they existed): made aside for the next

@@ -1287,6 +1287,17 @@ void plat_terminate(void) {  // (exit()'s last handler, runtime/nvn/vulkan/devic
     TerminateProcess(GetCurrentProcess(), 0);
 }
 
+// main.c moved stderr to logs/play.log (Pokémon Z-A): the crash dialog names that file and it becomes lasrecomp.log at
+// the end. The session file (lasrecomp-backup-*.log) keeps only the lines before the move - players attached it from
+// the dialog and sent 231 null bytes (#15, #39)
+void rt_log_moved(const char *path) {
+    char full[MAX_PATH];
+    DWORD n = GetFullPathNameA(path, sizeof full, full, NULL);
+    if (!g_log_path[0] || !n || n >= sizeof full || !lock_logs()) return;
+    snprintf(g_log_path, sizeof g_log_path, "%s", full);
+    ReleaseMutex(g_log_mutex);
+}
+
 // stderr still the console (no redirect: started by a double click) - main.c then logs to a file
 int rt_stderr_is_console(void) {
     DWORD t = GetFileType(GetStdHandle(STD_ERROR_HANDLE));

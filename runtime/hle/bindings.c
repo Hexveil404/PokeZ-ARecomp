@@ -46,6 +46,7 @@ int bind_mouse_from_sdl(int b) {
     }
 }
 void bind_mouse_reset(void) { memcpy(g_bind_mouse, k_def_mouse, sizeof g_bind_mouse); }
+int bind_mouse_default(int mb) { return mb >= 0 && mb < MOUSEB_COUNT ? k_def_mouse[mb] : -1; }
 bool bind_mouse_is_default(void) { return !memcmp(g_bind_mouse, k_def_mouse, sizeof g_bind_mouse); }
 
 static const char *const k_ini[BIND_KEY_COUNT] = {

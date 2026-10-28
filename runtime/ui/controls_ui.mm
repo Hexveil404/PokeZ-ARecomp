@@ -66,76 +66,70 @@ static int slot_cat(int slot) {
     return CAT_BUTTONS;
 }
 
-// The mouse: how it turns the camera, how fast, and the Switch button each of its buttons presses (runtime/hle/input.c)
-static void stick_draw() {
-    ImGui::SeparatorText(TR("Right stick###rstick", "Analógico direito###rstick"));
-    static const int deg[] = {0, 10, 15, 20, 25};
-    const char *const names[] = {TR("Off", "Desligado"), TR("10 degrees", "10 graus"), TR("15 degrees", "15 graus"),
-                                 TR("20 degrees", "20 graus"), TR("25 degrees", "25 graus")};
-    int cur = 0;
-    for (int i = 0; i < 5; i++) if (g_settings.rstick_snap == deg[i]) cur = i;
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
-    if (ImGui::Combo(TR("Snap to axis###snap", "Encaixar no eixo###snap"), &cur, names, 5)) {
-        g_settings.rstick_snap = deg[cur];
-        settings_save();
-    }
-    ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("%s", TR("Turning the camera sideways with the stick tilts it a little up or down when the stick isn't "
-                                 "pushed exactly sideways. Within this angle of an axis the stick counts as on it.",
-                                 "Girar a câmera para o lado com o analógico inclina ela um pouco para cima ou para baixo quando "
-                                 "o analógico não está exatamente de lado. Dentro deste ângulo de um eixo, o analógico conta "
-                                 "como estando nele."));
-    ImGui::PopTextWrapPos();
-}
-
-static void mouse_draw() {
-    ImGui::SeparatorText(TR("Mouse", "Mouse"));
-    const char *const modes[] = {TR("Off", "Desligado"), TR("Hold the right button", "Segurando o botão direito"),
-                                 TR("Always (the window holds the cursor)", "Sempre (a janela prende o cursor)")};
+// The right stick's snap and the mouse (runtime/hle/input.c): option rows in the page's list. (They were drawn under
+// the list with plain ImGui widgets, and the list takes the page's whole height: nobody could reach them - #44.)
+static void stick_mouse_rows() {
     bool changed = false;
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
-    changed |= ImGui::Combo(TR("Camera###cam", "Câmera###cam"), &g_settings.mouse_camera, modes, 3);
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
-    ImGui::SliderFloat(TR("Camera speed###camspeed", "Velocidade da câmera###camspeed"), &g_settings.mouse_sens, 0.1f, 5.0f,
-                       "%.2f", ImGuiSliderFlags_Logarithmic);
-    if (ImGui::IsItemDeactivatedAfterEdit()) changed = true;  // (saved once let go, not on every step of a drag)
-    ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("%s", TR("Always: while you play, the cursor is hidden and moving the mouse turns the camera; F1 or Esc "
-                                 "(the menu) or switching windows gives the cursor back. The buttons below work only then.",
-                                 "Sempre: enquanto você joga, o cursor some e mexer o mouse gira a câmera; F1 ou Esc (o menu) "
-                                 "ou trocar de janela devolve o cursor. Os botões abaixo só valem nesse modo."));
-    ImGui::PopTextWrapPos();
-    // the Switch buttons a mouse button can press: names and order as the table above
-    static const int opts[] = {-1, BIND_A, BIND_B, BIND_X, BIND_Y, BIND_L, BIND_R, BIND_ZL, BIND_ZR, BIND_PLUS, BIND_MINUS,
-                               BIND_UP, BIND_DOWN, BIND_LEFT, BIND_RIGHT, BIND_LSTICK, BIND_RSTICK};
-    if (ImGui::BeginTable("##mouse", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX)) {
+    opt_section(TR("Right stick", "Analógico direito"));
+    {
+        static const int deg[] = {0, 10, 15, 20, 25};
+        const char *const names[] = {TR("Off", "Desligado"), TR("10 degrees", "10 graus"), TR("15 degrees", "15 graus"),
+                                     TR("20 degrees", "20 graus"), TR("25 degrees", "25 graus")};
+        int cur = 0;
+        for (int i = 0; i < 5; i++) if (g_settings.rstick_snap == deg[i]) cur = i;
+        if (opt_choice(TR("Snap to axis", "Encaixar no eixo"), &cur, names, 5, 0,
+                       TR("Turning the camera sideways with the stick tilts it a little up or down when the stick isn't "
+                          "pushed exactly sideways. Within this angle of an axis the stick counts as on it (15-20 degrees "
+                          "for most controllers).",
+                          "Girar a câmera para o lado com o analógico inclina ela um pouco para cima ou para baixo quando "
+                          "o analógico não está exatamente de lado. Dentro deste ângulo de um eixo, o analógico conta "
+                          "como estando nele (15-20 graus para a maioria dos controles)."), false)) {
+            g_settings.rstick_snap = deg[cur];
+            changed = true;
+        }
+    }
+    opt_section(TR("Mouse", "Mouse"));
+    {
+        const char *const modes[] = {TR("Off", "Desligado"), TR("Hold the right button", "Segurando o botão direito"),
+                                     TR("Always", "Sempre")};
+        changed |= opt_choice(TR("Camera", "Câmera"), &g_settings.mouse_camera, modes, 3, MOUSE_CAM_CAPTURED,
+                              TR("Always: while you play, the cursor is hidden and moving the mouse turns the camera; F1 or "
+                                 "Esc (the menu) or switching windows gives the cursor back. The mouse buttons below work "
+                                 "only then.",
+                                 "Sempre: enquanto você joga, o cursor some e mexer o mouse gira a câmera; F1 ou Esc (o "
+                                 "menu) ou trocar de janela devolve o cursor. Os botões do mouse abaixo só valem nesse modo."),
+                              false);
+        changed |= opt_slider(TR("Camera speed", "Velocidade da câmera"), &g_settings.mouse_sens, 0.1f, 5.0f, 0.05f, 1.0f,
+                              "%.2f", TR("How fast the mouse turns the camera.", "O quanto o mouse gira a câmera."));
+        // the Switch buttons a mouse button can press (as in Configure inputs)
+        static const int opts[] = {-1, BIND_A, BIND_B, BIND_X, BIND_Y, BIND_L, BIND_R, BIND_ZL, BIND_ZR, BIND_PLUS, BIND_MINUS,
+                                   BIND_UP, BIND_DOWN, BIND_LEFT, BIND_RIGHT, BIND_LSTICK, BIND_RSTICK};
+        enum { NOPT = sizeof opts / sizeof opts[0] };
+        const char *names[NOPT];
+        for (int i = 0; i < NOPT; i++) names[i] = opts[i] >= 0 ? bind_input_name(opts[i]) : TR("(none)", "(nenhum)");
         for (int m = 0; m < MOUSEB_COUNT; m++) {
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(bind_mouse_name(m));
-            ImGui::TableNextColumn();
-            ImGui::SetNextItemWidth(-FLT_MIN);
-            char id[16];
-            snprintf(id, sizeof id, "##mb%d", m);
-            const char *none = TR("(none)", "(nenhum)");
-            if (ImGui::BeginCombo(id, g_bind_mouse[m] >= 0 ? bind_input_name(g_bind_mouse[m]) : none)) {
-                for (int o : opts)
-                    if (ImGui::Selectable(o >= 0 ? bind_input_name(o) : none, g_bind_mouse[m] == o)) {
-                        g_bind_mouse[m] = (int16_t)o;
-                        changed = true;
-                    }
-                ImGui::EndCombo();
+            int cur = 0, def = 0;
+            for (int i = 0; i < NOPT; i++) {
+                if (opts[i] == g_bind_mouse[m]) cur = i;
+                if (opts[i] == bind_mouse_default(m)) def = i;
+            }
+            static const char *const mnames[MOUSEB_COUNT][2] = {{"Left button", "Botão esquerdo"}, {"Right button", "Botão direito"},
+                {"Middle button", "Botão do meio"}, {"Back button", "Botão voltar"}, {"Forward button", "Botão avançar"}};
+            if (opt_choice(TR(mnames[m][0], mnames[m][1]), &cur, names, NOPT, def,
+                           TR("The Switch button this mouse button presses (Camera: Always).",
+                              "O botão do Switch que este botão do mouse aperta (Câmera: Sempre)."))) {
+                g_bind_mouse[m] = (int16_t)opts[cur];
+                changed = true;
             }
         }
-        ImGui::EndTable();
+        if (!bind_mouse_is_default() &&
+            opt_button(TR("Reset mouse buttons", "Voltar os botões do mouse ao padrão"),
+                       TR("The left button presses ZR, the right one ZL, the others nothing.",
+                          "O botão esquerdo aperta ZR, o direito ZL, os outros nada."))) {
+            bind_mouse_reset();
+            changed = true;
+        }
     }
-    ImGui::BeginDisabled(bind_mouse_is_default());
-    if (ImGui::Button(TR("Reset mouse buttons to defaults###mreset", "Voltar os botões do mouse ao padrão###mreset"))) {
-        bind_mouse_reset();
-        changed = true;
-    }
-    ImGui::EndDisabled();
     if (changed) settings_save();
 }
 
@@ -400,9 +394,6 @@ extern "C" void controls_tab_draw(float scale) {
                    TR("Which button confirms in ZA Recomp's menus.", "Qual botão confirma nos menus do ZA Recomp."));
     }
 
+    stick_mouse_rows();
     opt_end();
-    ImGui::Spacing();
-    stick_draw();
-    ImGui::Spacing();
-    mouse_draw();  // (Pokémon Z-A's mouse camera)
 }

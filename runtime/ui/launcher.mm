@@ -1154,7 +1154,10 @@ static std::string g_export_pick;
 
 static void saves_scan(void) {
     g_save_time = 0, g_save_bytes = 0;
-    if (is_dir("save/save_0")) tree_stat("save/save_0", g_save_time, g_save_bytes);
+    // (the save the game plays: LARECOMP_SAVE_DIR as runtime/services/fs.c, else the data root's - as party_load)
+    const char *sd = getenv("LARECOMP_SAVE_DIR");
+    std::string s0 = sd && *sd ? std::string(sd) + "/save_0" : std::string("save/save_0");
+    if (is_dir(s0.c_str())) tree_stat(s0.c_str(), g_save_time, g_save_bytes);
     g_backups.clear();
     if (DIR *d = opendir("save")) {
         while (struct dirent *e = readdir(d)) {
@@ -1780,7 +1783,11 @@ static void party_decrypt(uint8_t *d) {  // one slot's first 0x158 bytes, in pla
 static void party_load(void) {
     g_party.clear();
     g_party_time = g_save_time;
-    FILE *f = fopen("save/save_0/main", "rb");
+    // (the save the game plays: LARECOMP_SAVE_DIR, as runtime/services/fs.c, else the data root's - the panel showed
+    // another team than the one played when a run pointed the game at a copy)
+    const char *sd = getenv("LARECOMP_SAVE_DIR");
+    std::string main_path = sd && *sd ? std::string(sd) + "/save_0/main" : std::string("save/save_0/main");
+    FILE *f = fopen(main_path.c_str(), "rb");
     if (!f) return;
     std::vector<uint8_t> p, blk;
     fseek(f, 0, SEEK_END);
@@ -1792,7 +1799,7 @@ static void party_load(void) {
     }
     fclose(f);
     if (!party_block(p, blk)) {
-        if (!p.empty()) fprintf(stderr, "[launcher] team: no party in save/save_0/main\n");
+        if (!p.empty()) fprintf(stderr, "[launcher] team: no party in %s\n", main_path.c_str());
         return;
     }
     for (size_t i = 0; i + 0x158 <= blk.size() && i < 6 * 0x1E0; i += 0x1E0) {

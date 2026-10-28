@@ -35,6 +35,7 @@ extern int16_t g_bind_mouse[MOUSEB_COUNT];
 const char *bind_mouse_name(int mb);           // "Left button"
 int bind_mouse_from_sdl(int sdl_button);       // SDL_BUTTON_* -> MOUSEB_* (-1: another button)
 void bind_mouse_reset(void);
+int bind_mouse_default(int mb);                 // the BIND_* that mouse button presses by default (-1: none)
 bool bind_mouse_is_default(void);
 
 const char *bind_input_name(int slot);         // "A", "D-pad Up", "Left stick Up"

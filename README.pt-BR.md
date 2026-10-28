@@ -31,7 +31,7 @@ para *The Legend of Zelda: Link's Awakening*.
 - [Imagens](#imagens)
 - [Recursos](#recursos)
 - [Requisitos](#requisitos)
-- [Instalação](#instalação)
+- [Instalação](#instalação) ([DLC Mega Dimension](#dlc-mega-dimension))
 - [Controles](#controles)
 - [Saves](#saves)
 - [Mods](#mods)
@@ -105,6 +105,19 @@ O Linux ainda não é suportado oficialmente. No Mac, use o [MonZaMac](https://g
 
 Os seus arquivos nunca são alterados. Se quiser, importe as fontes do seu console na tela inicial
 (**Configurações > Arquivos**) para o texto e os ícones de botões originais; sem elas, é usada uma fonte substituta.
+
+### DLC Mega Dimension
+
+A DLC é suportada pelo caminho do **dump** (as pastas extraídas `exefs` / `romfs` não incluem ela):
+
+1. Coloque estes arquivos juntos em uma pasta: o jogo base (`.xci` ou `.nsp`), a **atualização** (`.nsp`, versão 2.0.0
+   ou mais nova - o conteúdo da DLC vem com ela), a **DLC** (`.nsp`) e o `prod.keys` do seu Switch (e o `title.keys`
+   se a tela inicial pedir).
+2. Escolha essa pasta na tela inicial e clique em **Preparar o jogo**.
+3. A tela inicial mostra **+ DLC** ao lado da versão do jogo quando ela foi encontrada.
+
+Já preparou o jogo sem a DLC? Clique em **Trocar pasta do jogo**, escolha a pasta de novo com a DLC junto e prepare de
+novo. Os seus saves e configurações são mantidos.
 
 ## Controles
 

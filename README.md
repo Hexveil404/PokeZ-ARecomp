@@ -31,7 +31,7 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 - [Screenshots](#screenshots)
 - [Features](#features)
 - [Requirements](#requirements)
-- [Installation](#installation)
+- [Installation](#installation) ([Mega Dimension DLC](#mega-dimension-dlc))
 - [Controls](#controls)
 - [Saves](#saves)
 - [Mods](#mods)
@@ -105,6 +105,19 @@ Linux is not officially supported yet. On a Mac, use [MonZaMac](https://github.c
 
 Your own files are never changed. Optionally, import your console's fonts on the start screen (**Settings > Files**)
 for the original text and button icons; without them a substitute font is used.
+
+### Mega Dimension DLC
+
+The DLC is supported through the **dump** route (the extracted `exefs` / `romfs` folders don't include it):
+
+1. Put these files together in one folder: the base game (`.xci` or `.nsp`), the **update** (`.nsp`, version 2.0.0 or
+   newer - the DLC's content comes with it), the **DLC** (`.nsp`) and the `prod.keys` from your Switch (plus
+   `title.keys` if the start screen asks for it).
+2. Choose that folder on the start screen and click **Set up the game**.
+3. The start screen shows **+ DLC** next to the game version when it was found.
+
+Already set up without the DLC? Click **Change game folder**, choose the folder again with the DLC added and set it up
+again. Your saves and settings are kept.
 
 ## Controls
 

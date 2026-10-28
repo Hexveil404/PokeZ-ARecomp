@@ -2138,6 +2138,10 @@ extern "C" void launcher_run(const char *root) {
         }
         was_busy = busy;
         busy |= test_busy;
+        // minimised, the window has no size: DisplaySize 0 made g_s 0 and every button zero-sized, and ImGui's assert
+        // in InvisibleButton then stopped the start screen in the middle of a game code build (#39, #53). The build
+        // and setup go on in their threads; nothing to draw until the window is back
+        if (SDL_GetWindowFlags(win) & SDL_WINDOW_MINIMIZED) { SDL_Delay(50); continue; }
 
 #ifdef __APPLE__
         int w, h;

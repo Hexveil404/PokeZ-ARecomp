@@ -159,6 +159,17 @@ typedef struct {
     uint32_t sc_count;
     VkImage sc_images[8];
     VkImageView sc_views[8];
+    // HDR output (F1 > Video > HDR; device.c create_swapchain): the window's own images; sc_images / sc_views are then
+    // SDR images everything draws into, turned into HDR at vk_frame_end (exec.c vk_hdr_encode)
+    bool hdr, hdr_capable;  // (on; the display offers it now)
+    VkFormat hdr_format;
+    VkColorSpaceKHR hdr_space;
+    VkImage hdr_images[8];
+    VkImageView hdr_views[8];
+    VmaAllocation sdr_mem[8];
+    VkImage hdr_base;  // the window image before the overlay (vk_hdr_mark_base): what ImGui drew is told apart from it
+    VmaAllocation hdr_base_mem;
+    VkImageView hdr_base_view;
 } VkG;
 void vk_log_memory(const char *why);  // (device.c: per-heap budget and use, at start and on allocation failures)
 extern VkG g_vk;

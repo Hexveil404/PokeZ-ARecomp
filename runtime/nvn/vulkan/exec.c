@@ -3031,6 +3031,20 @@ void vk_alias_texture_destroyed(NvnTexture *t) {
     if (naliases) alias_before_write(t, 0, "freed");
 }
 
+// HDR (vk_hdr_encode): the game's picture before its HUD. Pokémon Z-A tone-maps its frame into an image of its own,
+// copies that opaque - edge anti-aliased on the way, so not the same pixels - into the image it presents, and draws the
+// HUD over it with blending. After an opaque draw into an image that has been presented, that image is copied
+// (hdr_snapshot, two: the game alternates two such images): what differs from the copy when it is shown is the HUD.
+static struct { NvnTexture *shown; TexBackend img; } hdr_snaps[2];
+static TexBackend *hdr_game;  // (vk_present_draw: this frame's game image, its place in the window, uv crop and flip)
+static float hdr_place[9];
+static void hdr_snapshot(NvnTexture *t);
+static TexBackend *hdr_snap_of(TexBackend *shown) {
+    for (int i = 0; i < 2; i++)
+        if (hdr_snaps[i].shown && hdr_snaps[i].shown->backend == shown && hdr_snaps[i].img.image) return &hdr_snaps[i].img;
+    return NULL;
+}
+
 // textures.c: t is being freed - the executor's state stops naming it. The render targets stay bound across command
 // lists, and a freed one was still in st.rt: a later list's pass began on it, which made it a new backend and put the
 // freed texture back on the live list (textures.c g_live); the next texture freed then read that entry's garbage -
@@ -3044,6 +3058,8 @@ void vk_exec_texture_destroyed(NvnTexture *t) {
     snapshots_invalidate(t);
     for (int i = 0; i < 8; i++) if (snap_tex[i] == t) snap_tex[i] = NULL;
     for (int i = 0; i < nsnaps; i++) if (snaps[i].key == t) snaps[i].key = NULL;
+    for (int i = 0; i < 2; i++) if (hdr_snaps[i].shown == t) hdr_snaps[i].shown = NULL;
+    if (hdr_game && hdr_game == t->backend) hdr_game = NULL;
 }
 void vk_alias_reset(void) { naliases = 0; }  // (reboot: every texture goes)
 
@@ -6294,6 +6310,9 @@ static void draw(CmdRec *r, bool indexed) {
                 (unsigned long long)xfb_addr[2], (unsigned long long)xfb_size[2]);
     }
     draw_(r, indexed);
+    if (g_vk.hdr && st.rt.color[0] && !st.color_state[0] && st.rt.color[0]->backend &&
+        ((TexBackend *)st.rt.color[0]->backend)->presented)
+        hdr_snapshot(st.rt.color[0]);  // (the game's picture in the image it shows, before the HUD over it)
     PROF_ADD(prof_draw);
 }
 static uint64_t prof_tp_;
@@ -7986,6 +8005,11 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
     // Dynamic: the image occupies the top-left part of the texture; FSR maps that part to its whole output, otherwise
     // the present samples the part
     float fx = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, fy = b->scalable && b->ay > 0 ? b->sy / b->ay : 1;
+    if (g_vk.hdr) {  // (vk_hdr_encode: where the game image is, to find its HUD)
+        hdr_game = b;
+        float g[12] = {vx, vy, vw > 0 ? 1 / vw : 0, vh > 0 ? 1 / vh : 0, pv[4] * fx, pv[5] * fy, pv[6] * fx, pv[7] * fy, pv[0]};
+        memcpy(hdr_place, g, sizeof hdr_place);
+    }
     bool upscaled = false;
     VkImageView src = post_process(cb, b, fx, fy, pv[6] > 0 ? vw / pv[6] : vw, pv[7] > 0 ? vh / pv[7] : vh, &upscaled);
     float pvc[8];
@@ -8010,6 +8034,135 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
     rec_CmdDraw(cb, 3, 1, 0, 0);
     VkViewport full = {0, 0, (float)g_vk.sc_extent.width, (float)g_vk.sc_extent.height, 0, 1};
     rec_CmdSetViewport(cb, 0, 1, &full);
+}
+
+// (hdr_snaps above) t's image now -> its copy: the copy keeps t's format, read raw like t (raw_view)
+static void hdr_snapshot(NvnTexture *t) {
+    TexBackend *b = t->backend;
+    if (!b->image || b->aspect != VK_IMAGE_ASPECT_COLOR_BIT || b->levels != 1 || b->layers != 1 || b->samples > 1) return;
+    static int next;
+    int k = hdr_snaps[0].shown == t ? 0 : hdr_snaps[1].shown == t ? 1 : !hdr_snaps[0].shown ? 0 : !hdr_snaps[1].shown ? 1 : (next ^= 1);
+    hdr_snaps[k].shown = t;
+    TexBackend *d = &hdr_snaps[k].img;
+    VkFormat f = b->format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM : b->format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM : b->format;
+    if (d->image && (d->width != b->width || d->height != b->height || d->format != f)) {
+        vk_views_forget(d);
+        vk_defer_image(d->image, d->mem);
+        d->image = VK_NULL_HANDLE;
+        d->mem = VK_NULL_HANDLE;
+    }
+    if (!d->image) {
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = f,
+                                .extent = {b->width, b->height, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+                                .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateImage(g_vk.vma, &ci, &ai, &d->image, &d->mem, NULL) != VK_SUCCESS) { d->image = VK_NULL_HANDLE; return; }
+        d->format = f; d->width = b->width; d->height = b->height; d->depth = 1; d->layers = 1; d->levels = 1;
+        d->samples = 1; d->aspect = VK_IMAGE_ASPECT_COLOR_BIT; d->base_type = VK_IMAGE_VIEW_TYPE_2D;
+        vk_image_init_layout(vk_cmd(), d->image, d->aspect);
+    }
+    vk_end_pass();
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    VkImageCopy c = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                     .extent = {b->width, b->height, 1}};
+    rec_CmdCopyImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    vk_full_barrier(cb);
+}
+
+// HDR output (F1 > Video > HDR; device.c vk_frame_end): the window's SDR image (sdr; base: its copy from before the
+// overlay, or none) -> the window's HDR image (dst, g_vk.hdr_format) through hdr.frag. Its push constants: the game
+// image's place in the window and its uv crop (vk_present_draw), paper white / 80, peak / paper white, the knee
+// (LARECOMP_HDR_KNEE, linear; 0.45), and the flags. Without the game's picture before its HUD (the start screen, no
+// snapshot yet) nothing is brightened: all of it at paper white.
+void vk_hdr_encode(VkCommandBuffer cb, VkImageView sdr, VkImageView base, VkImageView dst) {
+    static VkPipelineLayout layout;
+    static VkDescriptorSetLayout dsl;
+    static VkPipeline pipe;
+    static VkFormat pipe_fmt;
+    if (!layout) {
+        VkDescriptorSetLayoutBinding bd[4];
+        for (uint32_t i = 0; i < 4; i++)
+            bd[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+        VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 4, .pBindings = bd};
+        VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &dsl));
+        VkPushConstantRange r = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64};
+        VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                         .pSetLayouts = &dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &r};
+        VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &ci, NULL, &layout));
+    }
+    if (!pipe || pipe_fmt != g_vk.hdr_format) {  // (an old one may still be in flight: kept, a few per session at most)
+        VkPipelineShaderStageCreateInfo stages[2] = {
+            {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
+             .module = vk_builtin_shader("post.vert"), .pName = "main"},
+            {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+             .module = vk_builtin_shader("hdr.frag"), .pName = "main"}};
+        VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                                                     .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+        VkPipelineViewportStateCreateInfo vs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
+        VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                                                     .polygonMode = VK_POLYGON_MODE_FILL, .lineWidth = 1};
+        VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+                                                   .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+        VkPipelineColorBlendAttachmentState cba = {.colorWriteMask = 0xF};
+        VkPipelineColorBlendStateCreateInfo cbs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1,
+                                                   .pAttachments = &cba};
+        VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        uint32_t ndyn = 2;
+        fullscreen_vertex_dyn(dyn, &ndyn, 3);
+        VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = ndyn, .pDynamicStates = dyn};
+        VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 1,
+                                            .pColorAttachmentFormats = &g_vk.hdr_format};
+        VkPipelineDepthStencilStateCreateInfo ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+        VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2,
+                                           .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
+                                           .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
+                                           .pColorBlendState = &cbs, .pDynamicState = &dy, .layout = layout};
+        VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pipe));
+        pipe_fmt = g_vk.hdr_format;
+    }
+    TexBackend *game = hdr_game;
+    hdr_game = NULL;  // (this frame's only: the start screen draws no game image)
+    TexBackend *sb = game ? hdr_snap_of(game) : NULL;
+    VkImageView shown_v = sb ? raw_view(game) : VK_NULL_HANDLE, scene_v = shown_v ? post_view(sb) : VK_NULL_HANDLE;
+    static float knee = -1;
+    if (knee < 0) knee = ENV("LARECOMP_HDR_KNEE") ? (float)atof(ENV("LARECOMP_HDR_KNEE")) : 0.45f;
+    if (knee < 0 || knee > 0.95f) knee = 0.45f;
+    float paper = (float)g_settings.hdr_paper, peak = (float)g_settings.hdr_peak;
+    float pc[16];
+    memcpy(pc, hdr_place, 8 * sizeof(float));
+    pc[8] = paper / 80, pc[9] = peak > paper ? peak / paper : 1, pc[10] = knee, pc[11] = 0;
+    pc[12] = g_vk.hdr_space == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT, pc[13] = base != VK_NULL_HANDLE, pc[14] = scene_v != VK_NULL_HANDLE;
+    pc[15] = hdr_place[8] > 0.5f;
+    VkDescriptorSet set = vk_alloc_set(dsl);
+    VkSampler lin = vk_default_sampler(true);
+    VkDescriptorImageInfo ii[4] = {{lin, sdr, VK_IMAGE_LAYOUT_GENERAL}, {lin, base ? base : sdr, VK_IMAGE_LAYOUT_GENERAL},
+                                   {lin, scene_v ? shown_v : sdr, VK_IMAGE_LAYOUT_GENERAL},
+                                   {lin, scene_v ? scene_v : sdr, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet wr[4];
+    for (uint32_t i = 0; i < 4; i++)
+        wr[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = i, .descriptorCount = 1,
+                                       .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[i]};
+    rec_UpdateDescriptorSets(4, wr);
+    VkExtent2D ext = g_vk.sc_extent;
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = dst,
+                                    .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                    .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, ext}, .layerCount = 1,
+                          .colorAttachmentCount = 1, .pColorAttachments = &ca};
+    rec_CmdBeginRendering(cb, &ri);
+    rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, NULL);
+    VkViewport vp = {0, 0, (float)ext.width, (float)ext.height, 0, 1};
+    VkRect2D sc = {{0, 0}, ext};
+    rec_CmdSetViewport(cb, 0, 1, &vp);
+    rec_CmdSetScissor(cb, 0, 1, &sc);
+    rec_CmdPushConstants(cb, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64, pc);
+    fullscreen_vertex_bind(cb);
+    rec_CmdDraw(cb, 3, 1, 0, 0);
+    rec_CmdEndRendering(cb);
 }
 
 // Screenshot of a game texture (presented crop applied to build/frame_* shots), via the present shader into RGBA8.

@@ -202,6 +202,7 @@ void settings_load(void) {
         else if (!strcmp(key, "sharpening")) {
             for (int i = 0; i < SHARPEN_N; i++) if (!strcmp(val, sharpen_names[i])) g_settings.sharpen = i;
         }
+        else if (!strcmp(key, "temporal_aa")) g_settings.taa = !strcmp(val, "fsr2");
         else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;
         else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
         else if (!strcmp(key, "rumble")) g_settings.rumble = atoi(val) != 0;

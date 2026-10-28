@@ -37,6 +37,7 @@ typedef struct {
     bool upscaler_auto;  // never chosen: the default for this GPU (settings_resolve_defaults); saved as "auto"
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     int sharpen;         // SHARPEN_*: sharpening of the image in the window (Vulkan)
+    bool taa;            // Pokémon Z-A: AMD FSR 2's temporal anti-aliasing in place of the game's own (vulkan/exec.c fsr2_copy)
     float volume;        // master volume, 1 = 100%
     bool reverb;         // room reverb effect
     bool movie_audio;

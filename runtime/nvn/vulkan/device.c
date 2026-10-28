@@ -98,6 +98,12 @@ static bool lazy_heap_predicted(bool budget_ext, bool *probe) {
     const char *e = getenv("LARECOMP_VK_GMEM_LAZY");
     if (e) return atoi(e) != 0;
     if (getenv("LARECOMP_VK_NO_GMEM")) return false;
+    // Pokémon Z-A has no heap: its window is one import (exec.c gmem_chunk_decide), and this prediction - sized on
+    // Link's Awakening's heap - only turned the lazy machinery on beside it: on a Steam Deck (heap 0 holds 2892 MB) the
+    // player, statues, trees and banner text went undrawn, complete with LARECOMP_VK_GMEM_LAZY=0 (#50). (Asked of the
+    // data root's files: the boot comes after the device)
+    extern bool game_files_are_la(const char *game_dir);
+    if (!game_files_are_la("extracted")) return false;
     uint64_t lim = g_vk.props.limits.maxStorageBufferRange;
     if (lim && lim < HEAP_MAX) return true;  // (UHD 770 main pass: lazy 8.4 ms, 512 MB windows 8.5)
 #ifdef _WIN32

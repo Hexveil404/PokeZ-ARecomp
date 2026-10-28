@@ -27,7 +27,9 @@ bool gpu_feature_on(int feature, const char *env) {
     if (e && *e) return atoi(e) != 0;
     int cs = feature >= 0 && feature < GPU_COMPAT_N ? g_settings.gpu_compat[feature] : GPU_AUTO;
     if (cs != GPU_AUTO) return cs == GPU_ON;
-    return g_gpu_vendor != 0x1002;
+    // Auto: on, but robust access 2 on AMD GPUs - with it the RX 9070 XT on driver 26.10.1 lost the device entering the
+    // world ("read invalid 0xbeefdeadc000", #39: restored alone of the four, it crashed; the other three didn't)
+    return !(g_gpu_vendor == 0x1002 && feature == GPU_ROBUST2);
 }
 
 Settings g_settings = {

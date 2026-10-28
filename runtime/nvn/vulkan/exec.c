@@ -5103,7 +5103,7 @@ static int pages_changed_outside(uint64_t addr, uint64_t size, uint32_t since, u
 static int pages_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now, bool gpu_unknown) {
     if (!size || !pt_init()) return -1;
     if (addr < gwin_base || addr - gwin_base + size > gwin_max) {
-        static int outside = -1;  // LARECOMP_VK_PAGES_OUTSIDE=0: unknown there, as before (F1 > Compatibility; off on AMD: #39)
+        static int outside = -1;  // LARECOMP_VK_PAGES_OUTSIDE=0: unknown there, as before (F1 > Compatibility)
         if (outside < 0) outside = gpu_feature_on(GPU_PAGES_OUTSIDE, "LARECOMP_VK_PAGES_OUTSIDE");
         int r = outside ? pages_changed_outside(addr, size, since, now) : -1;
         static int nlog;  // LARECOMP_LOG_PAGES=1 (debug): the first ranges outside the tracked window

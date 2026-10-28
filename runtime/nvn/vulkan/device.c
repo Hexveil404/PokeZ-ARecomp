@@ -447,8 +447,9 @@ static void create_device(void) {
 #endif
     // Shader reads past the buffer / image they were given: zeros instead of a GPU page fault (#22: an RX 9070 XT lost
     // the device on an invalid read in a battle, where NVIDIA reads on). Off on AMD by default since: on driver
-    // 26.10.1 the same card lost the device with it on ("read invalid 0xbeefdeadc000", #39) and played a battle
-    // with it off together with the three features below it in F1 > Compatibility. LARECOMP_VK_ROBUST2=0/1.
+    // 26.10.1 the same card loses the device with it, entering the world ("read invalid 0xbeefdeadc000", #39, #54 -
+    // isolated: alone of the features tried, it crashed when turned back on) and v0.1.9 in a battle. F1 >
+    // Compatibility; LARECOMP_VK_ROBUST2=0/1.
     bool x_rb2 = gpu_feature_on(GPU_ROBUST2, "LARECOMP_VK_ROBUST2") && has_ext(ep, ne, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
     // Whether the window really shows the frames presented (present_watch). LARECOMP_NO_PRESENT_WATCH=1: not checked
     bool x_pw = !ENV("LARECOMP_NO_PRESENT_WATCH") && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&

@@ -26,7 +26,7 @@ enum { GPU_DYN_VERTEX = 0 /* LARECOMP_VK_DYN_VERTEX */, GPU_OVERLAP /* LARECOMP_
        GPU_ROBUST2 /* LARECOMP_VK_ROBUST2 */, GPU_TEX_PREFETCH /* LARECOMP_TEX_PREFETCH */,
        GPU_SHADER_PREP /* LARECOMP_SHADER_PREP */, GPU_PAGES_OUTSIDE /* LARECOMP_VK_PAGES_OUTSIDE */, GPU_COMPAT_N };
 // the GPU's PCI vendor (Vulkan: device.c, before any feature is decided; 0: not known) and a feature's state: its
-// LARECOMP_* variable, else F1 > Compatibility, else on unless the GPU is AMD's (0x1002: #39, #54)
+// LARECOMP_* variable, else F1 > Compatibility, else on (robust access 2: off on AMD GPUs, #39)
 extern unsigned g_gpu_vendor;
 bool gpu_feature_on(int feature, const char *env);
 enum { GPU_AUTO = 0, GPU_ON = 1, GPU_OFF = 2 };

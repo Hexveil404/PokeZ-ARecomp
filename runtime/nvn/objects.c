@@ -668,7 +668,7 @@ static void register_texture(Cpu *c) {
     // targets (NVN flags display 1, compressible 8, linear render target 0x40: the GPU fills those). The image flag (4)
     // is on nearly all of Pokémon Z-A's textures: kept - a GPU write after the upload replaces it, one before skips it.
     static int prefetch = -1;
-    // (F1 > Compatibility; off on AMD by default: #39)
+    // (F1 > Compatibility)
     if (prefetch < 0) prefetch = gpu_feature_on(GPU_TEX_PREFETCH, "LARECOMP_TEX_PREFETCH");
     if (prefetch && e->tex && rq_on() && !(e->tex->flags & (0x1 | 0x8 | 0x40))) rq_prefetch_texture(e->tex);
     e->dead_format = 0;

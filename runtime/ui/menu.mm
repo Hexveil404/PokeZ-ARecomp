@@ -747,10 +747,10 @@ static void tab_display(void) {
         for (int i = 0; i < GPU_COMPAT_N; i++)
             opt_choice(TR(what[i][0], what[i][1]), &g_settings.gpu_compat[i], aoo, 3, GPU_AUTO,
                        TR("For crashes with a graphics driver error (\"Your graphics driver crashed\", a GPU page fault): "
-                          "turn these off one at a time. Auto: off on AMD GPUs, on elsewhere. Applies from the next start.",
+                          "turn these off one at a time. Auto: what works on your GPU (some are off on AMD GPUs). Applies from the next start.",
                           "Para travamentos com erro do driver de vídeo (\"Your graphics driver crashed\", falha de página "
-                          "da GPU): desligue um de cada vez. Auto: desligado em GPUs AMD, ligado nas outras. Vale a partir do "
-                          "próximo início."));
+                          "da GPU): desligue um de cada vez. Auto: o que funciona na sua GPU (alguns ficam desligados em GPUs AMD). "
+                          "Vale a partir do próximo início."));
     }
 #endif
 

@@ -128,7 +128,13 @@ static bool overlap_on(void) {
         uint32_t g;
         bool tracked = (!w || atoi(w) != 0) && pages_cpu_written(HEAP_BASE, 4096, 0, &g) >= 0;
         if (e) on = atoi(e) != 0;
-        else if (VK_OVERLAP_DEFAULT && !tracked) {
+        else if (VK_OVERLAP_DEFAULT && g_vk.props.vendorID == 0x1002) {
+            // AMD: off by default - new in v0.1.10 with the dynamic vertex input (device.c), and AMD GPUs lose the device
+            // there at the first frames in the world, "read invalid 0xbeefdeadc000" (#39, #54)
+            on = 0;
+            LOG("[vk] GPU overlap off on this AMD GPU (#39; LARECOMP_GPU_OVERLAP=1: on)\n");
+            return on;
+        } else if (VK_OVERLAP_DEFAULT && !tracked) {
             on = 0;
             LOG("[vk] GPU overlap off: no page write tracking on this system (%s); LARECOMP_GPU_OVERLAP=1 forces it on\n",
                 w && atoi(w) == 0 ? "LARECOMP_OVERLAP_WATCH=0" : heap_tracking_reason());
@@ -139,6 +145,7 @@ static bool overlap_on(void) {
     }
     return on;
 }
+bool vk_overlap_state(void) { return overlap_on(); }  // (device.c vk_device_fault_report)
 static _Atomic uint64_t g_last_gpu_frame_ticks;  // (overlap) the latest resolved counter pair's GPU span, in Switch GPU ticks
 static const uint64_t *cq_last_out;              // (cq_lock) the counter resolved last and its GPU ticks: a pair may straddle
 static uint64_t cq_last_ticks;                   // two submissions

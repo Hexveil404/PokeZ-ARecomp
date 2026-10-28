@@ -332,9 +332,10 @@ void vk_device_fault_report(void) {
     // the switches the AMD faults have been bisected with (#22, #39, #54): the next report names its own state
     const char *fl = getenv("LARECOMP_SHADER_FLAT"), *xm = getenv("LARECOMP_VK_XFB_MIRROR"), *rt = getenv("LARECOMP_RENDER_THREAD");
     bool amd = g_vk.props.vendorID == 0x1002;
-    LOG("[vk]   state: straight-line shaders %s, xfb mirror %s, render thread %s\n",
+    extern bool vk_overlap_state(void);
+    LOG("[vk]   state: straight-line shaders %s, xfb mirror %s, render thread %s, dynamic vertex input %s, GPU overlap %s\n",
         fl ? fl : amd ? "off (AMD default)" : "on (default)", xm ? xm : amd ? "off (AMD default)" : "on (default)",
-        rt ? rt : "on (default)");
+        rt ? rt : "on (default)", g_vk.vids ? "on" : "off", vk_overlap_state() ? "on" : "off");
 }
 
 // Each memory heap: its size, the driver's budget for this process (smaller when other programs hold that memory),
@@ -520,10 +521,16 @@ static void create_device(void) {
         intel_legacy = g_vk.props.vendorID == 0x8086 && g_vk.props.apiVersion <= VK_MAKE_API_VERSION(0, 1, 3, 215);
 #endif
         if (intel_legacy && !(e && *e)) off = true;
+        // AMD GPUs (RX 7600, RX 9070 XT on 26.10.1) lose the device on v0.1.10 at the first frames in the world, "read
+        // invalid 0xbeefdeadc000" (#39, #54), where v0.1.9 - no dynamic vertex input yet - played. Off there by default,
+        // as the GPU overlap (exec.c overlap_on); LARECOMP_VK_DYN_VERTEX=1 turns it on
+        bool amd = g_vk.props.vendorID == 0x1002;
+        if (amd && !(e && *e)) off = true;
         g_vk.vids = vids_ext && have_vids.vertexInputDynamicState && !off;
         if (g_vk.vids) ext[n_ext++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
         else LOG("[vk] vertex input: in each pipeline (%s)\n",
                  intel_legacy && !(e && *e) ? "Intel's older Windows driver: drew nothing with it" :
+                 amd && !(e && *e) ? "off on AMD GPUs, #39; LARECOMP_VK_DYN_VERTEX=1: on" :
                  off ? "LARECOMP_VK_DYN_VERTEX=0" :
                  !vids_ext ? "no VK_EXT_vertex_input_dynamic_state" : "vertexInputDynamicState not supported");
     }

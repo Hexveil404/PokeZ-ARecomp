@@ -1,166 +1,206 @@
+<div align="center">
+
+<img src="docs/icon/icon_1024.png" alt="ZA Recomp" width="128">
+
 # ZA Recomp
 
-[English](README.md) | **Português (Brasil)**
+**Um port nativo para PC de *Pokémon Legends: Z-A*, feito por recompilação estática.**
 
-Um port nativo para PC de **Pokémon Legends: Z-A** (Nintendo Switch, v1.0.0 e v2.0.0) feito por **recompilação
-estática**: o código ARM64 do jogo é traduzido antecipadamente para C e compilado para x86-64, e o sistema operacional
-e a GPU (NVN) do Switch são reimplementados no PC (Vulkan). Nenhum emulador roda durante o jogo.
+[English](README.md) · **Português (Brasil)**
 
-Este é um fork do **[LAS Recomp](https://github.com/peiikai/LASRecomp)**, de **Peiikai**: o recompilador, o runtime e
-a tradução NVN-para-Vulkan / de shaders Maxwell vêm todos desse projeto, feito para *The Legend of Zelda: Link's
-Awakening*. Este fork o estende para rodar Pokémon Legends: Z-A.
+[Download](https://github.com/Hexveil404/PokeZ-ARecomp/releases/latest) ·
+[Relatar um bug](https://github.com/Hexveil404/PokeZ-ARecomp/issues) ·
+[Port para macOS (MonZaMac)](https://github.com/lucabravi/MonZaMac)
 
-> **Você precisa da sua própria cópia do jogo.** Nenhum arquivo, código, recurso ou fonte do jogo está incluído neste
-> repositório.
+</div>
+
+---
+
+O ZA Recomp transforma o código do jogo do Nintendo Switch em um programa nativo do Windows. O código ARM64 é
+traduzido antecipadamente para C e compilado para x86-64 no seu PC, e o sistema operacional e a GPU (NVN) do Switch
+são reimplementados sobre Vulkan. Nenhum emulador roda enquanto você joga.
+
+Ele é baseado no **[LAS Recomp](https://github.com/peiikai/LASRecomp)**, do Peiikai, o recompilador estático feito
+para *The Legend of Zelda: Link's Awakening*.
+
+> [!IMPORTANT]
+> **Você precisa da sua própria cópia do jogo.** O ZA Recomp não inclui arquivos, código, assets nem fontes do jogo.
+
+## Conteúdo
+
+- [Imagens](#imagens)
+- [Recursos](#recursos)
+- [Requisitos](#requisitos)
+- [Instalação](#instalação)
+- [Controles](#controles)
+- [Saves](#saves)
+- [Mods](#mods)
+- [Solução de problemas](#solução-de-problemas)
+- [Compilando o código-fonte](#compilando-o-código-fonte)
+- [Créditos](#créditos)
+- [Aviso legal](#aviso-legal)
 
 ## Imagens
 
 | | |
 |---|---|
-| ![Cidade de Lumiose a 60 fps](docs/screenshots/lumiose.jpg) | ![Menu de configurações do port (F1)](docs/screenshots/settings.jpg) |
-| Cidade de Lumiose, 60 fps | Menu de configurações do port (F1) |
-| ![Menu do jogo](docs/screenshots/menu.jpg) | ![Bolsa](docs/screenshots/bag.jpg) |
-| Menu do jogo (mod de tradução PT-BR) | Bolsa |
+| ![Lumiose City a 60 fps](docs/screenshots/lumiose.jpg) | ![A tela inicial](docs/screenshots/start-screen-pt.png) |
+| Lumiose City a 60 fps | A tela inicial, com o seu time |
+| ![O menu do jogo](docs/screenshots/menu.jpg) | ![A mochila](docs/screenshots/bag.jpg) |
+| O menu do jogo (com mod de tradução) | A mochila |
 
-## Estado
+## Recursos
 
-Em desenvolvimento, jogável: inicia, passa pela introdução e pelos primeiros momentos da história na Cidade de
-Lumiose, as batalhas funcionam, e roda a 60 fps estáveis numa GPU de desktop.
+**Desempenho**
+- 60 fps na velocidade normal do jogo, ou 30 fps como no Switch
+- Resolução interna de 25% até 4x (1x = 1080p), além de Dinâmica e Igual à tela
+- Opção de ritmo dos quadros (Suave / Padrão) para telas em que o fps parece irregular
 
-Funcionando:
-- Renderização: personagens, animação (skinning na GPU / transform feedback), iluminação, descarte de objetos na GPU
-  (com a oclusão Hi-Z do próprio jogo), texto, diálogos e interface
-- **60 fps** (a versão do Switch roda a 30) na velocidade normal do jogo, ou 30 fps como no console - opção no menu
-- Renderização em resolução nativa (1x = 1080p e acima), filtro anisotrópico 16x, opções de SMAA / FSR 1
-- Controle (XInput / controles via SDL3), teclado e câmera pelo mouse
-- Ícones de botão de controle Xbox (LB RB LT RT Menu View) ou do teclado (nomes das teclas) nos textos do jogo
-- Pacotes de texturas HD: extrair as texturas do jogo, ampliá-las e carregá-las de volta (veja abaixo)
-- Saves (o salvamento automático e os manuais do jogo)
+**Gráficos** (todos opcionais, desligados por padrão)
+- Upscaling com AMD FSR 1, anti-aliasing com SMAA ou AMD FSR 2 (temporal), nitidez
+- Saída HDR (HDR10 / scRGB)
+- Oclusão de ambiente (GTAO), luz indireta (GI em espaço de tela) e reflexos na água
+- Sombras mais nítidas (mapa de sombras em resolução maior) e filtragem de texturas de alta qualidade
+- Pacotes de texturas HD (`textures/hd/`)
 
-Problemas conhecidos:
-- Alguns ícones da interface (modo câmera, o PRESS A da tela de título) vêm dos arquivos do próprio jogo e ainda
-  mostram os botões do Switch
-- Tela preta rápida ocasional; listras rosas em algumas paredes à noite
-- Testado até agora só no Windows com GPU NVIDIA (o código também compila no Linux, sem testes com o Z-A)
-- **No Mac:** veja o [MonZaMac](https://github.com/lucabravi/MonZaMac), de [@lucabravi](https://github.com/lucabravi),
-  um port nativo para macOS baseado neste projeto
+**Controles**
+- Qualquer controle do SDL3: Xbox, PlayStation (DualShock 4 / DualSense), Switch Pro, Steam Deck e outros
+- Teclado e mouse, com câmera pelo mouse
+- Todos os botões e teclas podem ser remapeados; os ícones dos botões seguem o seu controle (Xbox, PlayStation,
+  Nintendo, Steam Deck, teclado)
+- Golpes por posição e encaixe do analógico direito no eixo
 
-## Como jogar
+**Tela inicial**
+- Prepara o jogo a partir dos seus arquivos e compila uma única vez no seu PC
+- Gerenciador de mods (mods de romfs), importação / exportação de saves e backups
+- Inglês e português (Brasil)
 
-Requisitos: Windows 10 (1903+) / 11 64 bits, um processador de 2013 ou mais novo com AVX2 (os mais antigos com SSE4.2, como Core i5 de 2ª/3ª geração, também funcionam, mas o jogo roda mais devagar), uma GPU com Vulkan 1.3 e driver atualizado, ~12 GB livres.
+## Requisitos
 
-O que você precisa do seu próprio console (nada disso vem incluído):
-- **O jogo**: o seu dump de Pokémon Legends: Z-A - o jogo base (`.xci` ou `.nsp`) e, se quiser, a **atualização 2.0.0**
-  e a DLC (`.nsp`). As versões 1.0.0 e 2.0.0 são suportadas.
-- **`prod.keys`** (e `title.keys`) tiradas do seu Switch (Lockpick_RCM).
-
-1. Baixe o zip da release e extraia onde quiser (ex.: `C:\Jogos\ZA Recomp`).
-2. Coloque os seus arquivos `.xci` / `.nsp` e o `prod.keys` / `title.keys` juntos numa pasta.
-3. Abra o `lasrecomp.exe`. Na tela inicial: **Game files folder** -> escolha essa pasta -> **Set up game files**.
-   - Ele lê o jogo dos seus arquivos (cerca de um minuto) e depois **recompila o jogo como um programa nativo de PC
-     na sua máquina** (10 a 30 minutos, dependendo do processador). Isso acontece **uma vez só**: nas próximas vezes o
-     jogo abre direto. Os seus arquivos não são alterados.
-   - Uma versão nova do ZA Recomp que mude o recompilador recompila a partir dos arquivos já preparados (sem precisar
-     escolher a pasta de novo).
-4. Jogue. O log fica em `lasrecomp.log`, ao lado do exe.
-
-Opcional: as fontes do sistema do seu console em `fonts/` (`tools/za/nca_font.py` as extrai de um dump do firmware
-com as suas próprias chaves), depois `python tools/za/xbox_font.py` e `python tools/za/keyboard_font.py` para os
-ícones de botão. Sem elas o texto do jogo usa uma fonte do Windows e os ícones de botão não aparecem.
-
-### Saves
-
-Um jogo novo começa com o save vazio. Os saves ficam em `save/save_0/`, ao lado do exe - são os próprios arquivos de
-save do jogo, iguais aos do Switch, então passam de um para o outro sem conversão:
-
-- **Switch -> PC**: num Switch desbloqueado, faça backup do save com o **JKSV** (o jogo, depois o seu usuário). Copie a
-  pasta do backup do cartão SD (`JKSV/Pokémon Legends Z-A/<usuário - data>/`, com o arquivo `main` dentro) para o PC
-  e, na tela inicial: **Game files** -> **Import save** -> escolha essa pasta (ou a pasta do jogo no JKSV: o backup
-  mais novo é usado). O save atual é movido antes para `save/backup-<data>/`.
-- **PC -> Switch**: copie os arquivos de `save/save_0/` para uma pasta de backup do JKSV no cartão SD e restaure pelo
-  JKSV.
-- **Versões**: um save da 2.0.0 precisa do jogo preparado com a atualização 2.0.0. A 2.0.0 converte um save da 1.0.0
-  na primeira vez que salva, e esse save não abre mais na 1.0.0 - guarde um backup.
-
-Controles (teclado): WASD anda, setas = direcional, Enter = A, Backspace = B, L = X, I = Y, Q / E = L / R,
-1 / 3 = ZL / ZR, P = +, M = -, botão direito do mouse + mouse = câmera. F1 abre o menu do port (taxa de quadros,
-contador de FPS, resolução, filtragem, controles, ícones de botão). F11 / Alt+Enter: tela cheia.
-
-Configurações (`larecomp.ini`, também editáveis pelo menu F1):
-
-| Configuração | Significado |
+| | |
 |---|---|
-| `fps60 = 1` | 60 fps (0: 30 fps como no Switch) |
-| `resolution = 1x` | resolução interna (`match` = tamanho da janela, `1x`..`4x` = 1080p x N) |
-| `aniso16 = 1` | filtro anisotrópico 16x |
-| `prompts = auto` | ícones de botão: teclado sem controle, Xbox com controle Xbox (`keyboard`, `xbox`, `nintendo` forçam um) |
-| `bind_pad_a = south` ... | mapeamento do controle (pela letra: o A do controle Xbox é o A do jogo) |
-| `tex_hd = 1` / `tex_dump = 0` | pacotes de texturas HD ligados / extrair as texturas do jogo |
+| **Sistema** | Windows 10 (1903 ou mais novo) ou Windows 11, 64 bits |
+| **CPU** | x86-64 com AVX2 (2013 ou mais nova). CPUs mais antigas com SSE4.2 também funcionam, mas compilam e rodam mais devagar |
+| **GPU** | Vulkan 1.2 ou mais novo (1.3 recomendado), com driver atualizado |
+| **RAM** | 8 GB (16 GB recomendado) |
+| **Disco** | Cerca de 12 GB livres |
+| **Jogo** | Pokémon Legends: Z-A **1.0.0, 2.0.0 ou 2.0.2**, com ou sem a DLC |
 
-### Texturas HD
+O Linux ainda não é suportado oficialmente. No Mac, use o [MonZaMac](https://github.com/lucabravi/MonZaMac), do
+[@lucabravi](https://github.com/lucabravi), um port nativo para macOS baseado neste projeto.
 
-1. Jogue com `tex_dump = 1` (ou `LARECOMP_TEX_DUMP=1`): toda textura que o jogo carrega é salva como
-   `textures/dump/<hash>.png`.
-2. `python tools/za/upscale_textures.py` monta `textures/hd/` a partir delas - só texturas de cor (normal maps e
-   máscaras ficam as do jogo), com o [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) (build ncnn-vulkan em
-   `tools/realesrgan/`) ou, sem ele, Lanczos.
-3. As texturas em `textures/hd/` são usadas automaticamente, em qualquer tamanho.
+## Instalação
 
-## Compilando o código (Windows)
+1. Baixe o `ZA-Recomp-windows.zip` mais recente em [Releases](https://github.com/Hexveil404/PokeZ-ARecomp/releases/latest)
+   e extraia em uma pasta à sua escolha (por exemplo `C:\Jogos\ZA Recomp`).
+2. Deixe a sua própria cópia do jogo em uma pasta, de um destes jeitos:
+   - **Jogo extraído**: as pastas `exefs` e `romfs`, como um emulador ou o seu Switch extraem. Não precisa de keys.
+   - **Dump**: o jogo base (`.xci` ou `.nsp`), se quiser a atualização e a DLC (`.nsp`), junto com o `prod.keys` do seu
+     próprio Switch.
+3. Abra o `lasrecomp.exe`. Na tela inicial, escolha essa pasta (ou arraste para a janela) e clique em
+   **Preparar o jogo**.
+4. Os arquivos do jogo são lidos e o código é compilado para o seu PC. Isso leva de 10 a 30 minutos, dependendo da CPU,
+   e acontece **uma única vez**. Depois de uma atualização do ZA Recomp, só o que mudou é compilado de novo.
+5. Clique em **Jogar**.
 
-Usa o MSYS2 (UCRT64: clang, SDL3, FFmpeg, shaderc, headers do Vulkan) e Python 3 - veja
-[docs/BUILD-windows.md](docs/BUILD-windows.md) para os pacotes.
+Os seus arquivos nunca são alterados. Se quiser, importe as fontes do seu console na tela inicial
+(**Configurações > Arquivos**) para o texto e os ícones de botões originais; sem elas, é usada uma fonte substituta.
 
-```sh
-make gen                                   # converte o código do jogo (extracted/exefs) para C: generated/
-make -j16 B=build/o1 GENARCH=-march=x86-64-v3 GENOPT="-O1 -DGUEST_VOLATILE"
-```
+## Controles
 
-Saem `build/o1/lasrecomp.exe` + `build/o1/lasgame.dll` (defina `LARECOMP_GAME_LIB` com o caminho da dll ao rodar da
-pasta de build). `bash tools/za/dist.sh` monta a pasta da release (`build/dist-za/ZA Recomp/`, `ZIP=1` para o zip): o
-exe sem nenhum código do jogo, o importador dos arquivos do jogo (`tools/zaimport`, .NET 8 + LibHac), o gerador
-empacotado e o compilador zig com que a tela inicial recompila o jogo. `tools/za/` também tem os scripts usados no
-desenvolvimento: `build-win.sh`, `play-win.sh`, `auto-win.sh`
-(testes automáticos numa cópia descartável do save) e ajudantes de log / perfil.
+Aperte **F1** no jogo (ou abra **Configurações** na tela inicial) para o menu de configurações: fps, resolução,
+opções gráficas, controles, ícones dos botões e mais. As configurações são salvas na hora no `larecomp.ini`.
 
-Os patches específicos do jogo no código convertido (o gancho da taxa de quadros) ficam em `tools/patches.py`
-(`ZA_PATCHES`, por build ID do jogo); todo o resto está no runtime (`runtime/`): os serviços HLE, a implementação do
-NVN (`runtime/nvn/`), o backend Vulkan (`runtime/nvn/vulkan/`) e o tradutor de shaders Maxwell (`runtime/nvn/maxwell/`).
+| Teclado (padrão) | Switch |
+|---|---|
+| W A S D | Analógico esquerdo |
+| Setas | Direcional |
+| K / J / L / I | A / B / X / Y |
+| Q / E | L / R |
+| 1 / 3 | ZL / ZR |
+| Enter / Backspace | + / − |
+| F / Numpad 0 | Clique do analógico esquerdo / direito |
+| Numpad 8 / 4 / 5 / 6 | Analógico direito |
+| Mouse | Câmera; botão esquerdo ZR (arremessar), direito ZL (mirar) |
+
+| Tecla | Ação |
+|---|---|
+| F1 / Esc | Menu de configurações |
+| F11 / Alt+Enter | Tela cheia |
+| F10 | Captura de tela (`screenshots/`) |
+
+Todos os comandos podem ser trocados em **Configurações > Controles > Configurar comandos**.
+
+## Saves
+
+Os saves são os arquivos do próprio jogo, guardados em `save/save_0/` ao lado do `lasrecomp.exe`. São os mesmos do
+Switch, então passam de um para o outro sem conversão. A página **Saves** da tela inicial importa, exporta e restaura
+backups; toda importação guarda o seu save anterior como backup.
+
+- **Switch → PC**: faça o backup do save com o **JKSV** no Switch, copie a pasta do backup (ela tem um arquivo chamado
+  `main`) para o PC e importe na página **Saves**.
+- **PC → Switch**: exporte o save, copie os arquivos para uma pasta de backup do JKSV no cartão SD e restaure com o JKSV.
+- **Versões do jogo**: um save da 2.0.x precisa do jogo preparado com a atualização 2.0.x. A versão 2.0.0 converte um
+  save da 1.0.0 na primeira vez que salva, e o save convertido não abre mais na 1.0.0. Guarde um backup.
+
+## Mods
+
+Mods que trocam arquivos do jogo (uma pasta `romfs`): traduções, texturas, modelos. Instale pela página **Mods** (ou
+arraste o mod para a janela); eles ficam em `mods/`. Quando dois mods trocam o mesmo arquivo, vale o que está mais
+acima na lista.
+
+Mods que mudam o código do jogo (`exefs`, patches IPS, plugins de cheats) não funcionam num jogo recompilado.
+
+## Solução de problemas
+
+- **Logs**: cada sessão grava `logs/play.log` ao lado do exe (o anterior fica como `logs/play-anterior.log`). Anexe esse
+  arquivo em qualquer relato de bug.
+- **Erros do driver de vídeo** ("Your graphics driver crashed", falha de página da GPU): abra
+  **Configurações > Vídeo > Compatibilidade** e desligue as opções uma de cada vez. Elas valem a partir do próximo
+  início.
+- **Fps baixo**: diminua a resolução interna ou ligue a resolução Dinâmica, e desligue os recursos gráficos opcionais.
+- **Relatar um bug**: [abra uma issue](https://github.com/Hexveil404/PokeZ-ARecomp/issues) com a sua GPU, a versão do
+  driver, a versão do jogo e o `logs/play.log`.
+
+## Compilando o código-fonte
+
+O ZA Recomp compila no Windows com o MSYS2 (UCRT64: clang, SDL3, FFmpeg, shaderc, headers do Vulkan) e Python 3. Veja
+[docs/BUILD-windows.md](docs/BUILD-windows.md) para a configuração. `bash tools/za/dist.sh` monta a pasta da release
+(`build/dist-za/ZA Recomp/`; `ZIP=1` para o zip), que vai sem nenhum código do jogo: a tela inicial compila no PC do
+jogador.
+
+Onde ficam as coisas: o recompilador em `tools/`, o runtime em `runtime/` (serviços HLE, a implementação do NVN em
+`runtime/nvn/`, o backend Vulkan em `runtime/nvn/vulkan/` e o tradutor de shaders Maxwell em `runtime/nvn/maxwell/`), e
+as ferramentas do Pokémon Z-A em `tools/za/`.
+
+Contribuições são bem-vindas. Nunca faça commit nem anexe arquivos da Nintendo (arquivos do jogo, dados extraídos,
+código gerado, fontes, saves).
 
 ## Créditos
 
-- **[Peiikai](https://github.com/peiikai)** - criador do [LAS Recomp](https://github.com/peiikai/LASRecomp): o
-  recompilador estático, o runtime, os renderizadores NVN / Vulkan / Metal e o tradutor de shaders sobre os quais este
-  port foi construído.
-- **Contribuidores do LAS Recomp** - [@dvilelaf](https://github.com/dvilelaf), [@Tensorlong](https://github.com/Tensorlong),
-  [@mansarip](https://github.com/mansarip), [@we11adam](https://github.com/we11adam),
-  [@Maganra](https://github.com/Maganra), [@hjqcan](https://github.com/hjqcan),
-  [@gitarre1234rr5](https://github.com/gitarre1234rr5), [@rkammoun](https://github.com/rkammoun) e todos que relataram
-  problemas - veja [docs/LASRecomp-README.md](docs/LASRecomp-README.md#credits) para a contribuição de cada um.
-- **[Hexveil404](https://github.com/Hexveil404)** - o port de Pokémon Legends: Z-A (este fork).
-- **[lucabravi](https://github.com/lucabravi)** - [MonZaMac](https://github.com/lucabravi/MonZaMac), o port nativo de
-  ZA Recomp para macOS.
-- **[Ryujinx](https://github.com/Ryujinx/Ryujinx)** - usado como referência de comportamento durante o port (nenhum
-  código copiado).
-- **[envytools](https://github.com/envytools/envytools)** e **[Switchbrew](https://switchbrew.org)** - documentação da
-  GPU NVIDIA e do sistema do Switch.
-- Bibliotecas: [SDL 3](https://libsdl.org), [FFmpeg](https://ffmpeg.org), [Dear ImGui](https://github.com/ocornut/imgui),
+- **[Peiikai](https://github.com/peiikai)**: criador do [LAS Recomp](https://github.com/peiikai/LASRecomp), o
+  recompilador estático, o runtime, os renderizadores e o tradutor de shaders em que este port se baseia.
+- **[Hexveil404](https://github.com/Hexveil404)**: o port de Pokémon Legends: Z-A.
+- **Contribuidores do ZA Recomp**: [@Primus92](https://github.com/Primus92), [@Atterax](https://github.com/Atterax),
+  [@wimw85](https://github.com/wimw85), [@lucabravi](https://github.com/lucabravi) e todos que relataram problemas e
+  testaram builds.
+- **Contribuidores do LAS Recomp**: veja [docs/LASRecomp-README.md](docs/LASRecomp-README.md#credits).
+- **[Ryujinx](https://github.com/Ryujinx/Ryujinx)**, usado como referência de comportamento (nenhum código copiado),
+  **[envytools](https://github.com/envytools/envytools)** e **[Switchbrew](https://switchbrew.org)** pela documentação
+  da GPU e do sistema.
+- **Bibliotecas**: [SDL 3](https://libsdl.org), [FFmpeg](https://ffmpeg.org), [Dear ImGui](https://github.com/ocornut/imgui),
   [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator),
-  [SMAA](https://github.com/iryoku/smaa), [AMD FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR),
-  [shaderc](https://github.com/google/shaderc), [Capstone](https://www.capstone-engine.org),
-  [Unicorn](https://www.unicorn-engine.org) e as outras listadas em
-  [docs/LASRecomp-README.md](docs/LASRecomp-README.md#credits), com suas licenças e fontes.
+  [shaderc](https://github.com/google/shaderc), [SMAA](https://github.com/iryoku/smaa),
+  [AMD FidelityFX FSR 1 e FSR 2](https://github.com/GPUOpen-Effects), [XeGTAO](https://github.com/GameTechDev/XeGTAO),
+  [LibHac](https://github.com/Thealexbarney/LibHac), [Zig](https://ziglang.org) e as outras listadas em
+  [docs/LASRecomp-README.md](docs/LASRecomp-README.md#license).
 
 ## Aviso legal
 
-ZA Recomp é um projeto de fã, sem afiliação, apoio ou patrocínio da Nintendo, Game Freak, Creatures ou The Pokémon
-Company. *Pokémon* e *Pokémon Legends: Z-A* são marcas registradas de Nintendo / Creatures / GAME FREAK / The Pokémon
-Company. Nenhum arquivo, código, recurso ou fonte do jogo está incluído. Você precisa fornecer sua própria cópia do
-jogo, obtida legalmente.
+O ZA Recomp é um projeto de fãs. Não é afiliado, endossado nem patrocinado pela Nintendo, Game Freak, Creatures ou
+The Pokémon Company. *Pokémon* e *Pokémon Legends: Z-A* são marcas registradas dos seus respectivos donos. Nenhum
+arquivo, código, asset ou fonte do jogo está incluído; você precisa fornecer a sua própria cópia do jogo, obtida
+legalmente.
 
-## Licença
-
-O código está sob a [Licença MIT](LICENSE) (LAS Recomp © Peiikai; as adições para o Z-A sob a mesma licença).
-Componentes de terceiros mantêm suas próprias licenças - veja
-[docs/LASRecomp-README.md](docs/LASRecomp-README.md#license) para a lista completa e as fontes dos componentes
-incluídos.
+O código é distribuído sob a [Licença MIT](LICENSE) (LAS Recomp © Peiikai). Componentes de terceiros mantêm as suas
+próprias licenças; veja [docs/LASRecomp-README.md](docs/LASRecomp-README.md#license).

@@ -1,161 +1,205 @@
+<div align="center">
+
+<img src="docs/icon/icon_1024.png" alt="ZA Recomp" width="128">
+
 # ZA Recomp
 
-**English** | [Português (Brasil)](README.pt-BR.md)
+**A native PC port of *Pokémon Legends: Z-A*, built by static recompilation.**
 
-A native PC port of **Pokémon Legends: Z-A** (Nintendo Switch, v1.0.0 and v2.0.0) built by **static recompilation**:
-the game's ARM64 code is translated ahead of time into C and compiled for x86-64, and the Switch's operating system
-and GPU (NVN) are reimplemented on the PC (Vulkan). No emulator runs at play time.
+**English** · [Português (Brasil)](README.pt-BR.md)
 
-This is a fork of **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by **Peiikai** - the recompiler, the runtime
-and the NVN-to-Vulkan / Maxwell shader translation all come from that project, made for *The Legend of Zelda:
-Link's Awakening*. This fork extends it to run Pokémon Legends: Z-A.
+[Download](https://github.com/Hexveil404/PokeZ-ARecomp/releases/latest) ·
+[Report a bug](https://github.com/Hexveil404/PokeZ-ARecomp/issues) ·
+[macOS port (MonZaMac)](https://github.com/lucabravi/MonZaMac)
 
-> **You need your own copy of the game.** No game files, code, assets or fonts are included in this repository.
+</div>
+
+---
+
+ZA Recomp turns the game's Nintendo Switch code into a native Windows program. The ARM64 code is translated ahead of
+time into C and compiled for x86-64 on your PC, and the Switch's operating system and GPU (NVN) are reimplemented on
+top of Vulkan. No emulator runs while you play.
+
+It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai, the static recompiler made for
+*The Legend of Zelda: Link's Awakening*.
+
+> [!IMPORTANT]
+> **You need your own copy of the game.** ZA Recomp does not include any game files, code, assets or fonts.
+
+## Contents
+
+- [Screenshots](#screenshots)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Controls](#controls)
+- [Saves](#saves)
+- [Mods](#mods)
+- [Troubleshooting](#troubleshooting)
+- [Building from source](#building-from-source)
+- [Credits](#credits)
+- [Legal](#legal)
 
 ## Screenshots
 
 | | |
 |---|---|
-| ![Lumiose City at 60 fps](docs/screenshots/lumiose.jpg) | ![The port's settings menu (F1)](docs/screenshots/settings.jpg) |
-| Lumiose City, 60 fps | The port's settings menu (F1) |
+| ![Lumiose City at 60 fps](docs/screenshots/lumiose.jpg) | ![The start screen](docs/screenshots/start-screen.png) |
+| Lumiose City at 60 fps | The start screen, with your team |
 | ![The game's menu](docs/screenshots/menu.jpg) | ![The bag](docs/screenshots/bag.jpg) |
-| The game's menu (Brazilian Portuguese translation mod) | The bag |
+| The game's menu (with a translation mod) | The bag |
 
-## Status
+## Features
 
-Work in progress, playable: it boots, goes through the intro and the first story beats in Lumiose City, battles
-work, and it runs at a steady 60 fps on a desktop GPU.
+**Performance**
+- 60 fps at the game's normal speed, or 30 fps as on the Switch
+- Internal resolution from 25% up to 4x (1x = 1080p), plus Dynamic and Match display
+- Frame pacing option (Smooth / Standard) for displays where the frame rate looks uneven
 
-Working:
-- Rendering: characters, animation (GPU skinning / transform feedback), lighting, GPU-driven culling (with the game's
-  hierarchical-Z occlusion), text, dialogue and UI
-- **60 fps** (the Switch version is 30) at the game's normal speed, or 30 fps as on the console - menu option
-- Native resolution rendering (1x = 1080p and up), 16x anisotropic filtering, SMAA / FSR 1 options
-- Controller (XInput / SDL3 gamepads), keyboard and mouse camera
-- Button glyphs for Xbox controllers (LB RB LT RT Menu View) or the keyboard (key names) in the game's text
-- HD texture packs: dump the game's textures, upscale them, load them back (see below)
-- Saves (the game's autosave and manual saves)
+**Graphics** (all optional, off by default)
+- Upscaling with AMD FSR 1, anti-aliasing with SMAA or AMD FSR 2 (temporal), sharpening
+- HDR output (HDR10 / scRGB)
+- Ambient occlusion (GTAO), indirect light (screen-space GI) and water reflections
+- Sharper shadows (higher shadow map resolution) and high-quality texture filtering
+- HD texture packs (`textures/hd/`)
 
-Known issues:
-- Some UI icons (camera mode, the title screen's PRESS A) are drawn from the game's own files and still show the
-  Switch's buttons
-- Occasional short black flash; pink stripe artifacts on some walls at night
-- Only tested on Windows with an NVIDIA GPU so far (the code base also builds on Linux, untested for Z-A)
-- **On a Mac:** see [MonZaMac](https://github.com/lucabravi/MonZaMac) by [@lucabravi](https://github.com/lucabravi),
-  a native macOS port based on this project
+**Controls**
+- Any SDL3 controller: Xbox, PlayStation (DualShock 4 / DualSense), Switch Pro, Steam Deck and more
+- Keyboard and mouse, with a mouse-driven camera
+- Every button and key can be rebound; button icons match your controller (Xbox, PlayStation, Nintendo, Steam Deck,
+  keyboard)
+- Battle moves by position, right stick snap to axis
 
-## Playing
+**Start screen**
+- Sets the game up from your own files and compiles it once on your PC
+- Mods manager (romfs mods), save import / export and backups
+- English and Portuguese (Brazil)
 
-Requirements: Windows 10 (1903+) / 11 64-bit, a CPU from 2013 or newer with AVX2 (older ones with SSE4.2, e.g. 2nd/3rd gen Core i5, also work but run the game slower), a GPU with Vulkan 1.3 and an up-to-date driver, ~12 GB free.
+## Requirements
 
-What you need from your own console (none of it is included):
-- **The game**: your dump of Pokémon Legends: Z-A - the base game (`.xci` or `.nsp`), optionally the **2.0.0 update**
-  and the DLC (`.nsp`). Versions 1.0.0 and 2.0.0 are supported.
-- **`prod.keys`** (and `title.keys`) dumped from your Switch (Lockpick_RCM).
-
-1. Download the release zip and extract it anywhere (e.g. `C:\Games\ZA Recomp`).
-2. Put your `.xci` / `.nsp` files and your `prod.keys` / `title.keys` together in one folder.
-3. Run `lasrecomp.exe`. On the start screen: **Game files folder** -> choose that folder -> **Set up game files**.
-   - It reads the game from your files (about a minute) and then **recompiles the game into a native PC program on
-     your machine** (10-30 minutes, depending on your CPU). This happens **only once**: the next time the game starts
-     straight away. Your own files aren't changed.
-   - A new ZA Recomp version that changes the recompiler rebuilds it from the files already set up (no need to pick
-     the folder again).
-4. Play. The log goes to `lasrecomp.log` next to the exe.
-
-Optional: your console's system fonts in `fonts/` (`tools/za/nca_font.py` extracts them from a firmware dump with your
-own keys), then `python tools/za/xbox_font.py` and `python tools/za/keyboard_font.py` for the button glyphs. Without
-them the game's text uses a Windows font and the button icons are missing.
-
-### Saves
-
-New games start with an empty save. Saves are kept in `save/save_0/` next to the exe - the game's own save files,
-the same as on the Switch, so they move between the two without converting anything:
-
-- **Switch -> PC**: on a modded Switch, back the save up with **JKSV** (the game, then your user). Copy the backup
-  folder from the SD card (`JKSV/Pokémon Legends Z-A/<user - date>/`, it holds the file `main`) to the PC, then on the
-  start screen: **Game files** -> **Import save** -> choose that folder (or the game's JKSV folder: its newest backup
-  is used). Your current save is moved to `save/backup-<date>/` first.
-- **PC -> Switch**: copy the files in `save/save_0/` into a JKSV backup folder on the SD card and restore it with JKSV.
-- **Versions**: a save from 2.0.0 needs the game set up with the 2.0.0 update. 2.0.0 converts a 1.0.0 save the first
-  time it saves, and that save no longer loads on 1.0.0 - keep a backup.
-
-Controls (keyboard): WASD move, arrows d-pad, Enter = A, Backspace = B, L = X, I = Y, Q / E = L / R, 1 / 3 = ZL / ZR,
-P = +, M = -, right mouse button + mouse = camera. F1 opens the port's menu (frame rate, FPS counter, resolution,
-filtering, controls, button icons). F11 / Alt+Enter: fullscreen.
-
-Settings (`larecomp.ini`, also editable from the F1 menu):
-
-| Setting | Meaning |
+| | |
 |---|---|
-| `fps60 = 1` | 60 fps (0: 30 fps as on the Switch) |
-| `resolution = 1x` | internal resolution (`match` = window size, `1x`..`4x` = 1080p x N) |
-| `aniso16 = 1` | 16x anisotropic filtering |
-| `prompts = auto` | button glyphs: keyboard without a controller, Xbox with an Xbox pad (`keyboard`, `xbox`, `nintendo` force one) |
-| `bind_pad_a = south` ... | controller mapping (by letter: the Xbox pad's A is the game's A) |
-| `tex_hd = 1` / `tex_dump = 0` | HD texture packs on / dump the game's textures |
+| **OS** | Windows 10 (1903 or newer) or Windows 11, 64-bit |
+| **CPU** | x86-64 with AVX2 (2013 or newer). Older CPUs with SSE4.2 also work, but compile and run slower |
+| **GPU** | Vulkan 1.2 or newer (1.3 recommended) with an up-to-date driver |
+| **RAM** | 8 GB (16 GB recommended) |
+| **Disk** | About 12 GB free |
+| **Game** | Pokémon Legends: Z-A **1.0.0, 2.0.0 or 2.0.2**, optionally with the DLC |
 
-### HD textures
+Linux is not officially supported yet. On a Mac, use [MonZaMac](https://github.com/lucabravi/MonZaMac) by
+[@lucabravi](https://github.com/lucabravi), a native macOS port based on this project.
 
-1. Play with `tex_dump = 1` (or `LARECOMP_TEX_DUMP=1`): every texture the game loads is saved as
-   `textures/dump/<hash>.png`.
-2. `python tools/za/upscale_textures.py` builds `textures/hd/` from it - colour textures only (normal maps and masks
-   keep the game's own), with [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) (ncnn-vulkan build in
-   `tools/realesrgan/`) or a Lanczos fallback.
-3. Textures in `textures/hd/` are used automatically, at any size.
+## Installation
 
-## Building from source (Windows)
+1. Download the latest `ZA-Recomp-windows.zip` from [Releases](https://github.com/Hexveil404/PokeZ-ARecomp/releases/latest)
+   and extract it to a folder of your choice (for example `C:\Games\ZA Recomp`).
+2. Prepare your own copy of the game in a folder, in one of two ways:
+   - **Extracted game**: the `exefs` and `romfs` folders, as an emulator or your Switch extracts them. No keys needed.
+   - **Dump**: the base game (`.xci` or `.nsp`), optionally the update and the DLC (`.nsp`), together with the
+     `prod.keys` from your own Switch.
+3. Run `lasrecomp.exe`. On the start screen, choose that folder (or drag it onto the window) and click
+   **Set up the game**.
+4. The game's files are read and its code is compiled for your PC. This takes 10 to 30 minutes depending on your CPU
+   and happens **only once**. After an update of ZA Recomp, only what changed is compiled again.
+5. Click **Play**.
 
-Uses MSYS2 (UCRT64: clang, SDL3, FFmpeg, shaderc, Vulkan headers) and Python 3 - see
-[docs/BUILD-windows.md](docs/BUILD-windows.md) for the packages.
+Your own files are never changed. Optionally, import your console's fonts on the start screen (**Settings > Files**)
+for the original text and button icons; without them a substitute font is used.
 
-```sh
-make gen                                   # lift the game's code (extracted/exefs) to C: generated/
-make -j16 B=build/o1 GENARCH=-march=x86-64-v3 GENOPT="-O1 -DGUEST_VOLATILE"
-```
+## Controls
 
-`build/o1/lasrecomp.exe` + `build/o1/lasgame.dll` (set `LARECOMP_GAME_LIB` to the dll when running from the build
-folder). `bash tools/za/dist.sh` builds the release folder (`build/dist-za/ZA Recomp/`, `ZIP=1` for the zip): the exe
-without any game code, the game file importer (`tools/zaimport`, .NET 8 + LibHac), the frozen generator and the zig
-compiler the start screen recompiles the game with. `tools/za/` also has the scripts used during development: `build-win.sh`, `play-win.sh`, `auto-win.sh`
-(scripted test runs on a scratch save copy), log / profile helpers.
+Press **F1** in game (or open **Settings** on the start screen) for the settings menu: frame rate, resolution,
+graphics options, controls, button icons and more. Settings are saved immediately to `larecomp.ini`.
 
-Game-specific patches to the lifted code (the frame-rate hook) are in `tools/patches.py` (`ZA_PATCHES`, keyed by the
-game's build ID); everything else is in the runtime (`runtime/`): the HLE services, the NVN implementation
-(`runtime/nvn/`), the Vulkan backend (`runtime/nvn/vulkan/`) and the Maxwell shader translator
-(`runtime/nvn/maxwell/`).
+| Keyboard (default) | Switch |
+|---|---|
+| W A S D | Left stick |
+| Arrow keys | D-pad |
+| K / J / L / I | A / B / X / Y |
+| Q / E | L / R |
+| 1 / 3 | ZL / ZR |
+| Enter / Backspace | + / − |
+| F / Numpad 0 | Left / right stick click |
+| Numpad 8 / 4 / 5 / 6 | Right stick |
+| Mouse | Camera; left button ZR (throw), right button ZL (aim) |
+
+| Key | Action |
+|---|---|
+| F1 / Esc | Settings menu |
+| F11 / Alt+Enter | Fullscreen |
+| F10 | Screenshot (`screenshots/`) |
+
+All bindings can be changed in **Settings > Controls > Configure inputs**.
+
+## Saves
+
+Saves are the game's own files, kept in `save/save_0/` next to `lasrecomp.exe`. They are the same as on the Switch, so
+they move between the two without conversion. The **Saves** page on the start screen imports, exports and restores
+backups; every import keeps your previous save as a backup.
+
+- **Switch → PC**: back up the save with **JKSV** on your Switch, copy the backup folder (it holds a file named `main`)
+  to your PC and import it on the **Saves** page.
+- **PC → Switch**: export the save, copy its files into a JKSV backup folder on the SD card and restore it with JKSV.
+- **Game versions**: a 2.0.x save needs the game set up with the 2.0.x update. Version 2.0.0 converts a 1.0.0 save the
+  first time it saves, and the converted save no longer loads on 1.0.0. Keep a backup.
+
+## Mods
+
+Mods that replace game files (a `romfs` folder): translations, textures, models. Install them from the **Mods** page
+(or drop the mod onto the window); they are kept in `mods/`. When two mods replace the same file, the one higher in the
+list wins.
+
+Mods that change the game's code (`exefs`, IPS patches, cheat plugins) do not work with a recompiled game.
+
+## Troubleshooting
+
+- **Logs**: each session writes `logs/play.log` next to the exe (the previous one is kept as `logs/play-anterior.log`).
+  Please attach it to any bug report.
+- **Graphics driver errors** ("Your graphics driver crashed", a GPU page fault): open
+  **Settings > Video > Compatibility** and turn the options off one at a time. They apply from the next start.
+- **Low frame rate**: lower the internal resolution or turn on Dynamic resolution, and turn off the optional graphics
+  features.
+- **Report a bug**: [open an issue](https://github.com/Hexveil404/PokeZ-ARecomp/issues) with your GPU, driver version,
+  game version and `logs/play.log`.
+
+## Building from source
+
+ZA Recomp builds on Windows with MSYS2 (UCRT64: clang, SDL3, FFmpeg, shaderc, Vulkan headers) and Python 3. See
+[docs/BUILD-windows.md](docs/BUILD-windows.md) for the setup. `bash tools/za/dist.sh` builds the release folder
+(`build/dist-za/ZA Recomp/`; `ZIP=1` for the zip), which ships without any game code: the start screen compiles it on
+the player's PC.
+
+Where things are: the recompiler is in `tools/`, the runtime in `runtime/` (HLE services, the NVN implementation in
+`runtime/nvn/`, the Vulkan backend in `runtime/nvn/vulkan/` and the Maxwell shader translator in
+`runtime/nvn/maxwell/`), and the Pokémon Z-A tools in `tools/za/`.
+
+Contributions are welcome. Never commit or attach Nintendo files (game files, extracted data, generated code, fonts,
+saves).
 
 ## Credits
 
-- **[Peiikai](https://github.com/peiikai)** - creator of [LAS Recomp](https://github.com/peiikai/LASRecomp): the static
-  recompiler, the runtime, the NVN / Vulkan / Metal renderers and the shader translator this port is built on.
-- **LAS Recomp contributors** - [@dvilelaf](https://github.com/dvilelaf), [@Tensorlong](https://github.com/Tensorlong),
-  [@mansarip](https://github.com/mansarip), [@we11adam](https://github.com/we11adam),
-  [@Maganra](https://github.com/Maganra), [@hjqcan](https://github.com/hjqcan),
-  [@gitarre1234rr5](https://github.com/gitarre1234rr5), [@rkammoun](https://github.com/rkammoun) and everyone who
-  reported issues - see [docs/LASRecomp-README.md](docs/LASRecomp-README.md#credits) for what each contributed.
-- **[Hexveil404](https://github.com/Hexveil404)** - the Pokémon Legends: Z-A port (this fork).
-- **[lucabravi](https://github.com/lucabravi)** - [MonZaMac](https://github.com/lucabravi/MonZaMac), the native macOS
-  port of ZA Recomp.
-- **[Ryujinx](https://github.com/Ryujinx/Ryujinx)** - used as a behavioural reference while porting (no code taken).
-- **[envytools](https://github.com/envytools/envytools)** and **[Switchbrew](https://switchbrew.org)** - NVIDIA GPU and
-  Switch system documentation.
-- Libraries: [SDL 3](https://libsdl.org), [FFmpeg](https://ffmpeg.org), [Dear ImGui](https://github.com/ocornut/imgui),
+- **[Peiikai](https://github.com/peiikai)**: creator of [LAS Recomp](https://github.com/peiikai/LASRecomp), the static
+  recompiler, runtime, renderers and shader translator this port is built on.
+- **[Hexveil404](https://github.com/Hexveil404)**: the Pokémon Legends: Z-A port.
+- **ZA Recomp contributors**: [@Primus92](https://github.com/Primus92), [@Atterax](https://github.com/Atterax),
+  [@wimw85](https://github.com/wimw85), [@lucabravi](https://github.com/lucabravi) and everyone who reported issues
+  and tested builds.
+- **LAS Recomp contributors**: see [docs/LASRecomp-README.md](docs/LASRecomp-README.md#credits).
+- **[Ryujinx](https://github.com/Ryujinx/Ryujinx)**, used as a behavioural reference (no code taken),
+  **[envytools](https://github.com/envytools/envytools)** and **[Switchbrew](https://switchbrew.org)** for GPU and
+  system documentation.
+- **Libraries**: [SDL 3](https://libsdl.org), [FFmpeg](https://ffmpeg.org), [Dear ImGui](https://github.com/ocornut/imgui),
   [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator),
-  [SMAA](https://github.com/iryoku/smaa), [AMD FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR),
-  [shaderc](https://github.com/google/shaderc), [Capstone](https://www.capstone-engine.org),
-  [Unicorn](https://www.unicorn-engine.org) and the others listed in
-  [docs/LASRecomp-README.md](docs/LASRecomp-README.md#credits), with their licenses and sources.
+  [shaderc](https://github.com/google/shaderc), [SMAA](https://github.com/iryoku/smaa),
+  [AMD FidelityFX FSR 1 and FSR 2](https://github.com/GPUOpen-Effects), [XeGTAO](https://github.com/GameTechDev/XeGTAO),
+  [LibHac](https://github.com/Thealexbarney/LibHac), [Zig](https://ziglang.org) and the others listed in
+  [docs/LASRecomp-README.md](docs/LASRecomp-README.md#license).
 
 ## Legal
 
-ZA Recomp is a fan project, not affiliated with, endorsed or sponsored by Nintendo, Game Freak, Creatures or The
-Pokémon Company. *Pokémon* and *Pokémon Legends: Z-A* are trademarks of Nintendo / Creatures / GAME FREAK / The
-Pokémon Company. No game files, game code, assets or fonts are included. You must provide your own legally obtained
-copy of the game.
+ZA Recomp is a fan project. It is not affiliated with, endorsed or sponsored by Nintendo, Game Freak, Creatures or
+The Pokémon Company. *Pokémon* and *Pokémon Legends: Z-A* are trademarks of their respective owners. No game files,
+code, assets or fonts are included; you must provide your own legally obtained copy of the game.
 
-## License
-
-The code is under the [MIT License](LICENSE) (LAS Recomp © Peiikai; the Z-A additions under the same license).
-Third-party components keep their own licenses - see
-[docs/LASRecomp-README.md](docs/LASRecomp-README.md#license) for the full list and the sources of the bundled components.
+The code is released under the [MIT License](LICENSE) (LAS Recomp © Peiikai). Third-party components keep their own
+licenses; see [docs/LASRecomp-README.md](docs/LASRecomp-README.md#license).

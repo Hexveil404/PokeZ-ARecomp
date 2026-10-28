@@ -469,9 +469,16 @@ static void tab_display(void) {
                                    TR("Running at 30 fps: this PC didn't keep 60 fps.", "Rodando a 30 fps: este PC não segurou 60 fps."));
         }
     }
-    opt_toggle(TR("Anisotropic filtering 16x", "Filtro anisotrópico 16x"), &g_settings.aniso16, false,
-               TR("Sharper ground and walls at a distance and at grazing angles (applies to textures loaded afterwards).",
-                  "Chão e paredes mais nítidos de longe e em ângulos rasos (vale para texturas carregadas depois)."));
+    {   // (runtime/nvn/vulkan/textures.c vk_sampler_settings: every sampler made again, at once)
+        int tf = g_settings.aniso16 ? 1 : 0;
+        const char *tfs[] = {TR("Game's", "Do jogo"), TR("High", "Alta")};
+        if (opt_choice(TR("Texture filtering", "Filtragem de texturas"), &tf, tfs, 2, 0,
+                       TR("High: 16x anisotropic and trilinear filtering - the ground and walls stay sharp at a distance and "
+                          "at grazing angles, with no visible bands where their detail steps down. Game's: as on the Switch.",
+                          "Alta: filtragem anisotrópica 16x e trilinear - o chão e as paredes ficam nítidos de longe e em "
+                          "ângulos rasos, sem faixas visíveis onde o detalhe diminui. Do jogo: como no Switch.")))
+            g_settings.aniso16 = tf == 1;
+    }
     {   // Pokémon Z-A's dynamic resolution (runtime/nvn/vulkan/exec.c vk_counter_mode)
         extern bool g_za_frame_hook;
         if (g_za_frame_hook) {
@@ -602,6 +609,18 @@ static void tab_display(void) {
         if (opt_choice(TR("Shadow sharpness", "Nitidez das sombras"), &sh, sz, 4, 0, shd))
             g_settings.shadow_sharp = sh + 1;
     }
+#ifndef __APPLE__
+    {   // (runtime/nvn/vulkan/exec.c post_process)
+        const char *sh[] = {"Auto", TR("Off", "Desligada"), TR("Low", "Baixa"), TR("Medium", "Média"), TR("High", "Alta")};
+        opt_choice(TR("Sharpening", "Nitidez"), &g_settings.sharpen, sh, SHARPEN_N, SHARPEN_AUTO,
+                   TR("Sharpens the image in the window (AMD FSR 1's contrast-adaptive sharpening), at any internal "
+                      "resolution. Auto: only after the upscaler's own upscale, as before. Off: never. Low / Medium / High: "
+                      "always, stronger each step.",
+                      "Deixa a imagem na janela mais nítida (a nitidez adaptativa do AMD FSR 1), em qualquer resolução "
+                      "interna. Auto: só depois da ampliação do upscaler, como antes. Desligada: nunca. Baixa / Média / "
+                      "Alta: sempre, mais forte a cada passo."));
+    }
+#endif
 
     if (la) {
         opt_section("Game");

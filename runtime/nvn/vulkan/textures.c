@@ -1598,11 +1598,67 @@ static VkCompareOp compare_op(uint32_t f) {
     }
 }
 
+// Sampler settings that change while playing - F1's Texture filtering, the render scale - make every sampler again at
+// its next use (NvnSamplerDesc.backend_gen), through a table by contents: the samplers made before stay alive for the
+// work in flight, and come back when the settings do.
+//  - Texture filtering High (g_settings.aniso16): 16x anisotropic, and linear between mip levels where the game asks
+//    for the nearest level (trilinear: no visible bands where the ground's detail steps down).
+//  - A frame drawn smaller than its place in the window (25-75%, Dynamic's lower steps, upscaled by FSR or bilinear):
+//    the textures' mip bias by log2 of the ratio, in half steps down to -2, so their detail is the window's, as
+//    upscalers ask. Only the game's material samplers (sample_bias_ok). LARECOMP_NO_LOD_BIAS=1: off.
+static uint32_t samp_gen = 1;
+static float samp_bias;  // (<= 0)
+static bool samp_high;
+
+// (render thread, each presented frame: device.c) ratio = the frame's lines per window line of its image
+void vk_sampler_settings(double ratio) {
+    static int off = -1;
+    if (off < 0) off = ENV("LARECOMP_NO_LOD_BIAS") != NULL;
+    float bias = off || !(ratio > 0 && ratio < 1) ? 0 : fmaxf(-2.0f, roundf((float)log2(ratio) * 2) / 2);
+    if (bias == samp_bias && g_settings.aniso16 == samp_high) return;
+    LOG("[vk] samplers: mip bias %.1f, texture filtering %s\n", bias, g_settings.aniso16 ? "high" : "game's");
+    samp_bias = bias, samp_high = g_settings.aniso16;
+    samp_gen++;
+}
+
+static VkSampler sampler_make(const NvnSamplerDesc *d);
 VkSampler vk_sampler(NvnSamplerDesc *d) {
-    if (d->backend) return (VkSampler)d->backend;
+    if (d->backend && d->backend_gen == samp_gen) return (VkSampler)d->backend;
+    typedef struct { NvnSamplerDesc k; float bias; bool high; VkSampler s; } Ent;
+    static Ent tab[4096];
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    NvnSamplerDesc k;
+    memset(&k, 0, sizeof k);
+    memcpy(&k, d, offsetof(NvnSamplerDesc, backend));  // (the contents: not the cache fields, nor padding)
+    uint64_t h = 0xcbf29ce484222325ull ^ (uint64_t)(samp_bias * -2) ^ (uint64_t)samp_high << 4;
+    for (size_t i = 0; i < offsetof(NvnSamplerDesc, backend); i++) { h ^= ((const uint8_t *)&k)[i]; h *= 0x100000001B3ull; }
+    pthread_mutex_lock(&lock);
+    VkSampler s = VK_NULL_HANDLE;
+    for (uint32_t n = 0, i = (uint32_t)h & 4095; n < 4096 && !s; n++, i = (i + 1) & 4095) {
+        if (!tab[i].s) tab[i] = (Ent){k, samp_bias, samp_high, s = sampler_make(&k)};
+        else if (tab[i].bias == samp_bias && tab[i].high == samp_high && !memcmp(&tab[i].k, &k, offsetof(NvnSamplerDesc, backend)))
+            s = tab[i].s;
+    }
+    if (!s) s = sampler_make(&k);  // shortcut: a full table makes uncached samplers (thousands - not seen); grow it then
+    pthread_mutex_unlock(&lock);
+    d->backend = (void *)s;
+    d->backend_gen = samp_gen;
+    return s;
+}
+
+// The game's own material textures: mipmapped, linearly filtered, tiled (repeat / mirrored repeat in u or v). Not the
+// post effects', the depth pyramid's or the UI's, which clamp at their edges - the first two read chosen levels
+// (textureLod), which a sampler's bias moves too. (Pokémon Z-A asks for no anisotropy anywhere: that can't tell them.)
+static bool sample_bias_ok(const NvnSamplerDesc *d) {
+    bool tiled = d->wrap[0] == 1 || d->wrap[0] == 6 || d->wrap[1] == 1 || d->wrap[1] == 6;
+    return (d->min_filter == 3 || d->min_filter == 5) && tiled && !d->compare_mode && !d->reduction;
+}
+
+static VkSampler sampler_make(const NvnSamplerDesc *d) {
     VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     si.magFilter = d->mag_filter == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     uint32_t mf = d->min_filter;
+    if (samp_high && mf == 3 && !d->compare_mode && !d->reduction) mf = 5;  // (High: trilinear)
     si.minFilter = (mf == 1 || mf == 3 || mf == 5) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     si.mipmapMode = mf == 4 || mf == 5 ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
     VkSamplerAddressMode modes[3];
@@ -1622,11 +1678,11 @@ VkSampler vk_sampler(NvnSamplerDesc *d) {
     si.maxLod = d->lod_max > 1000 ? VK_LOD_CLAMP_NONE : d->lod_max;
     if (mf <= 1) si.maxLod = si.minLod + 0.25f;  // not mipmapped: stay on the base level
     if (si.maxLod < si.minLod) si.maxLod = si.minLod;
-    si.mipLodBias = d->lod_bias;
+    si.mipLodBias = d->lod_bias + (sample_bias_ok(d) ? samp_bias : 0);
     if (d->max_aniso > 1) { si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = fminf(d->max_aniso, 16); }
     // (setting aniso16: every mipmapped, linearly filtered sampler at 16x - ground and walls stay sharp at grazing
     // angles; the Switch games mostly ask for 1-4x to save bandwidth. Not shadow / depth-compare samplers.)
-    if (g_settings.aniso16 && mf == 5 && !d->compare_mode && g_vk.props.limits.maxSamplerAnisotropy >= 16) {
+    if (samp_high && mf == 5 && !d->compare_mode && g_vk.props.limits.maxSamplerAnisotropy >= 16) {
         si.anisotropyEnable = VK_TRUE;
         si.maxAnisotropy = 16;
     }
@@ -1665,7 +1721,12 @@ VkSampler vk_sampler(NvnSamplerDesc *d) {
     }
     VkSampler s;
     VK_CHECK(vkCreateSampler(g_vk.dev, &si, NULL, &s));
-    d->backend = (void *)s;
+    if (ENV("LARECOMP_LOG_SAMPLERS")) {  // (diagnostics: the samplers made, and the mip bias each got)
+        static int n;
+        if (n++ < 400) LOG("[smp] min %u mag %u aniso %.0f bias %.2f lod %.1f-%.1f cmp %u red %u wrap %u%u -> extra %.1f\n",
+                           d->min_filter, d->mag_filter, d->max_aniso, d->lod_bias, d->lod_min, d->lod_max, d->compare_mode,
+                           d->reduction, d->wrap[0], d->wrap[1], sample_bias_ok(d) ? samp_bias : 0);
+    }
     return s;
 }
 
@@ -1686,9 +1747,7 @@ VkSampler vk_sampler_nearest(const NvnSamplerDesc *d) {
     VkSampler s = VK_NULL_HANDLE;
     for (uint32_t k = 0, i = (uint32_t)h & 255; k < 256; k++, i = (i + 1) & 255) {
         if (!tab[i].backend) { tab[i] = n; s = vk_sampler(&tab[i]); break; }
-        NvnSamplerDesc t = tab[i];
-        t.backend = NULL;
-        if (!memcmp(&t, &n, sizeof n)) { s = (VkSampler)tab[i].backend; break; }
+        if (!memcmp(&tab[i], &n, offsetof(NvnSamplerDesc, backend))) { s = vk_sampler(&tab[i]); break; }
     }
     pthread_mutex_unlock(&lock);
     return s ? s : vk_default_sampler(false);  // (table full: hundreds of integer samplers - not seen)

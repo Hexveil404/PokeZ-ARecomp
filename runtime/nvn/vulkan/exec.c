@@ -7670,9 +7670,10 @@ static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt) {
 }
 
 // Post image `i` at w x h (RGBA8, kept until the size changes). 0, 1: SMAA edges / weights, 2: SMAA output,
-// 3, 4: FSR EASU / RCAS, 5: box downscale.
+// 3, 4: FSR EASU / RCAS (also the sharpening after the box downscale), 5: box downscale, 6: the sharpening at the
+// image's own size.
 static TexBackend *post_image(int i, uint32_t w, uint32_t h) {
-    static TexBackend img[6];
+    static TexBackend img[7];
     TexBackend *d = &img[i];
     if (d->image && (d->width != w || d->height != h)) {
         vk_views_forget(d);
@@ -7832,7 +7833,13 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, float fx, flo
     // higher resolutions looked worse than 2x. A box filter over each window pixel's whole footprint instead.
     bool down = !fsr && ow && oh && (ow + 1 < cw || oh + 1 < ch);
     *upscaled = fsr || down;  // (the result fills the window: no contents' scale left for the present)
-    if (!smaa && !fsr && !down) return v;
+    // F1 Sharpening (FSR 1's RCAS, settings.h SHARPEN_*): RCAS's strength in stops (0: strongest; < 0: none). Auto:
+    // AMD's default 0.2 after an FSR upscale only, as before; Low / Medium / High also after the box downscale or on
+    // the image at its own size.
+    static const float stops[SHARPEN_N] = {0.2f, -1, 1.0f, 0.5f, 0.1f};
+    int sm = g_settings.sharpen >= 0 && g_settings.sharpen < SHARPEN_N ? g_settings.sharpen : SHARPEN_AUTO;
+    float sharp = sm == SHARPEN_AUTO && !fsr ? -1 : stops[sm];
+    if (!smaa && !fsr && !down && sharp < 0) return v;
     extern void vk_frame_suspend(void);
     extern void vk_frame_resume(void);
     vk_frame_suspend();
@@ -7862,10 +7869,13 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, float fx, flo
         float pe[8] = {iw / ow, ih / oh, 0.5f * iw / ow - 0.5f, 0.5f * ih / oh - 0.5f, iw, ih};
         VkImageView ei[3] = {v};
         post_pass(cb, "easu.frag", ei, 1, e, pe, false);
-        float pr[8] = {exp2f(-0.2f), 0, 0, 0, (float)ow, (float)oh};  // (sharpness 0.2 stops: AMD's default)
-        VkImageView ri_[3] = {post_view(e)};
-        post_pass(cb, "rcas.frag", ri_, 1, r, pr, false);
-        v = post_view(r);
+        v = post_view(e);
+        if (sharp >= 0) {
+            float pr[8] = {exp2f(-sharp), 0, 0, 0, (float)ow, (float)oh};
+            VkImageView ri_[3] = {v};
+            post_pass(cb, "rcas.frag", ri_, 1, r, pr, false);
+            v = post_view(r);
+        }
     }
     if (down) {
         float pd[8] = {(float)cw / ow, (float)ch / oh, (float)cw, (float)ch};  // (the contents: Dynamic resolution)
@@ -7874,15 +7884,26 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, float fx, flo
         post_pass(cb, "boxdown.frag", di, 1, d, pd, false);
         v = post_view(d);
     }
+    if (sharp >= 0 && !fsr) {  // (after the box downscale: at the window's size; else the contents' part of the image)
+        uint32_t sw = down ? ow : cw, sh = down ? oh : ch;
+        TexBackend *r = down ? post_image(4, ow, oh) : post_image(6, b->width, b->height);
+        float pr[8] = {exp2f(-sharp), 0, 0, 0, (float)sw, (float)sh};  // (RCAS reads clamped to the contents)
+        VkImageView ri_[3] = {v};
+        post_area_w = sw, post_area_h = sh;
+        post_pass(cb, "rcas.frag", ri_, 1, r, pr, false);
+        post_area_w = post_area_h = 0;
+        v = post_view(r);
+    }
     vk_full_barrier(cb);
     vk_frame_resume();
     {
         static uint32_t piw, pih, pow_, poh;
         static int psm = -1, pfs = -1, pdn = -1;
-        if (b->width != piw || b->height != pih || ow != pow_ || oh != poh || smaa != psm || fsr != pfs || down != pdn)
-            LOG("[post] %ux%u%s%s%s -> %ux%u\n", b->width, b->height, smaa ? " smaa" : "", fsr ? " fsr1" : "",
-                down ? " box" : "", ow, oh);
-        piw = b->width; pih = b->height; pow_ = ow; poh = oh; psm = smaa; pfs = fsr; pdn = down;
+        static float psh = -2;
+        if (b->width != piw || b->height != pih || ow != pow_ || oh != poh || smaa != psm || fsr != pfs || down != pdn || sharp != psh)
+            LOG("[post] %ux%u%s%s%s -> %ux%u, sharpening %.1f\n", b->width, b->height, smaa ? " smaa" : "", fsr ? " fsr1" : "",
+                down ? " box" : "", ow, oh, sharp);
+        piw = b->width; pih = b->height; pow_ = ow; poh = oh; psm = smaa; pfs = fsr; pdn = down; psh = sharp;
     }
     return v;
 }

@@ -111,6 +111,7 @@ const char *settings_language_name(void) {
 }
 
 int g_default_upscaler = UPSCALE_SHARP;
+static const char *const sharpen_names[SHARPEN_N] = {"auto", "off", "low", "medium", "high"};  // (the ini)
 int g_default_res_mode = RES_MATCH;
 bool g_gpu_integrated;
 
@@ -190,6 +191,9 @@ void settings_load(void) {
             else g_settings.upscaler = g_default_upscaler;
         }
         else if (!strcmp(key, "antialias")) g_settings.antialias = !strcmp(val, "off") ? AA_OFF : AA_SMAA;  // ("fxaa": SMAA now)
+        else if (!strcmp(key, "sharpening")) {
+            for (int i = 0; i < SHARPEN_N; i++) if (!strcmp(val, sharpen_names[i])) g_settings.sharpen = i;
+        }
         else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;
         else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
         else if (!strcmp(key, "rumble")) g_settings.rumble = atoi(val) != 0;
@@ -285,6 +289,7 @@ void settings_save(void) {
     fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
                                    g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
     fprintf(f, "antialias = %s\n", g_settings.antialias == AA_SMAA ? "smaa" : "off");
+    fprintf(f, "sharpening = %s\n", sharpen_names[g_settings.sharpen >= 0 && g_settings.sharpen < SHARPEN_N ? g_settings.sharpen : 0]);
     fprintf(f, "resolution = %s\n", g_settings.res_auto ? "auto" : res_name(g_settings.res_mode));
     fprintf(f, "inv_keys = %d\n", g_settings.inv_keys);
     fprintf(f, "dpad_move = %d\n", g_settings.dpad_move);

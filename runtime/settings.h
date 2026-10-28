@@ -13,6 +13,8 @@ enum { UPSCALE_BILINEAR = 0, UPSCALE_METALFX = 1 /* macOS */, UPSCALE_FSR1 = 2 /
 #define UPSCALE_SHARP UPSCALE_FSR1
 #endif
 enum { AA_OFF = 0, AA_SMAA = 1 };
+// Sharpening (AMD FSR 1's RCAS, runtime/nvn/vulkan/exec.c post_process): Auto = FSR's own after its upscale only
+enum { SHARPEN_AUTO = 0, SHARPEN_OFF, SHARPEN_LOW, SHARPEN_MEDIUM, SHARPEN_HIGH, SHARPEN_N };
 enum { PROMPTS_AUTO = 0, PROMPTS_NINTENDO = 1, PROMPTS_XBOX = 2, PROMPTS_PLAYSTATION = 3, PROMPTS_KEYBOARD = 4, PROMPTS_STEAMDECK = 5 };  // (keyboard: Pokémon Z-A's font glyphs, runtime/hle/pl.c)
 enum { MOUSE_CAM_OFF = 0, MOUSE_CAM_HOLD = 1 /* right button held */, MOUSE_CAM_CAPTURED = 2 /* cursor held by the window */ };
 // Which face button confirms in our own menus (runtime/ui/pad_nav.mm); the game's input is never affected
@@ -34,12 +36,13 @@ typedef struct {
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (MetalFX: macOS, FSR 1: Windows)
     bool upscaler_auto;  // never chosen: the default for this GPU (settings_resolve_defaults); saved as "auto"
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
+    int sharpen;         // SHARPEN_*: sharpening of the image in the window (Vulkan)
     float volume;        // master volume, 1 = 100%
     bool reverb;         // room reverb effect
     bool movie_audio;
     bool show_fps;
     bool fps60;  // Pokémon Z-A: its frame clock at 1/60 s per frame (runtime/hle/framepace.c)
-    bool aniso16;  // 16x anisotropic filtering on every mipmapped sampler (runtime/nvn/vulkan/textures.c)
+    bool aniso16;  // Texture filtering High: 16x anisotropic and trilinear on every mipmapped sampler (runtime/nvn/vulkan/textures.c)
     int opmode;     // the mode the game is told it runs in (runtime/services/am.c): 0 auto (handheld on a Steam Deck), 1 docked (1080p), 2 handheld (720p)
     bool game_drs;  // Pokémon Z-A: its own dynamic resolution (else always full: runtime/nvn/vulkan/exec.c)
     bool tex_hd, tex_dump;  // HD texture packs (textures/hd) on; dump the game's textures (textures/dump): vulkan/textures.c

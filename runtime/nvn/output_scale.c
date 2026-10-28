@@ -494,4 +494,5 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
         o->vw = 1920.0 * wide_test * f2; o->vh = 1080.0 * f2;
     }
     o->vx = (dw - o->vw) / 2; o->vy = (dh - o->vh) / 2;
+    o->lines = o->vh > 0 ? base_h * o->sy / o->vh : 1;
 }

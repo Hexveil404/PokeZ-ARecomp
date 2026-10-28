@@ -621,6 +621,25 @@ static void tab_display(void) {
                       "Alta: sempre, mais forte a cada passo."));
     }
 #endif
+    {   // GTAO (vulkan/exec.c gtao_*): Pokémon Z-A has no ambient occlusion of its own
+        const char *ao[] = {TR("Off", "Desligado"), TR("Low", "Baixa"), TR("Medium", "Média"), TR("High", "Alta")};
+        opt_choice(TR("Ambient occlusion", "Oclusão ambiente"), &g_settings.gtao, ao, 4, 0,
+                   TR("Soft shadows where things meet: the base of walls and lamp posts, under bushes and characters, in "
+                      "corners (GTAO). Higher: smoother, at more GPU time (about 1-2 ms at 1.5x). Changes at once.",
+                      "Sombras suaves onde as coisas se encontram: a base de paredes e postes, sob arbustos e personagens, "
+                      "nos cantos (GTAO). Maior: mais suave, por mais tempo da GPU (cerca de 1-2 ms em 1.5x). Muda na hora."));
+        static const int pct[] = {25, 50, 75, 100};
+        const char *ps[] = {"25%", "50%", "75%", "100%"};
+        int pi = 3;
+        for (int i = 0; i < 4; i++) if (pct[i] == g_settings.gtao_strength) pi = i;
+        if (g_settings.gtao == 0) opt_disable_next();
+        if (opt_choice(TR("Ambient occlusion strength", "Intensidade da oclusão ambiente"), &pi, ps, 4, 3,
+                       TR("How dark those soft shadows get: 100% the default, lower for a subtler look. The same GPU time "
+                          "at any strength. Changes at once.",
+                          "O quão escuras essas sombras suaves ficam: 100% o padrão, menos para um visual mais sutil. O "
+                          "mesmo tempo da GPU em qualquer intensidade. Muda na hora.")))
+            g_settings.gtao_strength = pct[pi];
+    }
 
     if (la) {
         opt_section("Game");

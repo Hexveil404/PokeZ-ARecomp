@@ -35,6 +35,7 @@ Settings g_settings = {
     .tex_hd = true,
     .shadow_res = 1,
     .shadow_sharp = 1,
+    .gtao_strength = 100,
     .inv_keys = true,
     .tracker = true,
     .tracker_filters = -1,
@@ -175,6 +176,8 @@ void settings_load(void) {
         else if (!strcmp(key, "tex_hd")) g_settings.tex_hd = atoi(val) != 0;
         else if (!strcmp(key, "shadow_resolution")) { int v = atoi(val); g_settings.shadow_res = v < 1 ? 1 : v > 4 ? 4 : v; }
         else if (!strcmp(key, "shadow_sharpness")) { int v = atoi(val); g_settings.shadow_sharp = v < 1 ? 1 : v > 4 ? 4 : v; }
+        else if (!strcmp(key, "ambient_occlusion")) { int v = atoi(val); g_settings.gtao = v < 0 ? 0 : v > 3 ? 3 : v; }
+        else if (!strcmp(key, "ambient_occlusion_strength")) { int v = atoi(val); g_settings.gtao_strength = v < 25 ? 25 : v > 100 ? 100 : v; }
         else if (!strcmp(key, "tex_dump")) g_settings.tex_dump = atoi(val) != 0;
         else if (!strcmp(key, "resolution")) {  // (auto: never chosen, the GPU's default)
             int n = atoi(val);
@@ -285,6 +288,8 @@ void settings_save(void) {
     fprintf(f, "tex_hd = %d\n", g_settings.tex_hd);
     fprintf(f, "shadow_resolution = %d\n", g_settings.shadow_res);
     fprintf(f, "shadow_sharpness = %d\n", g_settings.shadow_sharp);
+    fprintf(f, "ambient_occlusion = %d\n", g_settings.gtao);
+    fprintf(f, "ambient_occlusion_strength = %d\n", g_settings.gtao_strength);
     fprintf(f, "tex_dump = %d\n", g_settings.tex_dump);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
                                    g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");

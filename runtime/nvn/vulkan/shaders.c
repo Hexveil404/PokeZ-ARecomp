@@ -475,6 +475,169 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4((lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0), 1.0);\n"
                "}\n";
     }
+    // GTAO (exec.c gtao_*): ambient occlusion from Pokémon Z-A's scene depth, after XeGTAO (Intel, MIT licence). The
+    // push constants (all three passes): m0..m3 the game's own reconstruction - world position (homogeneous) =
+    // ndc.x * m0 + ndc.y * m1 + depth * m2 + m3 -, cam the camera's world position, prm (radius in metres, intensity,
+    // ndc y sign, frame), sz (AO image size, depth image size), prj (tan of the half field of view x / y).
+    static const char gtao_common[] =
+        "#version 450\n"
+        "layout(push_constant) uniform P { vec4 m0, m1, m2, m3, cam, prm, sz, prj; } pc;\n"
+        "layout(set = 0, binding = 0) uniform sampler2D t0;\n"
+        "layout(set = 0, binding = 1) uniform sampler2D t1;\n"
+        "layout(location = 0) out vec4 o;\n"
+        "const float PI = 3.14159265, HALF_PI = 1.57079633;\n"
+        // depth at a uv of the full-resolution depth image (nearest texel: depth isn't filtered)
+        "float depth_at(sampler2D d, vec2 uv) {\n"
+        "  ivec2 s = ivec2(pc.sz.zw);\n"
+        "  return texelFetch(d, clamp(ivec2(uv * pc.sz.zw), ivec2(0), s - 1), 0).r;\n"
+        "}\n"
+        "vec4 wpos4(vec2 uv, float d) {\n"
+        "  vec2 n = vec2(uv.x * 2.0 - 1.0, (uv.y * 2.0 - 1.0) * pc.prm.z);\n"
+        "  return n.x * pc.m0 + n.y * pc.m1 + d * pc.m2 + pc.m3;\n"
+        "}\n"
+        "vec3 wpos(vec2 uv, float d) { vec4 p = wpos4(uv, d); return p.xyz / p.w; }\n";
+    if (!strcmp(name, "gtao.frag")) {  // t0 = the scene depth; out .r = visibility (1 = open)
+        *stage = STAGE_FRAGMENT;
+        static char *src;
+        if (!src) {
+            static const char body[] =
+                "vec3 pos_at(vec2 uv) { return wpos(uv, depth_at(t0, uv)); }\n"
+                "float ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }\n"
+                "float facos(float x) { float r = -0.156583 * abs(x) + HALF_PI; r *= sqrt(1.0 - abs(x)); return x >= 0.0 ? r : PI - r; }\n"
+                "void main() {\n"
+                "  vec2 uv = gl_FragCoord.xy / pc.sz.xy;\n"
+                "  float d = depth_at(t0, uv);\n"
+                "  vec4 P4 = wpos4(uv, d);\n"
+                "  if (abs(P4.w) < 1e-7) { o = vec4(1.0); return; }\n"
+                "  vec3 P = P4.xyz / P4.w;\n"
+                "  float dist = length(pc.cam.xyz - P);\n"
+                "  if (!(dist > 0.05 && dist < 400.0)) { o = vec4(1.0); return; }\n"  // (sky, far: open)
+                "  vec3 V = (pc.cam.xyz - P) / dist;\n"
+                // the normal from the depth: on each axis the neighbour closer in depth (no smearing across edges)
+                "  vec2 px = 1.0 / pc.sz.zw;\n"
+                "  vec3 Pl = pos_at(uv - vec2(px.x * 2.0, 0.0)), Pr = pos_at(uv + vec2(px.x * 2.0, 0.0));\n"
+                "  vec3 Pu = pos_at(uv - vec2(0.0, px.y * 2.0)), Pd = pos_at(uv + vec2(0.0, px.y * 2.0));\n"
+                "  vec3 dx = length(Pr - P) < length(P - Pl) ? Pr - P : P - Pl;\n"
+                "  vec3 dy = length(Pd - P) < length(P - Pu) ? Pd - P : P - Pu;\n"
+                "  vec3 N = normalize(cross(dy, dx));\n"
+                "  if (dot(N, V) < 0.0) N = -N;\n"
+                "  if (pc.prj.z == 2.0) { o = vec4(N * 0.5 + 0.5, 1.0); return; }\n"  // (debug: the normals)
+                "  if (pc.prj.z == 3.0) { o = vec4(vec3(fract(dist / 5.0)), 1.0); return; }\n"  // (debug: 5 m bands)
+                "  float radius = pc.prm.x;\n"
+                "  vec2 rUV = 0.5 * radius / (dist * pc.prj.xy);\n"  // (the radius in uv at that distance)
+                "  if (rUV.x * pc.sz.x < 1.0) { o = vec4(1.0); return; }\n"
+                "  float falloffRange = 0.615 * radius, falloffFrom = radius * (1.0 - 0.615);\n"
+                "  float falloffMul = -1.0 / falloffRange, falloffAdd = falloffFrom / falloffRange + 1.0;\n"
+                "  float n0 = ign(gl_FragCoord.xy + pc.prm.w * 5.588238), n1 = ign(gl_FragCoord.yx * 1.37 + 17.0 + pc.prm.w * 3.1);\n"
+                "  int SLICES = int(pc.prj.w), STEPS = SLICES * 2;\n"  // (quality: 2 / 3 / 4 slices)
+                "  float vis = 0.0;\n"
+                "  for (int s = 0; s < SLICES; s++) {\n"
+                "    float phi = (float(s) + n0) * PI / float(SLICES);\n"
+                "    vec2 dir = vec2(cos(phi), sin(phi));\n"
+                // the slice's plane holds the view ray and the screen direction: its 3D direction from a point at the
+                // same depth along that screen direction
+                "    vec3 D3 = wpos(uv + dir * rUV * 0.25, d) - P;\n"
+                "    vec3 orthoDir = D3 - V * dot(D3, V);\n"
+                "    if (dot(orthoDir, orthoDir) < 1e-12) continue;\n"
+                "    orthoDir = normalize(orthoDir);\n"
+                "    vec3 axis = normalize(cross(orthoDir, V));\n"
+                "    vec3 projN = N - axis * dot(N, axis);\n"
+                "    float projNLen = length(projN);\n"
+                "    float signN = sign(dot(orthoDir, projN));\n"
+                "    float cosN = clamp(dot(projN, V) / max(projNLen, 1e-6), 0.0, 1.0);\n"
+                "    float n = signN * facos(cosN);\n"
+                "    float low0 = cos(n + HALF_PI), low1 = cos(n - HALF_PI);\n"
+                "    float hc0 = low0, hc1 = low1;\n"
+                "    for (int j = 0; j < STEPS; j++) {\n"
+                "      float t = (float(j) + fract(n1 + float(j) * 0.618034)) / float(STEPS);\n"
+                "      t = t * t;\n"
+                "      vec2 off = dir * (rUV * t + 1.0 / pc.sz.xy);\n"
+                "      vec3 d0 = pos_at(uv + off) - P, d1 = pos_at(uv - off) - P;\n"
+                // (XeGTAO's thin occluder compensation: a sample far in front of the point - a grass blade, a railing -
+                // counts as farther away along the view axis, so it occludes less: thin things aren't solid walls)
+                "      float l0 = length(d0 + V * dot(d0, V) * 2.0), l1 = length(d1 + V * dot(d1, V) * 2.0);\n"
+                "      float sh0 = dot(normalize(d0 + 1e-9), V), sh1 = dot(normalize(d1 + 1e-9), V);\n"  // (the true direction)
+                "      float w0 = clamp(l0 * falloffMul + falloffAdd, 0.0, 1.0), w1 = clamp(l1 * falloffMul + falloffAdd, 0.0, 1.0);\n"
+                "      hc0 = max(hc0, mix(low0, sh0 - 0.1, w0));\n"
+                "      hc1 = max(hc1, mix(low1, sh1 - 0.1, w1));\n"
+                "    }\n"
+                "    float h0 = -facos(hc1), h1 = facos(hc0);\n"
+                "    h0 = n + clamp(h0 - n, -HALF_PI, HALF_PI);\n"
+                "    h1 = n + clamp(h1 - n, -HALF_PI, HALF_PI);\n"
+                "    float sinN = sin(n);\n"
+                "    float a0 = (cosN + 2.0 * h0 * sinN - cos(2.0 * h0 - n)) * 0.25;\n"
+                "    float a1 = (cosN + 2.0 * h1 * sinN - cos(2.0 * h1 - n)) * 0.25;\n"
+                "    vis += projNLen * (a0 + a1);\n"
+                "  }\n"
+                "  vis = clamp(vis / float(SLICES), 0.0, 1.0);\n"
+                "  vis = pow(vis, 1.6);\n"  // (XeGTAO's final power, softened: the game's lighting is soft already)
+                "  o = vec4(vis, 0.0, 0.0, 1.0);\n"
+                "}\n";
+            size_t n = strlen(gtao_common) + strlen(body) + 1;
+            src = malloc(n);
+            snprintf(src, n, "%s%s", gtao_common, body);
+        }
+        return src;
+    }
+    if (!strcmp(name, "gtao_blur.frag")) {  // t0 = raw AO, t1 = the scene depth: a 5x5 depth-aware average
+        *stage = STAGE_FRAGMENT;
+        static char *src;
+        if (!src) {
+            static const char body[] =
+                "void main() {\n"
+                "  vec2 uv = gl_FragCoord.xy / pc.sz.xy;\n"
+                "  vec4 c4 = wpos4(uv, depth_at(t1, uv));\n"
+                "  if (abs(c4.w) < 1e-7) { o = vec4(1.0); return; }\n"
+                "  float cd = length(c4.xyz / c4.w - pc.cam.xyz);\n"
+                "  float sum = 0.0, wsum = 0.0;\n"
+                "  for (int y = -2; y <= 2; y++) for (int x = -2; x <= 2; x++) {\n"
+                "    vec2 u = uv + vec2(x, y) / pc.sz.xy;\n"
+                "    vec4 p4 = wpos4(u, depth_at(t1, u));\n"
+                "    float sd = abs(p4.w) < 1e-7 ? 1e9 : length(p4.xyz / p4.w - pc.cam.xyz);\n"
+                "    float w = exp(-abs(sd - cd) / (0.03 * cd + 0.01)) * (1.0 / (1.0 + float(x * x + y * y) * 0.25));\n"
+                "    sum += texelFetch(t0, clamp(ivec2(gl_FragCoord.xy) + ivec2(x, y), ivec2(0), ivec2(pc.sz.xy) - 1), 0).r * w;\n"
+                "    wsum += w;\n"
+                "  }\n"
+                "  o = vec4(sum / max(wsum, 1e-6), 0.0, 0.0, 1.0);\n"
+                "}\n";
+            size_t n = strlen(gtao_common) + strlen(body) + 1;
+            src = malloc(n);
+            snprintf(src, n, "%s%s", gtao_common, body);
+        }
+        return src;
+    }
+    if (!strcmp(name, "gtao_apply.frag")) {  // t0 = the filtered AO (half size, bilinear): drawn with a multiply blend
+        *stage = STAGE_FRAGMENT;
+        static char *src;
+        if (!src) {
+            static const char body[] =
+                "void main() {\n"
+                "  vec2 uv = gl_FragCoord.xy / pc.sz.zw;\n"  // (sz.zw: the lit image's size here)
+                // depth-aware upsampling: of the 4 half-size AO texels around, those at this pixel's distance count
+                // (a background texel's AO doesn't spill onto a character's arm in front of it)
+                "  vec4 c4 = wpos4(uv, depth_at(t1, uv));\n"
+                "  float cd = abs(c4.w) < 1e-7 ? 1e9 : length(c4.xyz / c4.w - pc.cam.xyz);\n"
+                "  vec2 hp = uv * pc.sz.xy - 0.5, b = floor(hp), fr = hp - b;\n"
+                "  float v = 0.0, ws = 0.0;\n"
+                "  for (int k = 0; k < 4; k++) {\n"
+                "    vec2 o2 = vec2(k & 1, k >> 1), tc = b + o2;\n"
+                "    vec2 tuv = (tc + 0.5) / pc.sz.xy;\n"
+                "    vec4 t4 = wpos4(tuv, depth_at(t1, tuv));\n"
+                "    float td = abs(t4.w) < 1e-7 ? 1e9 : length(t4.xyz / t4.w - pc.cam.xyz);\n"
+                "    float bw = (o2.x > 0.5 ? fr.x : 1.0 - fr.x) * (o2.y > 0.5 ? fr.y : 1.0 - fr.y) + 1e-3;\n"
+                "    float w = bw * exp(-abs(td - cd) / (0.02 * cd + 0.02));\n"
+                "    v += w * texelFetch(t0, clamp(ivec2(tc), ivec2(0), ivec2(pc.sz.xy) - 1), 0).r; ws += w;\n"
+                "  }\n"
+                "  v = ws > 1e-5 ? v / ws : texture(t0, uv).r;\n"
+                "  if (pc.prj.z >= 2.0) { o = vec4(texture(t0, uv).rgb, 1.0); return; }\n"
+                "  o = pc.prj.z != 0.0 ? vec4(vec3(v), 1.0) : vec4(vec3(max(mix(1.0, v, pc.prm.y), 0.0)), 1.0);\n"  // (strength above 1: a stronger darkening, never below black)
+                "}\n";
+            size_t n = strlen(gtao_common) + strlen(body) + 1;
+            src = malloc(n);
+            snprintf(src, n, "%s%s", gtao_common, body);
+        }
+        return src;
+    }
     if (!strcmp(name, "clear.vert")) {
         *stage = STAGE_VERTEX;
         return "#version 450\n"

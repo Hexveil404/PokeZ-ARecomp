@@ -1491,9 +1491,11 @@ static int content_extent(int e, bool scalable, float sc, float al) {
 }
 
 static bool heap_whole_userptr(void);
+static void gtao_apply_pending(void);
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     vk_end_pass();
+    gtao_apply_pending();  // (the lighting pass just ended: its image times the ambient occlusion)
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each pass its own submission)
     else {
         // Submit the frame in chunks (as Metal, renderer.m begin_pass): the game puts a whole frame in one command
@@ -6195,6 +6197,10 @@ static void prep_check(const PipeKey *k, uint64_t vh, uint64_t fh, const ShaderR
 }
 
 static void draw_(CmdRec *r, bool indexed);
+static void gtao_before_lighting(Prog *pr);
+static void gtao_mark(NvnTexture *target);
+static bool gtao_is_lighting(Prog *pr);
+#define GTAO_LIGHTING 0xfe18220311c32b2eull
 
 // The draw's depth / stencil test and rasterizer state as Vulkan values (draw_ sets them as dynamic state, or they go
 // into the pipeline key: FixedState)
@@ -6443,7 +6449,10 @@ static void draw_(CmdRec *r, bool indexed) {
     snap_reason = "draw-colorwrite";
     for (int i = 0; i < st.rt.ncolor; i++)
         if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
+    bool lighting = gtao_is_lighting(pr);
+    if (lighting) gtao_before_lighting(pr);  // (GTAO from the scene depth, before the lighting reads the G-buffer)
     begin_pass();
+    if (lighting) gtao_mark(st.rt.ncolor ? st.rt.color[0] : NULL);
     VkCommandBuffer cb = vk_cmd();
 
     uint32_t mode = (uint32_t)r->x[0];
@@ -7612,17 +7621,19 @@ static VkPipelineLayout post_layout;
 static VkDescriptorSetLayout post_set_layout;
 
 // kind: 0 a plain post pass; 1 SMAA edges also writing stencil 1 where they draw, 2 SMAA weights only where the
-// stencil is 1 (g_vk.smaa_stencil; dsfmt: the stencil format)
-static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt) {
-    static struct { const char *fs; int kind; VkFormat f; VkPipeline p; } cache[16];
-    for (int i = 0; i < 16; i++) if (cache[i].p && cache[i].fs == fs && cache[i].kind == kind && cache[i].f == dsfmt) return cache[i].p;
+// stencil is 1 (g_vk.smaa_stencil; dsfmt: the stencil format); 3 multiplies the target's colour by the shader's output
+// (GTAO onto the game's lit image). cfmt: the colour target's format.
+static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt, VkFormat cfmt) {
+    static struct { const char *fs; int kind; VkFormat f, cf; VkPipeline p; } cache[24];
+    for (int i = 0; i < 24; i++)
+        if (cache[i].p && cache[i].fs == fs && cache[i].kind == kind && cache[i].f == dsfmt && cache[i].cf == cfmt) return cache[i].p;
     if (!post_layout) {
         VkDescriptorSetLayoutBinding b[3];
         for (uint32_t i = 0; i < 3; i++)
             b[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
         VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 3, .pBindings = b};
         VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &post_set_layout));
-        VkPushConstantRange r = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32};
+        VkPushConstantRange r = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 128};  // (32 bytes but for GTAO's camera: 128)
         VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
                                          .pSetLayouts = &post_set_layout, .pushConstantRangeCount = 1, .pPushConstantRanges = &r};
         VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &ci, NULL, &post_layout));
@@ -7641,13 +7652,18 @@ static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt) {
     VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
                                                .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
     VkPipelineColorBlendAttachmentState cba = {.colorWriteMask = 0xF};
+    if (kind == 3)  // (colour = dst x src; alpha kept)
+        cba = (VkPipelineColorBlendAttachmentState){.blendEnable = VK_TRUE, .srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR,
+                                                    .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO, .colorBlendOp = VK_BLEND_OP_ADD,
+                                                    .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO, .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+                                                    .alphaBlendOp = VK_BLEND_OP_ADD, .colorWriteMask = 0xF};
     VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1,
                                               .pAttachments = &cba};
     VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     uint32_t ndyn = 2;
     fullscreen_vertex_dyn(dyn, &ndyn, 3);
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = ndyn, .pDynamicStates = dyn};
-    VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
+    VkFormat fmt = cfmt ? cfmt : VK_FORMAT_R8G8B8A8_UNORM;
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 1,
                                         .pColorAttachmentFormats = &fmt};
     VkPipelineDepthStencilStateCreateInfo ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
@@ -7665,15 +7681,16 @@ static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt) {
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = post_layout};
     VkPipeline p;
     VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p));
-    for (int i = 0; i < 16; i++) if (!cache[i].p) { cache[i].fs = fs; cache[i].kind = kind; cache[i].f = dsfmt; cache[i].p = p; break; }
+    for (int i = 0; i < 24; i++)
+        if (!cache[i].p) { cache[i].fs = fs; cache[i].kind = kind; cache[i].f = dsfmt; cache[i].cf = cfmt; cache[i].p = p; break; }
     return p;
 }
 
 // Post image `i` at w x h (RGBA8, kept until the size changes). 0, 1: SMAA edges / weights, 2: SMAA output,
 // 3, 4: FSR EASU / RCAS (also the sharpening after the box downscale), 5: box downscale, 6: the sharpening at the
-// image's own size.
+// image's own size, 7, 8: GTAO raw / filtered.
 static TexBackend *post_image(int i, uint32_t w, uint32_t h) {
-    static TexBackend img[7];
+    static TexBackend img[9];
     TexBackend *d = &img[i];
     if (d->image && (d->width != w || d->height != h)) {
         vk_views_forget(d);
@@ -7771,22 +7788,25 @@ static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *src
     post_pass_ex(cb, fs, srcs, n, dst, pc, clear, NULL, 0);
 }
 // sten / kind (g_vk.smaa_stencil): kind 1 clears sten and writes 1 where the pass draws, kind 2 draws only there
+static const float *post_pc_big;  // (GTAO) 32 floats pushed instead of pc's 8
 static void post_pass_ex(VkCommandBuffer cb, const char *fs, const VkImageView *srcs, int n, TexBackend *dst, const float pc[8],
                          bool clear, TexBackend *sten, int kind) {
-    if (!sten) kind = 0;
+    if (!sten && kind != 3) kind = 0;
     uint32_t aw = post_area_w && post_area_w < dst->width ? post_area_w : dst->width;
     uint32_t ah = post_area_h && post_area_h < dst->height ? post_area_h : dst->height;
     // (before the rendering begins: created inside it, the NVIDIA driver crashed)
-    VkPipeline pipe = post_pipeline_kind(fs, kind, sten ? sten->format : VK_FORMAT_UNDEFINED);
+    VkPipeline pipe = post_pipeline_kind(fs, kind, sten ? sten->format : VK_FORMAT_UNDEFINED,
+                                         dst->format == VK_FORMAT_R8G8B8A8_UNORM ? VK_FORMAT_UNDEFINED : dst->format);
     vk_full_barrier(cb);
     VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = post_view(dst),
                                     .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-                                    .loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                    .loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : kind == 3 ? VK_ATTACHMENT_LOAD_OP_LOAD
+                                            : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                                     .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {aw, ah}},
                           .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca};
     VkRenderingAttachmentInfo sa = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    if (kind) {
+    if (kind == 1 || kind == 2) {  // (the SMAA stencil kinds; 3 has none)
         static const VkComponentMapping id = {0};
         sa.imageView = vk_image_view(sten, VK_IMAGE_VIEW_TYPE_2D, sten->format, 0, 1, 0, 1, id, sten->aspect);
         sa.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -7811,10 +7831,135 @@ static void post_pass_ex(VkCommandBuffer cb, const char *fs, const VkImageView *
     VkRect2D sc = {{0, 0}, {aw, ah}};  // (the viewport stays the whole image: gl_FragCoord is the pixel)
     rec_CmdSetViewport(cb, 0, 1, &vp);
     rec_CmdSetScissor(cb, 0, 1, &sc);
-    rec_CmdPushConstants(cb, post_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
+    if (post_pc_big) rec_CmdPushConstants(cb, post_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 128, post_pc_big);
+    else rec_CmdPushConstants(cb, post_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
     fullscreen_vertex_bind(cb);
     rec_CmdDraw(cb, 3, 1, 0, 0);
     rec_CmdEndRendering(cb);
+}
+
+// ================================================================== GTAO (ambient occlusion)
+// Pokémon Z-A draws no screen-space ambient occlusion. Its frame is deferred: the G-buffer, then one lighting pass
+// (fragment shader GTAO_LIGHTING) that reads the scene depth (its texture 1) and rebuilds each pixel's world position as
+// ndc.x * c12 + ndc.y * c13 + depth * c14 + c15 (rows of its constant buffer 2 - "cb5" in its GLSL -, divided by w; row
+// 19 is the camera's position, rows 20 / 21 hold the tangents of half the field of view). Just before the first
+// lighting draw of a frame: GTAO (shaders.c gtao.frag, after XeGTAO) from that depth into a half-size image, then a
+// depth-aware filter; when the lighting pass ends (the next begin_pass), the result - upsampled with depth weights -
+// multiplies its target: the lit image, before the sky, transparents, fog, effects and the HUD. Off by default (F1 >
+// Ambient occlusion). Test switches: LARECOMP_GTAO=<0-3> (the level), _RADIUS (metres, 1.5), _INTENSITY (the factor,
+// 0.85 at 100%), _FLIPY (ndc y sign, -1), _FROM=<frame> (on from that frame: A/B in one run), _DEBUG (1 the AO alone,
+// 2 the normals, 3 distance bands).
+static struct { bool pending; NvnTexture *target; VkImageView ao, depth; uint64_t frame; float pc[32]; } gtao;
+
+static float gtao_env(const char *name, float def) {
+    const char *v = getenv(name);  // (not ENV(): its cache is per call site, and this one serves several names)
+    return v ? (float)atof(v) : def;
+}
+
+// F1 > Ambient occlusion (ambient_occlusion: 0 off, 1 low, 2 medium, 3 high; LARECOMP_GTAO=<0-3> overrides it)
+static int gtao_level(void) {
+    const char *e = getenv("LARECOMP_GTAO");
+    int l = e ? atoi(e) : g_settings.gtao;
+    return l < 0 ? 0 : l > 3 ? 3 : l;
+}
+static bool gtao_on(void) { return gtao_level() > 0; }
+
+// The lighting shader's texture i: its pool entry (as texture_info resolves it), or NULL
+static NvnTexEntry *gtao_tex_entry(ShaderInfo *si, int i) {
+    if (!si || i >= si->ntex) return NULL;
+    int slot = ((int)si->tex[i].handle_offset - 0x20) / 8;
+    uint64_t h = (slot >= 0 && slot < 32) ? st.tex[1][slot] : 0;
+    uint32_t tic = h & 0xFFFFF;
+    if (!h || !st.tpool || tic >= (uint32_t)st.tpool->count) return NULL;
+    NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
+    return e->tex ? e : NULL;
+}
+
+// The deferred lighting pass, in any of its variants (the game swaps in others while a Pokémon is sent out, while a
+// move's effects play...): GTAO_LIGHTING, or a fragment shader with 10+ textures whose first two are one and the same
+// depth texture (the scene depth, read twice) and a camera in constant buffer 2. Decided once per shader.
+static bool gtao_is_lighting(Prog *pr) {
+    if (g_cur_fs_hash == GTAO_LIGHTING) return true;
+    if (!gtao_on() || !pr || !pr->fi || pr->fi->ntex < 10 || !st.program) return false;
+    static uint64_t known[64]; static bool verdict[64]; static int nk;
+    uint64_t fs = st.program->stages[1].code_addr;
+    for (int i = 0; i < nk; i++) if (known[i] == fs) return verdict[i];
+    NvnTexEntry *a = gtao_tex_entry(pr->fi, 0), *b = gtao_tex_entry(pr->fi, 1);
+    bool v = a && b && a->tex == b->tex && renderer_format_is_depth(a->tex->format) && a->tex->backend &&
+             ((TexBackend *)a->tex->backend)->scalable && st.ubuf[1][2].addr && st.ubuf[1][2].size >= 22 * 16;
+    if (nk < 64) { known[nk] = fs; verdict[nk++] = v; }
+    if (v) LOG("[gtao] lighting variant fs %016llx (%d textures)\n", (unsigned long long)g_cur_fs_hash, pr->fi->ntex);
+    return v;
+}
+
+// Before the frame's first lighting draw (outside any pass): GTAO and its filter into post images 6 / 7.
+static void gtao_before_lighting(Prog *pr) {
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t frame = renderer_exec_frame();
+    if (!gtao_on() || gtao.frame == frame + 1 || frame < (uint64_t)gtao_env("LARECOMP_GTAO_FROM", 0)) return;  // (_FROM: on from that frame - A/B tests)
+    gtao.frame = frame + 1;
+    NvnTexEntry *de = gtao_tex_entry(pr->fi, 1);
+    const Range *cam = &st.ubuf[1][2];
+    if (!de || !renderer_format_is_depth(de->tex->format) || !cam->addr || cam->size < 22 * 16) {
+        static int nlog;
+        if (nlog++ < 3) LOG("[gtao] lighting draw without the depth / camera it expects: skipped\n");
+        return;
+    }
+    VkImageView dv = vk_view(de->tex, &de->view, de->has_view, false, pr->fi->tex[1].type);
+    TexBackend *db = de->tex->backend;
+    if (!dv || !db) return;
+    const float *c = (const float *)(uintptr_t)cam->addr;
+    float *pc = gtao.pc;
+    memcpy(pc, c + 12 * 4, 16 * sizeof(float));  // m0..m3
+    memcpy(pc + 16, c + 19 * 4, 4 * sizeof(float));  // cam
+    uint32_t aw = (db->width + 1) / 2, ah = (db->height + 1) / 2;
+    pc[20] = gtao_env("LARECOMP_GTAO_RADIUS", 1.5f);
+    // F1 > Ambient occlusion strength (ambient_occlusion_strength, percent: 25-100; 100 = 0.85, the look tuned on
+    // Lumiose's streets); LARECOMP_GTAO_INTENSITY=<0-2> sets the factor itself
+    pc[21] = getenv("LARECOMP_GTAO_INTENSITY") ? gtao_env("LARECOMP_GTAO_INTENSITY", 0.85f) : 0.85f * g_settings.gtao_strength / 100.0f;
+    pc[22] = gtao_env("LARECOMP_GTAO_FLIPY", -1.0f);  // (Z-A: ndc y up - screen y down)
+    pc[23] = (float)(frame & 63);
+    pc[24] = (float)aw; pc[25] = (float)ah; pc[26] = (float)db->width; pc[27] = (float)db->height;
+    pc[28] = fabsf(c[20 * 4 + 0]); pc[29] = fabsf(c[21 * 4 + 1]);  // tan(half fov) x / y
+    pc[30] = gtao_env("LARECOMP_GTAO_DEBUG", 0);
+    pc[31] = (float)(gtao_level() + 1);  // (slices: 2 / 3 / 4, twice as many steps each)  // (1: the lit image replaced by the AO alone, to check it)
+    if (pc[28] <= 0 || pc[29] <= 0) return;
+    vk_end_pass();
+    VkCommandBuffer cb = vk_cmd();
+    TexBackend *raw = post_image(7, aw, ah), *filt = post_image(8, aw, ah);
+    post_pc_big = pc;
+    VkImageView in[2] = {dv, dv};
+    post_pass(cb, "gtao.frag", in, 1, raw, NULL, false);
+    VkImageView bin[2] = {post_view(raw), dv};
+    post_pass(cb, "gtao_blur.frag", bin, 2, filt, NULL, false);
+    post_pc_big = NULL;
+    gtao.ao = pc[30] >= 2 ? post_view(raw) : post_view(filt);  // (debug views 2 / 3: unfiltered)
+    gtao.depth = dv;
+    static int nlog;
+    if (nlog++ < 2) LOG("[gtao] on: depth %ux%u, AO %ux%u, radius %.2f m, camera (%.1f, %.1f, %.1f)\n", db->width, db->height, aw, ah,
+                        pc[20], pc[16], pc[17], pc[18]);
+}
+
+// The lighting pass has begun drawing into target: its contents are multiplied when it ends
+static void gtao_mark(NvnTexture *target) {
+    if (!gtao_on() || !gtao.ao || !target || gtao.frame == 0) return;
+    gtao.pending = true;
+    gtao.target = target;
+}
+
+// (begin_pass, outside any pass) the lighting pass has ended: the lit image times the AO
+static void gtao_apply_pending(void) {
+    if (!gtao.pending) return;
+    gtao.pending = false;
+    TexBackend *tb = gtao.target ? gtao.target->backend : NULL;
+    if (!tb || !tb->image || !gtao.ao) return;
+    float *pc = gtao.pc;
+    pc[26] = (float)tb->width; pc[27] = (float)tb->height;  // (apply: the lit image's size)
+    VkCommandBuffer cb = vk_cmd();
+    post_pc_big = pc;
+    VkImageView ain[2] = {gtao.ao, gtao.depth};
+    post_pass_ex(cb, "gtao_apply.frag", ain, 2, tb, NULL, false, NULL, pc[30] != 0 ? 0 : 3);
+    post_pc_big = NULL;
 }
 
 // The view the present samples: the game image, or its anti-aliased / upscaled version. ow x oh: the whole image's

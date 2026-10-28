@@ -7918,7 +7918,7 @@ static void gtao_before_lighting(Prog *pr) {
     // Lumiose's streets); LARECOMP_GTAO_INTENSITY=<0-2> sets the factor itself
     pc[21] = getenv("LARECOMP_GTAO_INTENSITY") ? gtao_env("LARECOMP_GTAO_INTENSITY", 0.85f) : 0.85f * g_settings.gtao_strength / 100.0f;
     pc[22] = gtao_env("LARECOMP_GTAO_FLIPY", -1.0f);  // (Z-A: ndc y up - screen y down)
-    pc[23] = (float)(frame & 63);
+    pc[23] = 0;  // (one noise pattern: with no temporal accumulation, a pattern changing per frame flickered)
     pc[24] = (float)aw; pc[25] = (float)ah; pc[26] = (float)db->width; pc[27] = (float)db->height;
     pc[28] = fabsf(c[20 * 4 + 0]); pc[29] = fabsf(c[21 * 4 + 1]);  // tan(half fov) x / y
     pc[30] = gtao_env("LARECOMP_GTAO_DEBUG", 0);

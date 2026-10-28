@@ -7,6 +7,7 @@ typedef struct {
     double ax, ay;             // allocation scale: the render targets' size (Dynamic renders into a part of them)
     double shape;              // window aspect / 16:9 when the camera is widened, else 1
     double vx, vy, vw, vh;     // where the image is drawn in the window (pixels)
+    double lines;              // the frame's lines per window line of its image (below 1: drawn smaller, upscaled)
 } OutScale;
 
 // dw x dh: the window's drawable size in pixels; now: seconds; GPU time of the last frame: game_ms the game's (< 0:

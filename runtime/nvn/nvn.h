@@ -43,6 +43,7 @@ typedef struct {
     float lod_min, lod_max, lod_bias, max_aniso;
     float border[4];
     void *backend;
+    uint32_t backend_gen;  // (Vulkan textures.c vk_sampler: the sampler settings backend was made with)
 } NvnSamplerDesc;
 _Static_assert(8 + sizeof(NvnSamplerDesc) <= 64, "NvnSamplerDesc must fit an NVNsamplerBuilder");
 

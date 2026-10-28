@@ -1482,6 +1482,8 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         extern void renderer_set_alloc_scale(float ax, float ay);
         renderer_set_alloc_scale((float)os.ax, (float)os.ay);
         renderer_set_scale((float)sx, (float)sy);
+        extern void vk_sampler_settings(double lines);
+        vk_sampler_settings(os.lines);  // (the mip bias of a frame drawn smaller than shown; F1's texture filtering)
         pp_mark(PP_SCALE);
         VkCommandBuffer cb = vk_cmd();
         float pv[8] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};

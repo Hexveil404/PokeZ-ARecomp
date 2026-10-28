@@ -1422,6 +1422,10 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
     vk_end_pass();
+    // the HD texture switch (F1 > Textures, applied while playing): between frames, on the thread that uploads the
+    // textures (the render thread when it is on)
+    extern void vk_hd_switch_frame(void);
+    vk_hd_switch_frame();
     black_probe(b, t, frame);
     // the frame's work goes to the GPU now, in a submission of its own: it starts while we wait for the window's image.
     // Its GPU time is counted, and the window image's submission's from after its wait (exec.c gpu_timer_add)

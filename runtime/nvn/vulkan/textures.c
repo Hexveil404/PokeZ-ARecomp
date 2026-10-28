@@ -816,6 +816,7 @@ static void hd_forget(NvnTexture *t) {
 }
 
 void renderer_save_texture_tex(TexBackend *b, const char *path);
+void vk_hd_switch_frame(void) { hd_switch(); }  // (device.c backend_present_now, each frame)
 void vk_texdump_process(void) {
     hd_switch();
     if (!hd_qn) return;

@@ -876,8 +876,11 @@ static const char *builtin_src(const char *name, int *stage) {
                 "    if (any(lessThan(q, vec2(0.0))) || any(greaterThan(q, vec2(1.0))) || dz <= 0.0) break;\n"
                 "    float ds = depth_at(t1, q);\n"
                 "    if (ds > dz) {\n"  // (the scene is in front of the ray here: it passed behind something)
-                "      if (length(wpos(q, ds) - Q) < t * 0.2 + 0.25) { found = 1.0; hit = q; }\n"
-                "      break;\n"
+                "      vec3 S = wpos(q, ds);\n"
+                "      if (length(S - Q) < t * 0.2 + 0.25) { found = 1.0; hit = q; break; }\n"
+                // (something well in front of the ray - the player, a lamp post - only hides it on screen: on past it.
+                // Close behind it, the ray went into a wall: that ends it)
+                "      if (length(S - pc.cam.xyz) > 0.8 * length(Q - pc.cam.xyz)) break;\n"
                 "    }\n"
                 "    t *= 1.13;\n"
                 "  }\n"

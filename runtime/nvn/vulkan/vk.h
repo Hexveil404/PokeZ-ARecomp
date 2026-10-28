@@ -219,6 +219,7 @@ typedef struct TexBackend {
     uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
     int reg;  // slot in textures.c's live list + 1 (a reboot destroys them all)
     bool hd;  // replaced by an HD texture pack's image (textures.c): sx / sy = its size over the game's
+    float shadow_k;  // a shadow map drawn at shadow_k times the game's size (textures.c tex_shadow_scale): 0 / 1 = as is
     // (g_vk.lean_usage) the only formats views of this image may have: nview_fmt 0 = any compatible one
     VkFormat view_fmt[2];
     uint8_t nview_fmt;

@@ -237,6 +237,7 @@ static void pick_device(void) {
     g_vk.phys = pd[best];
     free(pd);
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
+    g_gpu_vendor = g_vk.props.vendorID;  // (settings.c gpu_feature_on: the Compatibility features' Auto)
     g_vkc.api = g_vk.props.apiVersion >= VK_API_VERSION_1_3 && !ENV("LARECOMP_VK_COMPAT") ? VK_API_VERSION_1_3 : VK_API_VERSION_1_2;
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
@@ -445,9 +446,10 @@ static void create_device(void) {
 #endif
 #endif
     // Shader reads past the buffer / image they were given: zeros instead of a GPU page fault (#22: an RX 9070 XT lost
-    // the device on an invalid read in a battle, where NVIDIA reads on). LARECOMP_VK_ROBUST2=0 leaves it off.
-    bool x_rb2 = !(ENV("LARECOMP_VK_ROBUST2") && !atoi(ENV("LARECOMP_VK_ROBUST2"))) &&
-                 has_ext(ep, ne, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+    // the device on an invalid read in a battle, where NVIDIA reads on). Off on AMD by default since: on driver
+    // 26.10.1 the same card lost the device with it on ("read invalid 0xbeefdeadc000", #39) and played a battle
+    // with it off together with the three features below it in F1 > Compatibility. LARECOMP_VK_ROBUST2=0/1.
+    bool x_rb2 = gpu_feature_on(GPU_ROBUST2, "LARECOMP_VK_ROBUST2") && has_ext(ep, ne, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
     // Whether the window really shows the frames presented (present_watch). LARECOMP_NO_PRESENT_WATCH=1: not checked
     bool x_pw = !ENV("LARECOMP_NO_PRESENT_WATCH") && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
                 has_ext(ep, ne, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);

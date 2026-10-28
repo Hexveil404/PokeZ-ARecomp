@@ -22,7 +22,13 @@ enum { MENU_CONFIRM_GAME = 0, MENU_CONFIRM_CONTROLLER = 1 };
 // F1 > Rendering > Compatibility (Vulkan): GPU features some drivers fail with, each Auto / On / Off from the next start;
 // the LARECOMP_* variable named in each still wins
 enum { GPU_DYN_VERTEX = 0 /* LARECOMP_VK_DYN_VERTEX */, GPU_OVERLAP /* LARECOMP_GPU_OVERLAP */,
-       GPU_STRAIGHT /* LARECOMP_SHADER_FLAT */, GPU_XFB_MIRROR /* LARECOMP_VK_XFB_MIRROR */, GPU_COMPAT_N };
+       GPU_STRAIGHT /* LARECOMP_SHADER_FLAT */, GPU_XFB_MIRROR /* LARECOMP_VK_XFB_MIRROR */,
+       GPU_ROBUST2 /* LARECOMP_VK_ROBUST2 */, GPU_TEX_PREFETCH /* LARECOMP_TEX_PREFETCH */,
+       GPU_SHADER_PREP /* LARECOMP_SHADER_PREP */, GPU_PAGES_OUTSIDE /* LARECOMP_VK_PAGES_OUTSIDE */, GPU_COMPAT_N };
+// the GPU's PCI vendor (Vulkan: device.c, before any feature is decided; 0: not known) and a feature's state: its
+// LARECOMP_* variable, else F1 > Compatibility, else on unless the GPU is AMD's (0x1002: #39, #54)
+extern unsigned g_gpu_vendor;
+bool gpu_feature_on(int feature, const char *env);
 enum { GPU_AUTO = 0, GPU_ON = 1, GPU_OFF = 2 };
 enum { TIMER_POS_LEFT = 0, TIMER_POS_RIGHT = 1 };  // the run timer's corner (bottom left / right)
 enum { CHAOS_LETTERS_OFF = 0, CHAOS_LETTERS_EXPLORED = 1, CHAOS_LETTERS_MAP = 2 /* explored, all with the Map */ };

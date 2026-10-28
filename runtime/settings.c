@@ -21,6 +21,15 @@ static const char *const k_enemy_colour_keys[N_ENEMY_COLOUR_MODES] = {"off", "se
 const char *const g_screen_filters[N_SCREEN_FILTERS] = {"Off", "Game Boy", "Game Boy Color", "Grayscale"};
 static const char *const k_screen_filter_keys[N_SCREEN_FILTERS] = {"off", "gameboy", "gameboy_color", "grayscale"};  // (else: off)
 
+unsigned g_gpu_vendor;
+bool gpu_feature_on(int feature, const char *env) {
+    const char *e = env ? getenv(env) : NULL;
+    if (e && *e) return atoi(e) != 0;
+    int cs = feature >= 0 && feature < GPU_COMPAT_N ? g_settings.gpu_compat[feature] : GPU_AUTO;
+    if (cs != GPU_AUTO) return cs == GPU_ON;
+    return g_gpu_vendor != 0x1002;
+}
+
 Settings g_settings = {
     .aspect = ASPECT_UNLOCKED,
     .fullscreen = false,
@@ -178,7 +187,8 @@ void settings_load(void) {
         else if (!strcmp(key, "hdr_paper_white_nits")) { int n = atoi(val); g_settings.hdr_paper = n < 80 ? 80 : n > 500 ? 500 : n; }
         else if (!strcmp(key, "present_mode")) g_settings.present_fifo = !strcmp(val, "fifo");
         else if (!strncmp(key, "gpu_", 4)) {  // Compatibility: gpu_dynamic_vertex / gpu_overlap / ... = auto|on|off
-            static const char *const names[GPU_COMPAT_N] = {"gpu_dynamic_vertex", "gpu_overlap", "gpu_straight_shaders", "gpu_xfb_mirror"};
+            static const char *const names[GPU_COMPAT_N] = {"gpu_dynamic_vertex", "gpu_overlap", "gpu_straight_shaders", "gpu_xfb_mirror",
+            "gpu_robust_access", "gpu_texture_prefetch", "gpu_prepare_shaders", "gpu_pages_outside"};
             for (int i = 0; i < GPU_COMPAT_N; i++)
                 if (!strcmp(key, names[i])) g_settings.gpu_compat[i] = !strcmp(val, "on") ? GPU_ON : !strcmp(val, "off") ? GPU_OFF : GPU_AUTO;
         }
@@ -304,7 +314,8 @@ void settings_save(void) {
     fprintf(f, "hdr_paper_white_nits = %d\n", g_settings.hdr_paper);
     fprintf(f, "present_mode = %s\n", g_settings.present_fifo ? "fifo" : "mailbox");
     {
-        static const char *const names[GPU_COMPAT_N] = {"gpu_dynamic_vertex", "gpu_overlap", "gpu_straight_shaders", "gpu_xfb_mirror"};
+        static const char *const names[GPU_COMPAT_N] = {"gpu_dynamic_vertex", "gpu_overlap", "gpu_straight_shaders", "gpu_xfb_mirror",
+            "gpu_robust_access", "gpu_texture_prefetch", "gpu_prepare_shaders", "gpu_pages_outside"};
         for (int i = 0; i < GPU_COMPAT_N; i++)
             fprintf(f, "%s = %s\n", names[i], g_settings.gpu_compat[i] == GPU_ON ? "on" : g_settings.gpu_compat[i] == GPU_OFF ? "off" : "auto");
     }

@@ -739,7 +739,11 @@ static void tab_display(void) {
             {"Dynamic vertex input", "Vertex input dinâmico"},
             {"CPU / GPU overlap", "Sobreposição CPU / GPU"},
             {"Straight-line shaders", "Shaders em linha reta"},
-            {"Skinning mirror", "Espelho do skinning"}};
+            {"Skinning mirror", "Espelho do skinning"},
+            {"Robust GPU access", "Acesso robusto da GPU"},
+            {"Early texture uploads", "Envio antecipado de texturas"},
+            {"Prepare shaders at start", "Preparar shaders no início"},
+            {"Page tracking outside the window", "Rastreio de páginas fora da janela"}};
         for (int i = 0; i < GPU_COMPAT_N; i++)
             opt_choice(TR(what[i][0], what[i][1]), &g_settings.gpu_compat[i], aoo, 3, GPU_AUTO,
                        TR("For crashes with a graphics driver error (\"Your graphics driver crashed\", a GPU page fault): "

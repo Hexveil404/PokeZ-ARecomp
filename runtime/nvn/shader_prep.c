@@ -11,6 +11,7 @@
 
 #include "nvn.h"
 #include "shader_prep.h"
+#include "../settings.h"
 
 uint64_t shader_code_hash(const uint8_t *code, size_t n) {  // FNV-1a, 64-bit
     uint64_t h = 0xcbf29ce484222325ull;
@@ -649,7 +650,10 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
 // under a second with warm caches. LARECOMP_SHADER_PREP=0: not; =1: Link's Awakening too (tests).
 void shader_prep_boot(const char *romfs) {
     extern int g_game_is_la;  // (runtime/rt.h)
-    const char *e = getenv("LARECOMP_SHADER_PREP");
-    if (e ? !atoi(e) : g_game_is_la) return;
+    // (Pokémon Z-A only; F1 > Compatibility, off on AMD by default: #39)
+    if (g_game_is_la || !gpu_feature_on(GPU_SHADER_PREP, "LARECOMP_SHADER_PREP")) {
+        const char *e = getenv("LARECOMP_SHADER_PREP");
+        if (!(e && atoi(e))) return;  // (=1 still forces it, Link's Awakening included)
+    }
     shader_prep_run(romfs, NULL, NULL);
 }

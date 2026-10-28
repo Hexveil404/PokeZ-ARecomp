@@ -1780,6 +1780,7 @@ static void party_decrypt(uint8_t *d) {  // one slot's first 0x158 bytes, in pla
     for (int b = 0; b < 4; b++) memcpy(d + 8 + 0x50 * b, src + 0x50 * pos[sv * 4 + b], 0x50);
 }
 
+static int party_model(int species);
 static void party_load(void) {
     g_party.clear();
     g_party_time = g_save_time;
@@ -1823,6 +1824,9 @@ static void party_load(void) {
         g_party.push_back(m);
     }
     fprintf(stderr, "[launcher] team: %d in the party\n", (int)g_party.size());
+    for (auto &m : g_party)  // (what each card's icon is looked up by: party_icon)
+        fprintf(stderr, "[launcher]   %s: species %d form %d model %d%s, level %d\n", m.egg ? "egg" : m.name.c_str(), m.species,
+                m.form, party_model(m.species), m.shiny ? " shiny" : "", m.level);
 }
 
 // The icons: the game's own (pm<model>_<form>_00_00_<0|1>, 0 normal / 1 shiny), drawn from the player's romfs.bin into
@@ -1893,24 +1897,27 @@ static uint64_t party_icon(const PartyMon &m) {  // 0: none (yet)
     std::string key = name;
     for (auto &l : g_party_icons)
         if (l.first == key) return l.second;
-    std::string path;
     // the form's own icon (a form number, or 11 + it for species whose base form is 11: Vivillon, Furfrou...), else
-    // the base form's; the shiny one, else the normal one
-    for (int sh = m.shiny && !m.egg ? 1 : 0; sh >= 0 && path.empty(); sh--)
+    // the base form's; the shiny one, else the normal one. An all-grey icon is the game's own placeholder ball (no art
+    // for that shiny form: Zygarde's 14 / 15, a grey ball on a shiny Zygarde's card): the next one is used instead
+    uint64_t tex = 0;
+    for (int sh = m.shiny && !m.egg ? 1 : 0; sh >= 0 && !tex; sh--)
         for (int form : {m.egg ? 0 : m.form, m.egg ? 0 : 11 + m.form, 0, 11}) {
             snprintf(name, sizeof name, PARTY_ICONS "/pm%04d_%02d_00_00_%d.png", model, form, sh);
-            if (file_exists(name)) { path = name; break; }
+            SDL_Surface *s0 = file_exists(name) ? SDL_LoadPNG(name) : NULL;
+            if (!s0) continue;
+            if (SDL_Surface *s = SDL_ConvertSurface(s0, SDL_PIXELFORMAT_ABGR8888)) {  // (R, G, B, A bytes)
+                std::vector<uint8_t> px((size_t)s->w * s->h * 4);
+                for (int y = 0; y < s->h; y++) memcpy(&px[(size_t)y * s->w * 4], (uint8_t *)s->pixels + (size_t)y * s->pitch, (size_t)s->w * 4);
+                bool grey = true;
+                for (size_t i = 0; i < px.size() && grey; i += 4)
+                    grey = px[i + 3] < 16 || (px[i] == px[i + 1] && px[i + 1] == px[i + 2]);
+                if (!grey) tex = party_texture(px.data(), s->w, s->h);
+                SDL_DestroySurface(s);
+            }
+            SDL_DestroySurface(s0);
+            if (tex) break;
         }
-    uint64_t tex = 0;
-    if (SDL_Surface *s0 = path.empty() ? NULL : SDL_LoadPNG(path.c_str())) {
-        if (SDL_Surface *s = SDL_ConvertSurface(s0, SDL_PIXELFORMAT_ABGR8888)) {  // (R, G, B, A bytes)
-            std::vector<uint8_t> px((size_t)s->w * s->h * 4);
-            for (int y = 0; y < s->h; y++) memcpy(&px[(size_t)y * s->w * 4], (uint8_t *)s->pixels + (size_t)y * s->pitch, (size_t)s->w * 4);
-            tex = party_texture(px.data(), s->w, s->h);
-            SDL_DestroySurface(s);
-        }
-        SDL_DestroySurface(s0);
-    }
     g_party_icons.push_back({key, tex});
     return tex;
 }
@@ -1928,17 +1935,24 @@ static float party_panel(ImDrawList *dl, float x, float y, float w) {
         const PartyMon &m = g_party[i];
         float cx = x + i * (cw + gap);
         panel(dl, cx, y, cw, ch, IM_COL32(8, 19, 31, 200), m.shiny ? IM_COL32(255, 215, 122, 110) : C_LINE, 14);
-        float is = cw - 16;
+        float is = cw - 30;  // (inset: the art touched the card's border)
         if (uint64_t tex = party_icon(m))
-            dl->AddImage((ImTextureID)tex, P(cx + 8, y + 6), P(cx + 8 + is, y + 6 + is));
+            dl->AddImage((ImTextureID)tex, P(cx + 15, y + 12), P(cx + 15 + is, y + 12 + is));
         else {  // (no icon: a ball drawn in its place)
-            ImVec2 c = P(cx + cw / 2, y + 6 + is / 2);
+            ImVec2 c = P(cx + cw / 2, y + 12 + is / 2);
             float r = is * 0.3f * g_s;
             dl->AddCircleFilled(c, r, IM_COL32(255, 255, 255, 30), 32);
             dl->AddLine(ImVec2(c.x - r, c.y), ImVec2(c.x + r, c.y), IM_COL32(255, 255, 255, 60), 2 * g_s);
             dl->AddCircle(c, r * 0.3f, IM_COL32(255, 255, 255, 60), 16, 2 * g_s);
         }
-        if (m.shiny) text(dl, F_LABEL, 13, cx + cw - 18, y + 6, C_GOLD_HI, "\xe2\x98\x85");
+        if (m.shiny) {  // a five-pointed star, drawn (the start screen's font has no U+2605: it showed "?")
+            ImVec2 c = P(cx + cw - 13, y + 13), pts[10];
+            for (int k = 0; k < 10; k++) {
+                float a = -1.5707963f + k * 0.6283185f, r = (k & 1 ? 2.6f : 6.5f) * g_s;
+                pts[k] = ImVec2(c.x + cosf(a) * r, c.y + sinf(a) * r);
+            }
+            dl->AddConcavePolyFilled(pts, 10, C_GOLD_HI);
+        }
         const char *nm = m.egg ? TR("Egg", "Ovo") : m.name.c_str();
         float nw = fminf(text_size(F_BODY, 13, nm).x, cw - 8);
         dl->PushClipRect(P(cx + 4, y), P(cx + cw - 4, y + ch), true);

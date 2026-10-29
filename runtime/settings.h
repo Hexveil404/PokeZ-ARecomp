@@ -77,6 +77,7 @@ typedef struct {
     bool bg_input;       // controllers keep working while the window isn't in front (SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS)
     bool move_360;       // analog movement in any direction (the game snaps the stick to 8): runtime/hle/qol.c
     bool battle_abxy_position;  // while ZL is held, the controller's A/B/X/Y go by position: runtime/hle/input.c
+    bool xbox_attack_layout;    // opt-in battle pane presentation overlay; applied on next boot, never remaps input
     int mouse_camera;    // MOUSE_CAM_*: how the mouse turns the camera (runtime/hle/input.c)
     float mouse_sens;    // mouse camera speed, 1 = default
     int rstick_snap;     // degrees: a right stick this close to an axis is put on it (0 = off): runtime/hle/input.c

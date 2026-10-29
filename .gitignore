@@ -23,6 +23,8 @@ __pycache__/
 # texture dumps and HD packs (game art: users make their own)
 /textures/
 /mods/
+# Private battle UI resource generated from the player's game; never distribute.
+/assets/xbox_attack_layout/
 /tools/hdtools/
 # Claude Code: machine-specific notes
 CLAUDE.local.md

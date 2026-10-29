@@ -2959,7 +2959,33 @@ extern "C" void launcher_run(const char *root) {
                         dl->AddRectFilled(P(bx, by), P(bx + bs.x + 20, by + bs.y + 10), hot ? C_GOLD_HI : C_GOLD, 6 * g_s);
                         text(dl, F_LABEL, 14, bx + 10, by + 5, IM_COL32(8, 14, 24, 255), bl);
                         if (hot) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-                        if (go) g_update_go = true;
+                        // asked first: what happens, and that the player's things stay (LARECOMP_LAUNCHER_SHOT=<f>:askupdate)
+                        static bool shot_upd = getenv("LARECOMP_LAUNCHER_SHOT") && strstr(getenv("LARECOMP_LAUNCHER_SHOT"), ":askupdate");
+                        if (go || shot_upd) ImGui::OpenPopup("##updask"), shot_upd = false;
+                        ImGui::SetNextWindowPos(P(W_ / 2, H_ / 2), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+                        if (ImGui::BeginPopupModal("##updask", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+                            ImGui::PushFont(g_font_menu);
+                            ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "%s", (std::string(TR("Update to version ", "Atualizar para a versão ")) +
+                                                                                 tag_label(upd, false) + "?").c_str());
+                            ImGui::PopFont();
+                            if (upd_size > 0)
+                                ImGui::Text(TR("ZA Recomp downloads it (%.0f MB) from GitHub, replaces its program files and opens again.",
+                                               "O ZA Recomp baixa a versão nova (%.0f MB) do GitHub, troca os arquivos do programa e abre de novo."),
+                                            upd_size / 1e6);
+                            else
+                                ImGui::Text("%s", TR("ZA Recomp downloads it from GitHub, replaces its program files and opens again.",
+                                                     "O ZA Recomp baixa a versão nova do GitHub, troca os arquivos do programa e abre de novo."));
+                            ImGui::TextDisabled("%s", TR("Saves, mods, settings and the compiled game are kept as they are.",
+                                                         "Saves, mods, configurações e o jogo já compilado ficam como estão."));
+                            ImGui::Spacing();
+                            if (ImGui::Button(TR("Update", "Atualizar"), ImVec2(220 * g_s, 0))) g_update_go = true, ImGui::CloseCurrentPopup();
+                            ImGui::SameLine();
+                            ImGui::SetItemDefaultFocus();
+                            if (ImGui::Button(TR("Cancel", "Cancelar"), ImVec2(220 * g_s, 0)) ||
+                                ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+                                ImGui::CloseCurrentPopup();
+                            ImGui::EndPopup();
+                        }
                     }
 #endif
                 }

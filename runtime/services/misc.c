@@ -6,6 +6,7 @@
 
 #include "../hle.h"
 #include "../ipc.h"
+#include "../platform.h"
 
 static void ok_logger(Service *s, IpcReq *req, IpcResp *resp) {
     LOG("[svc] %s cmd %u (ok)\n", s->name, req->cmd);
@@ -37,6 +38,20 @@ SERVICE("pctl", pctl) { pctl_root(s, req, resp); }
 SERVICE("pctl:s", pctl_s) { pctl_root(s, req, resp); }
 SERVICE("pctl:a", pctl_a) { pctl_root(s, req, resp); }
 SERVICE("pctl:r", pctl_r) { pctl_root(s, req, resp); }
+
+// ------------------------------------------------------------------ csrng
+// GenerateRandomBytes (cmd 0) into the output buffer. Z-A asks it for the seeds of its rolls, hundreds of times a
+// session; the logging stub left the buffer as it was, so every roll came out the same - each ball caught (#61).
+SERVICE("csrng", csrng) {
+    (void)s;
+    IpcBuf *b = req->cmd == 0 ? out_buf(req, 0) : NULL;
+    if (!b) { LOG("[csrng] cmd %u (ok)\n", req->cmd); return; }
+    uint8_t *p = (uint8_t *)(uintptr_t)b->addr;
+    for (uint64_t i = 0; i < b->size; i += 4) {
+        uint32_t r = arc4random();
+        memcpy(p + i, &r, b->size - i < 4 ? b->size - i : 4);
+    }
+}
 
 // ------------------------------------------------------------------ aoc:u
 // Add-on content (DLC): the game root's aoc/<title id, 16 hex digits>.bin files, each the DLC's RomFS image (fs.c

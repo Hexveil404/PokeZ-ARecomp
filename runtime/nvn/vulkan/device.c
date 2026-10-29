@@ -147,27 +147,34 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
     return VK_FALSE;
 }
 
+static bool ab_inst_ext, ab_on;  // (GPU address binding report: below, after g_fault_ext)
+static void ab_messenger_create(void);
 // LARECOMP_VK_VALIDATION=1: Khronos validation layer (MSYS2 package vulkan-validation-layers)
 // LARECOMP_VK_VALIDATION_STOP=1: require that layer and its callback, and exit nonzero on the first error.
 static bool validating;  // the validation layer is on (validation_exit)
 static void create_instance(void) {
     Uint32 n_sdl = 0;
     const char *const *sdl_ext = SDL_Vulkan_GetInstanceExtensions(&n_sdl);
-    const char *ext[16];
+    const char *ext[20];
     uint32_t n_ext = 0;
     for (Uint32 i = 0; i < n_sdl && n_ext < 14; i++) ext[n_ext++] = sdl_ext[i];
     bool strict = getenv("LARECOMP_VK_VALIDATION_STOP") != NULL;
     bool validate = strict || getenv("LARECOMP_VK_VALIDATION") != NULL;
-    if (validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
-    {   // the window's HDR colour spaces (HDR10, scRGB) for F1 > Video > HDR (create_swapchain), where the loader has them
+    bool want_ab = !ENV("LARECOMP_VK_ADDR_REPORT") || atoi(ENV("LARECOMP_VK_ADDR_REPORT")) != 0;
+    {   // the window's HDR colour spaces (HDR10, scRGB) for F1 > Video > HDR (create_swapchain), where the loader has them;
+        // debug utils for the GPU address binding report (ab_*)
         uint32_t na = 0;
         vkEnumerateInstanceExtensionProperties(NULL, &na, NULL);
         VkExtensionProperties *av = calloc(na ? na : 1, sizeof *av);
         vkEnumerateInstanceExtensionProperties(NULL, &na, av);
-        for (uint32_t i = 0; i < na; i++)
+        for (uint32_t i = 0; i < na; i++) {
             if (!strcmp(av[i].extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME)) ext[n_ext++] = VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME;
+            if (!strcmp(av[i].extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) && want_ab) ab_inst_ext = true;
+        }
         free(av);
     }
+    if (ab_inst_ext && !validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    if (validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;  // (last: dropped below when the layer is missing)
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
                              .pEngineName = "LARecomp", .apiVersion = VK_API_VERSION_1_3};
@@ -186,9 +193,12 @@ static void create_instance(void) {
         ci.enabledExtensionCount--;
         validate = false;
         r = vkCreateInstance(&ci, NULL, &g_vk.inst);
+        ab_inst_ext = false;  // (debug utils went with the layer)
     }
     validating = validate;
     if (r != VK_SUCCESS) FATAL("vkCreateInstance: %d (is a Vulkan 1.3 driver installed?)\n", r);
+    if (validate && want_ab) ab_inst_ext = true;
+    ab_messenger_create();
     if (validate) {
         PFN_vkCreateDebugUtilsMessengerEXT f =
             (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.inst, "vkCreateDebugUtilsMessengerEXT");
@@ -285,6 +295,130 @@ static void pick_device(void) {
 }
 
 static bool g_fault_ext;
+
+// ------------------------------------------------------------------ GPU address bindings (VK_EXT_device_address_binding_report)
+// The AMD battle page faults (#22, #39: RX 9070 XT, RX 7600) read addresses that cluster within each version (v0.1.11:
+// 0x19bd81000..0x19bd9c000) - past the end of one big allocation? The driver reports every GPU address range it binds
+// and unbinds; at a device fault (vk_device_fault_report) the faulting address is matched against them: the object
+// holding it, or the nearest ones on each side, and any freed object that held it (a use after free). The first
+// AB_KEEP events stay (the guest window import and other long-lived buffers are made at boot), later ones go to a
+// ring. LARECOMP_VK_ADDR_REPORT=0: off.
+typedef struct { uint64_t base, size, handle; uint32_t objtype, seq; uint8_t unbind, internal; } AbEvent;
+#define AB_KEEP 8192
+#define AB_RING (1u << 17)
+static AbEvent *ab_ev;  // [AB_KEEP + AB_RING]
+static uint32_t ab_n;   // events seen (seq)
+static atomic_flag ab_lock = ATOMIC_FLAG_INIT;
+static VkDebugUtilsMessengerEXT ab_messenger;
+
+static VKAPI_ATTR VkBool32 VKAPI_CALL addr_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT type,
+                                              const VkDebugUtilsMessengerCallbackDataEXT *d, void *user) {
+    (void)sev, (void)user;
+    if (!(type & VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT) || !ab_ev) return VK_FALSE;
+    const VkBaseInStructure *p = d->pNext;
+    while (p && p->sType != VK_STRUCTURE_TYPE_DEVICE_ADDRESS_BINDING_CALLBACK_DATA_EXT) p = p->pNext;
+    if (!p) return VK_FALSE;
+    const VkDeviceAddressBindingCallbackDataEXT *b = (const void *)p;
+    AbEvent e = {b->baseAddress, b->size, d->objectCount ? d->pObjects[0].objectHandle : 0,
+                 d->objectCount ? (uint32_t)d->pObjects[0].objectType : 0, 0,
+                 b->bindingType == VK_DEVICE_ADDRESS_BINDING_TYPE_UNBIND_EXT,
+                 (b->flags & VK_DEVICE_ADDRESS_BINDING_INTERNAL_OBJECT_BIT_EXT) != 0};
+    while (atomic_flag_test_and_set_explicit(&ab_lock, memory_order_acquire)) {}
+    e.seq = ab_n;
+    ab_ev[ab_n < AB_KEEP ? ab_n : AB_KEEP + (ab_n - AB_KEEP) % AB_RING] = e;
+    ab_n++;
+    atomic_flag_clear_explicit(&ab_lock, memory_order_release);
+    return VK_FALSE;
+}
+
+static void ab_messenger_create(void) {
+    if (!ab_inst_ext) return;
+    PFN_vkCreateDebugUtilsMessengerEXT f =
+        (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.inst, "vkCreateDebugUtilsMessengerEXT");
+    VkDebugUtilsMessengerCreateInfoEXT mi = {
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
+                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT, .pfnUserCallback = addr_cb};
+    ab_ev = calloc(AB_KEEP + AB_RING, sizeof *ab_ev);
+    if (!ab_ev || !f || f(g_vk.inst, &mi, NULL, &ab_messenger) != VK_SUCCESS) { free(ab_ev); ab_ev = NULL; ab_inst_ext = false; }
+}
+
+static const AbEvent *ab_at(uint32_t i) {  // i-th kept event, oldest first
+    uint32_t kept = ab_n < AB_KEEP ? ab_n : AB_KEEP;
+    if (i < kept) return &ab_ev[i];
+    uint32_t later = ab_n - AB_KEEP, inring = later < AB_RING ? later : AB_RING;
+    return &ab_ev[AB_KEEP + (later - inring + (i - kept)) % AB_RING];
+}
+static uint32_t ab_count(void) { return ab_n < AB_KEEP ? ab_n : AB_KEEP + (ab_n - AB_KEEP < AB_RING ? ab_n - AB_KEEP : AB_RING); }
+
+// Which kept bind events were unbound later (freed / rebound elsewhere): one pass from the newest event back, the
+// unbinds seen so far in a hash set of (object, address).
+static uint8_t *ab_freed_flags(uint32_t n) {
+    enum { HB = 19 };
+    uint8_t *freed = calloc(n ? n : 1, 1);
+    uint64_t *set = calloc(1u << HB, sizeof *set);
+    if (!freed || !set) { free(set); return freed; }
+    for (uint32_t j = n; j-- > 0;) {
+        const AbEvent *e = ab_at(j);
+        uint64_t k = (e->handle * 0x9E3779B97F4A7C15ull ^ e->base) | 1;
+        uint32_t h = (uint32_t)(k >> 40) & ((1u << HB) - 1);
+        while (set[h] && set[h] != k) h = (h + 1) & ((1u << HB) - 1);
+        if (e->unbind) set[h] = k;  // (at most AB_KEEP + AB_RING keys: the table stays under half full)
+        else freed[j] = set[h] == k;
+    }
+    free(set);
+    return freed;
+}
+
+static void ab_describe(const char *what, uint32_t i, bool freed, uint64_t addr) {
+    extern const char *vk_exec_buffer_kind(uint64_t handle);
+    const AbEvent *e = ab_at(i);
+    const char *kind = e->objtype == VK_OBJECT_TYPE_BUFFER || e->objtype == VK_OBJECT_TYPE_DEVICE_MEMORY ? vk_exec_buffer_kind(e->handle) : NULL;
+    const char *type = e->objtype == VK_OBJECT_TYPE_BUFFER ? "buffer" : e->objtype == VK_OBJECT_TYPE_IMAGE ? "image"
+                     : e->objtype == VK_OBJECT_TYPE_DEVICE_MEMORY ? "memory" : "object";
+    uint64_t end = e->base + e->size;
+    const char *where = addr >= end ? "the fault past its end by" : addr < e->base ? "the fault before its start by" : "the fault at offset";
+    uint64_t rel = addr >= end ? addr - end : addr < e->base ? e->base - addr : addr - e->base;
+    LOG("[vk]   %s: %s %#llx%s%s%s [%#llx, %#llx) %llu KB, %s %llu KB, bound at event %u of %u%s%s\n", what, type,
+        (unsigned long long)e->handle, kind ? " (" : "", kind ? kind : "", kind ? ")" : "", (unsigned long long)e->base,
+        (unsigned long long)end, (unsigned long long)(e->size >> 10), where, (unsigned long long)(rel >> 10), e->seq, ab_n,
+        e->internal ? ", driver-internal" : "", freed ? ", FREED since" : "");
+}
+
+// At a device fault: what held the faulting page [addr, addr + precision), and the live objects nearest to it
+static void ab_explain(uint64_t addr, uint64_t prec) {
+    if (!ab_on) { LOG("[vk]   address owner: unknown (%s)\n", ab_inst_ext ? "the driver has no address binding report" :
+                                                                  "no debug utils, or LARECOMP_VK_ADDR_REPORT=0"); return; }
+    while (atomic_flag_test_and_set_explicit(&ab_lock, memory_order_acquire)) {}
+    uint32_t n = ab_count();
+    uint8_t *freed = ab_freed_flags(n);
+    uint64_t lo = addr, hi = addr + (prec ? prec : 1);
+    int shown = 0, below = -1, above = -1;
+    for (uint32_t i = 0; i < n; i++) {
+        const AbEvent *e = ab_at(i);
+        if (e->unbind || !e->size) continue;
+        bool f = freed && freed[i];
+        if (e->base < hi && e->base + e->size > lo) { if (shown++ < 8) ab_describe("held by", i, f, addr); continue; }
+        if (f) continue;  // (neighbours: live ones only)
+        if (e->base + e->size <= lo && (below < 0 || e->base + e->size > ab_at((uint32_t)below)->base + ab_at((uint32_t)below)->size)) below = (int)i;
+        if (e->base >= hi && (above < 0 || e->base < ab_at((uint32_t)above)->base)) above = (int)i;
+    }
+    if (!shown) LOG("[vk]   no object ever held that page in the %u kept binding events (%u in all)\n", n, ab_n);
+    // (the nearest edges: every live object ending / starting there - a buffer and its memory share one)
+    uint64_t bend = below >= 0 ? ab_at((uint32_t)below)->base + ab_at((uint32_t)below)->size : 0;
+    uint64_t abase = above >= 0 ? ab_at((uint32_t)above)->base : 0;
+    int nb = 0, na = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const AbEvent *e = ab_at(i);
+        if (e->unbind || !e->size || (freed && freed[i])) continue;
+        if (below >= 0 && e->base + e->size == bend && nb++ < 4) ab_describe("nearest below", i, false, addr);
+        if (above >= 0 && e->base == abase && na++ < 4) ab_describe("nearest above", i, false, addr);
+    }
+    free(freed);
+    atomic_flag_clear_explicit(&ab_lock, memory_order_release);
+}
+
 static PFN_vkWaitForPresentKHR g_present_wait;  // (VK_KHR_present_wait: present_watch)
 static bool g_present_fifo;  // (present_watch gave up on the default present mode)
 static _Atomic uint32_t g_img_changes;  // (probe_check: the game's presented image changed - screen_watch)
@@ -331,8 +465,13 @@ void vk_device_fault_report(void) {
     LOG("[vk] device fault: %s\n", info.description);
     static const char *const kind[] = {"none", "read invalid", "write invalid", "execute invalid", "ip unknown", "ip invalid", "ip valid"};
     for (uint32_t i = 0; i < c.addressInfoCount; i++)
+    {
         LOG("[vk]   address %s %#llx (precision %#llx)\n", addr[i].addressType < 7 ? kind[addr[i].addressType] : "?",
             (unsigned long long)addr[i].reportedAddress, (unsigned long long)addr[i].addressPrecision);
+        if (addr[i].addressType >= VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT &&
+            addr[i].addressType <= VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT)
+            ab_explain(addr[i].reportedAddress & ~(addr[i].addressPrecision ? addr[i].addressPrecision - 1 : 0), addr[i].addressPrecision);
+    }
     for (uint32_t i = 0; i < c.vendorInfoCount; i++)
         LOG("[vk]   vendor: %s (code %#llx data %#llx)\n", vend[i].description, (unsigned long long)vend[i].vendorFaultCode,
             (unsigned long long)vend[i].vendorFaultData);
@@ -391,7 +530,7 @@ static void create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[16];
+    const char *ext[32];
     uint32_t n_ext = 0;
     // Vulkan 1.2: the 1.3 features the driver has as extensions. LARECOMP_VK_COMPAT=1 takes none of them (the compat.c
     // ways), =<names> only leaves out those: rendering, sync, eds, eds2 (e.g. =sync)
@@ -417,6 +556,16 @@ static void create_device(void) {
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     g_fault_ext = fault;
+    VkPhysicalDeviceAddressBindingReportFeaturesEXT ab_feat = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT};
+    if (ab_inst_ext && has_ext(ep, ne, VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME)) {  // (GPU address owners: ab_explain)
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &ab_feat};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &q);
+        ab_on = ab_feat.reportAddressBinding;
+        ab_feat.pNext = NULL;
+        if (ab_on) ext[n_ext++] = VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME;
+    }
+    LOG("[vk] GPU address binding report: %s\n", ab_on ? "on (a device fault names the object at its address)"
+        : !ab_inst_ext ? "off (no debug utils, or LARECOMP_VK_ADDR_REPORT=0)" : "not offered by this driver");
     // (LARECOMP_VK_DEVLOST_TRACE: the last draw / dispatch reached, from the driver)
     g_ckpt = ENV("LARECOMP_VK_DEVLOST_TRACE") && has_ext(ep, ne, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
     if (g_ckpt) ext[n_ext++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
@@ -661,6 +810,7 @@ static void create_device(void) {
                                   .queueCount = 1, .pQueuePriorities = &prio};
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1,
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
+    if (ab_on) ab_feat.pNext = (void *)di.pNext, di.pNext = &ab_feat;
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
 #define VK_LOAD_COMMAND(f)                                                                                            \
@@ -1345,8 +1495,20 @@ static void hdr_shot_report(const void *px) {
 }
 
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
+uint64_t renderer_present_count(void);
 void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
+    if (ab_on && ENV("LARECOMP_VK_ADDR_TEST") && renderer_present_count() == 600) {  // (test: the report without a fault)
+        while (atomic_flag_test_and_set_explicit(&ab_lock, memory_order_acquire)) {}
+        uint64_t big = 0, end = 0;
+        for (uint32_t i = 0, n = ab_count(); i < n; i++) {
+            const AbEvent *e = ab_at(i);
+            if (!e->unbind && e->objtype == VK_OBJECT_TYPE_BUFFER && e->size > big) big = e->size, end = e->base + e->size;
+        }
+        atomic_flag_clear_explicit(&ab_lock, memory_order_release);
+        LOG("[vk] address report test: %u binding events; 516 KB past the end of the largest buffer:\n", ab_n);
+        if (big) ab_explain(end + 0x81000, 0x1000);
+    }
     VkCommandBuffer cb = vk_cmd();
     rec_CmdEndRendering(cb);
     VkSpan shot = {0};

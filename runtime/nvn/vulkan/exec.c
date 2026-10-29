@@ -9170,3 +9170,32 @@ void backend_execute_batch(const uint64_t *handles, int n) {
     if (each < 0) each = ENV("LARECOMP_VK_SUBMIT_EACH") != NULL;
     for (int i = 0; i < n; i++) execute_one(handles[i], each || i == n - 1);
 }
+
+// A device fault's address owner (device.c ab_explain): which of this file's buffers (or the guest window import's
+// memory) the handle is, NULL when none. Called after the device is lost - only reads the tables.
+const char *vk_exec_buffer_kind(uint64_t handle) {
+    VkBuffer b = (VkBuffer)(uintptr_t)handle;
+    if (!b) return NULL;
+    static char tmp[96];
+    if (b == gmem_buf || (VkDeviceMemory)(uintptr_t)handle == gmem_mem) {
+        snprintf(tmp, sizeof tmp, "guest window import: guest %llx + %llu MB", (unsigned long long)(gwin_base + gmem_lo),
+                 (unsigned long long)(gmem_size >> 20));
+        return tmp;
+    }
+    if (b == xm_buf) return "transform feedback mirror";
+    if (b == gfast_buf) return "GMEM_FAST compute copy";
+    if (b == gorig_buf) return "GMEM_FAST merge twin";
+    if (b == gc_dummy) return "guest heap chunk placeholder";
+    if (b == gc_miss_buf) return "guest heap miss counters";
+    for (int k = 0; k < gc_n; k++)
+        if (b == gc[k].buf || (VkDeviceMemory)(uintptr_t)handle == gc[k].mem) { snprintf(tmp, sizeof tmp, "guest heap chunk %d", k); return tmp; }
+    for (int i = 0; i < nchunks; i++)
+        if (b == chunks[i].buf) { snprintf(tmp, sizeof tmp, "transient ring chunk %d", i); return tmp; }
+    for (int i = 0; i < VC_TAB; i++)
+        if (b == vc_tab[i].buf) {
+            snprintf(tmp, sizeof tmp, "vertex cache: guest %llx + %llu KB", (unsigned long long)(gwin_base + vc_tab[i].lo),
+                     (unsigned long long)((vc_tab[i].hi - vc_tab[i].lo) >> 10));
+            return tmp;
+        }
+    return NULL;
+}

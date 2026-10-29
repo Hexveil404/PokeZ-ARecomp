@@ -6957,7 +6957,10 @@ static void draw_(CmdRec *r, bool indexed) {
             uint64_t stride = vl.stride[s], need;
             if (!stride) need = 256;
             else if (vl.divisor[s] && g_ind_gpu) need = v.size ? v.size : 1u << 20;  // (instances only the GPU knows: all)
-            else if (vl.divisor[s]) need = ((uint64_t)base_inst + inst + vl.divisor[s] - 1) / vl.divisor[s] * stride + 256;
+            // (Vulkan applies the first instance outside the divisor: instance i reads element base_inst + i / divisor -
+            // the copy runs from the binding's start, so up to base_inst + inst covers it, the runs below included; it
+            // was (base_inst + inst) / divisor: short when both are over 1 - found by gabrielsem16-bot, #39)
+            else if (vl.divisor[s]) need = ((uint64_t)base_inst + inst) * stride + 256;
             else need = (uint64_t)max_index * stride + 256;
             if (v.size && need > v.size) need = v.size;
             if (!v.addr) { static const uint8_t zero[256]; sp = vk_transient_copy(zero, 256, 16); }

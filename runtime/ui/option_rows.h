@@ -8,6 +8,18 @@
 //   opt_end();
 #pragma once
 
+#ifdef IMGUI_VERSION
+// ImGui::InvisibleButton, but never zero-sized: ImGui asserts on that (imgui_widgets.cpp:791) and the assert stops the
+// program - a window with no size yet, or a pane with no width left, made the start screen's buttons and the option
+// rows 0 wide in the middle of a game code build (#39, #53, #69). A zero (or NaN) side takes 1 pixel; negative sides
+// keep ImGui's "up to the edge" meaning.
+static inline bool ui_invisible_button(const char *id, ImVec2 size, ImGuiButtonFlags flags = 0) {
+    if (size.x == 0 || size.x != size.x) size.x = 1;
+    if (size.y == 0 || size.y != size.y) size.y = 1;
+    return ImGui::InvisibleButton(id, size, flags);
+}
+#endif
+
 void opt_begin(const char *id, float scale);
 void opt_section(const char *title);
 bool opt_toggle(const char *label, bool *v, bool def, const char *desc);

@@ -1337,7 +1337,7 @@ static bool button(const char *id, const char *label, float x, float y, float w,
     if (w <= 0) w = tw + 2 * pad + (ic ? isz + gap : 0);
     ImGui::SetCursorScreenPos(P(x, y));
     ImGui::BeginDisabled(!enabled);
-    bool pressed = ImGui::InvisibleButton(id, S(w, h), ImGuiButtonFlags_EnableNav);
+    bool pressed = ui_invisible_button(id, S(w, h), ImGuiButtonFlags_EnableNav);
     if (default_focus) ImGui::SetItemDefaultFocus();
     bool hot = enabled && item_hot();
     ImGui::EndDisabled();
@@ -1375,7 +1375,7 @@ static bool button(const char *id, const char *label, float x, float y, float w,
 static bool toggle(const char *id, bool *v, float x, float y) {
     float w = 54, h = 30;
     ImGui::SetCursorScreenPos(P(x, y));
-    bool pressed = ImGui::InvisibleButton(id, S(w, h), ImGuiButtonFlags_EnableNav);
+    bool pressed = ui_invisible_button(id, S(w, h), ImGuiButtonFlags_EnableNav);
     bool hot = item_hot();
     if (pressed) *v = !*v;
     ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -2247,7 +2247,7 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::PushID(i);
                 bool en = !busy || i != TAB_SETTINGS;  // (settings stay put while the game is being set up)
                 ImGui::BeginDisabled(!en);
-                if (ImGui::InvisibleButton("##tab", S(tw, 40), ImGuiButtonFlags_EnableNav)) g_tab = i;
+                if (ui_invisible_button("##tab", S(tw, 40), ImGuiButtonFlags_EnableNav)) g_tab = i;
                 ImGui::EndDisabled();
                 bool hot = item_hot();
                 ImGui::PopID();
@@ -2268,7 +2268,7 @@ extern "C" void launcher_run(const char *root) {
                     float bx = sx + 3 + i * (sw - 6) / 2, bw = (sw - 6) / 2;
                     ImGui::SetCursorScreenPos(P(bx, sy + 3));
                     ImGui::PushID(100 + i);
-                    if (ImGui::InvisibleButton("##lang", S(bw, sh - 6), ImGuiButtonFlags_EnableNav)) {
+                    if (ui_invisible_button("##lang", S(bw, sh - 6), ImGuiButtonFlags_EnableNav)) {
                         g_settings.ui_lang = i == 0 ? UI_LANG_PT : UI_LANG_EN;
                         settings_save();
                         lang_update();
@@ -2762,7 +2762,7 @@ extern "C" void launcher_run(const char *root) {
                     ImVec2 ls = text_size(F_LABEL, 14, link.c_str());
                     float lx2 = W_ - 28 - ls.x, ly2 = H_ - 24 - ls.y / 2;
                     ImGui::SetCursorScreenPos(P(lx2, ly2));
-                    bool click = ImGui::InvisibleButton("##update", S(ls.x, ls.y), ImGuiButtonFlags_EnableNav);
+                    bool click = ui_invisible_button("##update", S(ls.x, ls.y), ImGuiButtonFlags_EnableNav);
                     bool hover = item_hot();
                     text(dl, F_LABEL, 14, lx2, ly2, hover ? C_GOLD_HI : C_GOLD, link.c_str());
                     if (hover) {

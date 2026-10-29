@@ -1404,7 +1404,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
             ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bx);
             ImVec2 p = ImGui::GetCursorScreenPos();
             ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
-            bool close = ImGui::InvisibleButton("##close", ImVec2(bx, bx), ImGuiButtonFlags_EnableNav);
+            bool close = ui_invisible_button("##close", ImVec2(bx, bx), ImGuiButtonFlags_EnableNav);
             ImGui::PopStyleColor();
             bool hot = ImGui::IsItemHovered() || ImGui::IsItemFocused();
             ImU32 col = hot ? IM_COL32(242, 181, 68, 255) : IM_COL32(194, 209, 219, 255);

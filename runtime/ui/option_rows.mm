@@ -117,7 +117,7 @@ static int row(const char *label, const std::string &value, bool changed, const 
     ImVec2 p = ImGui::GetCursorScreenPos();
     float w = ImGui::GetContentRegionAvail().x, h = ImGui::GetFontSize() * 1.9f;
     ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));  // (the row's own border shows the selection)
-    bool clicked = ImGui::InvisibleButton("##row", ImVec2(w, h), ImGuiButtonFlags_EnableNav);
+    bool clicked = ui_invisible_button("##row", ImVec2(w, h), ImGuiButtonFlags_EnableNav);
     ImGui::PopStyleColor();
     bool off = g_next_disabled;  // (greyed out: still selectable, so its description shows, but it can't change)
     if (g_take_first && !off) {  // (opt_focus_first: the first row that isn't greyed out)

@@ -6960,7 +6960,24 @@ static void draw_(CmdRec *r, bool indexed) {
             // (Vulkan applies the first instance outside the divisor: instance i reads element base_inst + i / divisor -
             // the copy runs from the binding's start, so up to base_inst + inst covers it, the runs below included; it
             // was (base_inst + inst) / divisor: short when both are over 1 - found by gabrielsem16-bot, #39)
-            else if (vl.divisor[s]) need = ((uint64_t)base_inst + inst) * stride + 256;
+            else if (vl.divisor[s]) {
+                need = ((uint64_t)base_inst + inst) * stride + 256;
+                // (#39: how often the old size fell short - the AMD battle faults stopped with this fix in test-amd-3;
+                // LARECOMP_VK_OLD_INSTANCE_COPY=1 brings the old size back, for that A/B)
+                static int old_copy = -1;
+                if (old_copy < 0) old_copy = ENV("LARECOMP_VK_OLD_INSTANCE_COPY") && atoi(ENV("LARECOMP_VK_OLD_INSTANCE_COPY"));
+                uint64_t old = ((uint64_t)base_inst + inst + vl.divisor[s] - 1) / vl.divisor[s] * stride + 256;
+                uint64_t reads = ((uint64_t)base_inst + (inst ? inst - 1 : 0) / vl.divisor[s] + 1) * stride;
+                if (old < reads) {
+                    static int nlog;
+                    if (nlog++ < 20)
+                        LOG("[vk] instance stream %d: the old copy (%llu bytes) was short of the %llu read - first instance %u, "
+                            "%u instances, divisor %u, stride %llu (frame %llu)%s\n", s, (unsigned long long)old,
+                            (unsigned long long)reads, base_inst, inst, vl.divisor[s], (unsigned long long)stride,
+                            (unsigned long long)renderer_present_count(), old_copy ? " - kept short (test)" : "");
+                }
+                if (old_copy) need = old;
+            }
             else need = (uint64_t)max_index * stride + 256;
             if (v.size && need > v.size) need = v.size;
             if (!v.addr) { static const uint8_t zero[256]; sp = vk_transient_copy(zero, 256, 16); }

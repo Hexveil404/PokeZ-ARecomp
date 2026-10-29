@@ -776,6 +776,8 @@ bool rt_data_move(const char *to, void (*progress)(int step, double frac), char 
     return true;
 }
 
+const char *rt_exe_dir(void) { return g_exe_dir; }
+
 void rt_paths_restart(void) {
     fprintf(stderr, "[paths] restarting\n");
     fflush(stderr);

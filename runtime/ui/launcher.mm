@@ -138,7 +138,10 @@ static std::string tag_label(const std::string &t, bool with_word) {
 }
 
 static std::string g_update_tag;  // a newer release's tag (g_update_lock)
+static std::string g_update_url;  // its Windows zip (browser_download_url: the download counts on GitHub as a click)
+static long long g_update_size;
 static pthread_mutex_t g_update_lock = PTHREAD_MUTEX_INITIALIZER;
+#define UPDATE_ASSET "ZA-Recomp-windows.zip"
 
 static void *update_thread(void *) {
     std::string body;
@@ -169,21 +172,151 @@ static void *update_thread(void *) {
         }
         remove(out.c_str());
     }
-    std::string best;
-    long long best_rank = tag_rank(LARECOMP_VERSION);
+    std::string best, url;
+    long long best_rank = tag_rank(LARECOMP_VERSION), size = 0;
     for (size_t at = 0; (at = body.find("\"tag_name\"", at)) != std::string::npos;) {
         size_t q1 = body.find('"', body.find(':', at) + 1), q2 = q1 == std::string::npos ? q1 : body.find('"', q1 + 1);
         if (q2 == std::string::npos) break;
         std::string tag = body.substr(q1 + 1, q2 - q1 - 1);
-        if (tag_rank(tag) > best_rank) best_rank = tag_rank(tag), best = tag;
+        if (tag_rank(tag) > best_rank) {
+            best_rank = tag_rank(tag), best = tag, url.clear(), size = 0;
+            // its assets follow the tag in GitHub's release object, up to the next release's tag
+            size_t end = body.find("\"tag_name\"", q2), u = q2;
+            while ((u = body.find("\"browser_download_url\"", u)) != std::string::npos && u < end) {
+                size_t a = body.find('"', body.find(':', u) + 1), b = a == std::string::npos ? a : body.find('"', a + 1);
+                if (b == std::string::npos) break;
+                std::string link = body.substr(a + 1, b - a - 1);
+                if (link.size() > strlen(UPDATE_ASSET) && link.compare(link.size() - strlen(UPDATE_ASSET), std::string::npos, UPDATE_ASSET) == 0) {
+                    url = link;
+                    size_t sz = body.rfind("\"size\"", u);  // (the asset's own size comes before its link)
+                    if (sz != std::string::npos && sz > q2) size = atoll(body.c_str() + body.find(':', sz) + 1);
+                    break;
+                }
+                u = b;
+            }
+        }
         at = q2;
     }
-    if (!best.empty()) fprintf(stderr, "[launcher] update available: %s (this build %s)\n", best.c_str(), LARECOMP_VERSION);
+    if (const char *z = getenv("LARECOMP_UPDATE_ZIP")) url = std::string("file:") + z;  // (test) install this zip
+    if (!best.empty()) fprintf(stderr, "[launcher] update available: %s (this build %s)%s\n", best.c_str(), LARECOMP_VERSION,
+                               url.empty() ? "" : ", installable from the start screen");
     pthread_mutex_lock(&g_update_lock);
     g_update_tag = best;
+    g_update_url = url;
+    g_update_size = size;
     pthread_mutex_unlock(&g_update_lock);
     return NULL;
 }
+
+// ------------------------------------------------------------------ updater (Windows, #75)
+// "Update now" on the start screen: the release's zip from GitHub (its own download link - counted there like a click,
+// no server of ours), unpacked by Windows' tar into <program folder>/_update, and its files moved over the program's.
+// A file in use (this exe, its DLLs) can be renamed but not overwritten: the old one becomes <name>.old (deleted at
+// the next start). The player's larecomp.ini is never replaced; the data folder (extracted game and its compiled code,
+// saves, caches, mods) is elsewhere or not in the zip, untouched - only a release that changes the game code's id
+// compiles it again. Then the program starts again. Any failure: a message, the files as they were, the download page.
+enum { UPD_IDLE, UPD_DOWNLOAD, UPD_UNPACK, UPD_INSTALL, UPD_DONE, UPD_FAILED };
+static std::atomic<int> g_upd_state{UPD_IDLE};
+static std::string g_upd_error;  // (g_update_lock)
+static std::string g_upd_zip;    // the download's path (progress: its size)
+static bool g_update_go;         // "Update now" clicked (the start screen's thread)
+
+#ifdef _WIN32
+#include <filesystem>
+namespace fs = std::filesystem;
+static fs::path u8p(const std::string &s) { return fs::u8path(s); }
+
+static void upd_fail(const char *what) {
+    fprintf(stderr, "[update] failed: %s\n", what);
+    pthread_mutex_lock(&g_update_lock);
+    g_upd_error = what;
+    pthread_mutex_unlock(&g_update_lock);
+    g_upd_state = UPD_FAILED;
+}
+
+static void *upd_thread(void *) {
+    pthread_mutex_lock(&g_update_lock);
+    std::string url = g_update_url, tag = g_update_tag;
+    pthread_mutex_unlock(&g_update_lock);
+    std::string dir = rt_exe_dir(), work = dir + "\\_update", zip = work + "\\" UPDATE_ASSET;
+    std::error_code ec;
+    fs::remove_all(u8p(work), ec);
+    fs::create_directories(u8p(work), ec);
+    if (ec) return upd_fail("can't create the _update folder next to the program"), (void *)NULL;
+    const char *sr = getenv("SystemRoot");
+    std::string sys = std::string(sr ? sr : "C:\\Windows") + "\\System32\\";
+    fprintf(stderr, "[update] %s: %s -> %s\n", tag.c_str(), url.c_str(), zip.c_str());
+    if (url.compare(0, 5, "file:") == 0) {
+        fs::copy_file(u8p(url.substr(5)), u8p(zip), fs::copy_options::overwrite_existing, ec);
+        if (ec) return upd_fail("can't copy the test zip"), (void *)NULL;
+    } else {
+        g_upd_zip = zip;
+        std::string curl = sys + "curl.exe";
+        const char *av[] = {curl.c_str(), "-fsSL", "--retry", "2", "--max-time", "1800", "-A", "LASRecomp/" LARECOMP_VERSION,
+                            "-o", zip.c_str(), url.c_str(), NULL};
+        PlatProc p = plat_spawn(av, NULL, false);
+        if (!p || plat_proc_wait(p, true) != 0) return upd_fail("the download didn't finish"), (void *)NULL;
+    }
+    g_upd_state = UPD_UNPACK;
+    {
+        std::string tar = sys + "tar.exe";
+        const char *av[] = {tar.c_str(), "-xf", zip.c_str(), "-C", work.c_str(), NULL};
+        PlatProc p = plat_spawn(av, NULL, false);
+        if (!p || plat_proc_wait(p, true) != 0) return upd_fail("the zip couldn't be unpacked"), (void *)NULL;
+    }
+    fs::path src = u8p(work) / u8p("ZA Recomp");
+    if (!fs::exists(src / "lasrecomp.exe")) return upd_fail("the zip isn't a ZA Recomp release"), (void *)NULL;
+    g_upd_state = UPD_INSTALL;
+    // every file first: a half-moved update would mix two versions - moves only once the list is complete
+    std::vector<fs::path> files;
+    for (auto it = fs::recursive_directory_iterator(src, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+        if (it->is_regular_file(ec)) files.push_back(fs::relative(it->path(), src, ec));
+    if (ec || files.empty()) return upd_fail("the unpacked files can't be listed"), (void *)NULL;
+    int moved = 0, kept = 0;
+    for (const fs::path &rel : files) {
+        fs::path to = u8p(dir) / rel, from = src / rel;
+        if (rel == u8p("larecomp.ini") && fs::exists(to)) { kept++; continue; }  // (the player's settings)
+        fs::create_directories(to.parent_path(), ec);
+        if (fs::exists(to)) {
+            fs::path old = to;
+            old += ".old";
+            fs::remove(old, ec);
+            if (fs::exists(old)) {  // (an .old still in use: another name)
+                old = to;
+                old += "." + std::to_string((long long)time(NULL)) + ".old";
+            }
+            fs::rename(to, old, ec);
+            if (ec) { fprintf(stderr, "[update] %s: %s\n", to.u8string().c_str(), ec.message().c_str()); return upd_fail("a program file couldn't be replaced (in use?)"), (void *)NULL; }
+        }
+        fs::rename(from, to, ec);
+        if (ec) { fprintf(stderr, "[update] %s: %s\n", to.u8string().c_str(), ec.message().c_str()); return upd_fail("a new file couldn't be put in place"), (void *)NULL; }
+        moved++;
+    }
+    fs::remove_all(u8p(work), ec);
+    fprintf(stderr, "[update] %s installed: %d files (%d of the player's kept)\n", tag.c_str(), moved, kept);
+    g_upd_state = UPD_DONE;
+    return NULL;
+}
+
+// At start: the files an update renamed (<name>.old, <name>.<time>.old), no longer in use, and a left _update folder
+static void *upd_cleanup(void *) {
+    std::error_code ec;
+    fs::path dir = u8p(rt_exe_dir());
+    fs::remove_all(dir / "_update", ec);
+    int n = 0;
+    for (auto it = fs::recursive_directory_iterator(dir, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (it->is_directory(ec)) {
+            std::string name = it->path().filename().u8string();
+            if (name == "extracted" || name == "save" || name == "cache" || name == "mods" || name == "textures" || name == "logs")
+                it.disable_recursion_pending();
+            continue;
+        }
+        if (it->path().extension() == ".old" && fs::remove(it->path(), ec)) n++;
+    }
+    if (n) fprintf(stderr, "[update] %d replaced files deleted\n", n);
+    return NULL;
+}
+#endif
 
 // ------------------------------------------------------------------ game files
 static std::string g_root;  // extracted game: <root>/exefs, <root>/romfs
@@ -1977,6 +2110,9 @@ extern "C" void launcher_run(const char *root) {
         update_checked = true;
         pthread_t t;
         if (pthread_create(&t, NULL, update_thread, NULL) == 0) pthread_detach(t);
+#ifdef _WIN32
+        if (pthread_create(&t, NULL, upd_cleanup, NULL) == 0) pthread_detach(t);
+#endif
     }
     ui_window_init();
     SDL_Window *win = ui_window();
@@ -2754,8 +2890,50 @@ extern "C" void launcher_run(const char *root) {
             text(dl, F_BODY, 14, 46, H_ - 24 - text_size(F_BODY, 14, "A").y / 2, C_SOFT, bar.text.c_str());
             {
                 pthread_mutex_lock(&g_update_lock);
-                std::string upd = g_update_tag;
+                std::string upd = g_update_tag, upd_url = g_update_url, upd_err = g_upd_error;
+                long long upd_size = g_update_size;
                 pthread_mutex_unlock(&g_update_lock);
+                int ust = g_upd_state.load();
+#ifdef _WIN32
+                if (ust == UPD_DONE) {  // the new program, same command line; this one ends
+                    fprintf(stderr, "[update] starting the new version\n");
+                    if (plat_relaunch()) exit(0);
+                    rt_paths_restart();  // (could not start it detached: the old way, waited for)
+                }
+                static bool auto_upd = getenv("LARECOMP_UPDATE_AUTO") != NULL;  // (test) no click
+                if (!upd.empty() && !upd_url.empty() && ust == UPD_IDLE && (auto_upd || g_update_go)) {
+                    g_update_go = false;
+                    g_upd_state = UPD_DOWNLOAD;
+                    pthread_t t;
+                    if (pthread_create(&t, NULL, upd_thread, NULL) == 0) pthread_detach(t);
+                    else g_upd_state = UPD_IDLE;
+                    ust = g_upd_state.load();
+                }
+#else
+                (void)upd_url, (void)upd_size;
+#endif
+                if (ust != UPD_IDLE && ust != UPD_DONE) {  // (updating: its progress instead of the link)
+                    std::string msg;
+                    if (ust == UPD_DOWNLOAD) {
+                        long long got = 0;
+                        if (FILE *f = fopen(g_upd_zip.c_str(), "rb")) { fseek(f, 0, SEEK_END); got = ftell(f); fclose(f); }
+                        int pc = upd_size > 0 ? (int)(got * 100 / upd_size) : -1;
+                        msg = std::string(TR("Downloading ", "Baixando a versão ")) + tag_label(upd, false) +
+                              (pc >= 0 ? " — " + std::to_string(pc > 100 ? 100 : pc) + "%" : std::string("…"));
+                    } else if (ust == UPD_UNPACK) msg = TR("Unpacking the update…", "Descompactando a atualização…");
+                    else if (ust == UPD_INSTALL) msg = TR("Installing the update…", "Instalando a atualização…");
+                    else msg = std::string(TR("Update failed (", "A atualização falhou (")) + upd_err +
+                               TR(") — download it from the releases page", ") — baixe pela página de versões");
+                    ImVec2 ms = text_size(F_LABEL, 14, msg.c_str());
+                    float mx = W_ - 28 - ms.x, my = H_ - 24 - ms.y / 2;
+                    if (ust == UPD_FAILED) {
+                        ImGui::SetCursorScreenPos(P(mx, my));
+                        if (ui_invisible_button("##updfail", S(ms.x, ms.y), ImGuiButtonFlags_EnableNav)) SDL_OpenURL((RELEASE_PAGE + upd).c_str());
+                        if (item_hot()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    }
+                    text(dl, F_LABEL, 14, mx, my, ust == UPD_FAILED ? C_GOLD : C_SOFT, msg.c_str());
+                    upd.clear();  // (no link meanwhile)
+                }
                 if (!upd.empty()) {
                     std::string link = std::string(TR("New version ", "Nova versão ")) + tag_label(upd, false) +
                                        TR(" available — see what's new", " disponível — ver novidades");
@@ -2770,6 +2948,20 @@ extern "C" void launcher_run(const char *root) {
                         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                     }
                     if (click) SDL_OpenURL((RELEASE_PAGE + upd).c_str());
+#ifdef _WIN32
+                    if (!upd_url.empty() && !busy) {  // "Update now" before it (not while the game code builds)
+                        const char *bl = TR("Update now", "Atualizar agora");
+                        ImVec2 bs = text_size(F_LABEL, 14, bl);
+                        float bx = lx2 - 24 - bs.x - 20, by = H_ - 24 - (bs.y + 10) / 2;
+                        ImGui::SetCursorScreenPos(P(bx, by));
+                        bool go = ui_invisible_button("##updnow", S(bs.x + 20, bs.y + 10), ImGuiButtonFlags_EnableNav);
+                        bool hot = item_hot();
+                        dl->AddRectFilled(P(bx, by), P(bx + bs.x + 20, by + bs.y + 10), hot ? C_GOLD_HI : C_GOLD, 6 * g_s);
+                        text(dl, F_LABEL, 14, bx + 10, by + 5, IM_COL32(8, 14, 24, 255), bl);
+                        if (hot) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                        if (go) g_update_go = true;
+                    }
+#endif
                 }
             }
             if (const char *f = getenv("LARECOMP_LAUNCHER_FONT")) {  // (test) which typeface this window shows

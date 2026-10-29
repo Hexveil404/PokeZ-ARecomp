@@ -74,6 +74,7 @@ void plat_system_info(PlatSysInfo *si);
 bool plat_exe_path(char *buf, size_t size);
 void plat_os_name(char *buf, size_t size);  // "Windows 10.0.19045", "Ubuntu 24.04 LTS (6.8.0)", "macOS 15.1" (the log)
 void plat_exec(char *const argv[]);  // replace the process (NULL = same command line); returns only on failure
+bool plat_relaunch(void);  // (Windows) start this program again, detached; the caller then exits
 #if defined(_WIN32) || defined(__linux__)
 void plat_terminate(void);  // end the process now, skipping DLL teardown (exit status 0)
 #endif

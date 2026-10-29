@@ -821,6 +821,23 @@ static void append_arg(char *out, size_t cap, const char *a) {
 // No exec() on Windows: start the new process with the same console / standard handles, wait for it, and exit with
 // its exit code. (Exiting at once ended the process a launcher, Steam or a test script started about a second in,
 // with code 0, while the game ran on in another process.)
+// A new run of this program (same exe path - the file there now - and command line), not waited for and not tied to
+// this process: the start screen's updater starts it and then ends (plat_exec would keep this window up meanwhile).
+bool plat_relaunch(void) {
+    static wchar_t exe[32768];
+    if (!GetModuleFileNameW(NULL, exe, 32768)) return false;
+    STARTUPINFOW si = {.cb = sizeof si};
+    PROCESS_INFORMATION pi;
+    fflush(stdout);
+    fflush(stderr);
+    if (!CreateProcessW(exe, GetCommandLineW(), NULL, NULL, FALSE, CREATE_BREAKAWAY_FROM_JOB, NULL, NULL, &si, &pi) &&
+        !CreateProcessW(exe, GetCommandLineW(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+        return false;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+}
+
 void plat_exec(char *const argv[]) {
     STARTUPINFOW si = {.cb = sizeof si};
     PROCESS_INFORMATION pi;

@@ -229,6 +229,7 @@ typedef struct TexBackend {
     int tp;              // runtime/nvn/texpatch.c: 0 not checked yet, -1 none, else known UI texture + 1
     uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
     int reg;  // slot in textures.c's live list + 1 (a reboot destroys them all)
+    struct NvnTexture *owner;  // the texture it belongs to (the live list holds backends, not textures: #70)
     bool hd;  // replaced by an HD texture pack's image (textures.c): sx / sy = its size over the game's
     float shadow_k;  // a shadow map drawn at shadow_k times the game's size (textures.c tex_shadow_scale): 0 / 1 = as is
     // (g_vk.lean_usage) the only formats views of this image may have: nview_fmt 0 = any compatible one

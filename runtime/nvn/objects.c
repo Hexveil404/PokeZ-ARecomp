@@ -468,8 +468,59 @@ static NvnTexture *texture_from_builder(uint64_t b) {
     return t;
 }
 
+// The NvnTextures that exist (#70: an RTX 3090 crashed after 1-2 h in textures.c's live list, on a texture whose backend
+// pointer was garbage - freed under the list, most likely finalized twice through two copies of the game's NVNtexture,
+// which both hold our pointer). Each is in this set from nvnTextureInitialize to its destruction: 1 live, 2 finalized
+// (its destruction queued on the render thread). A second finalize of the same object is ignored and logged, and
+// textures.c asks here before it touches an NvnTexture it only has a pointer to.
+static struct { NvnTexture *t; int state; } *tex_set;
+static uint32_t tex_cap, tex_n, tex_used;  // (used: filled slots, tombstones included)
+static pthread_mutex_t tex_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t tex_slot(NvnTexture *t) {  // its slot, or the empty one it would take (callers hold tex_lock)
+    uint32_t h = (uint32_t)(((uintptr_t)t >> 4) * 0x9E3779B1u) & (tex_cap - 1), tomb = ~0u;
+    while (tex_set[h].t) {
+        if (tex_set[h].t == t && tex_set[h].state) return h;
+        if (!tex_set[h].state && tomb == ~0u) tomb = h;
+        h = (h + 1) & (tex_cap - 1);
+    }
+    return tomb != ~0u ? tomb : h;
+}
+static void tex_set_put(NvnTexture *t, int state) {
+    pthread_mutex_lock(&tex_lock);
+    if ((tex_used + 1) * 2 > tex_cap) {  // grow (and drop tombstones)
+        uint32_t oc = tex_cap;
+        __typeof__(tex_set) old = tex_set;
+        tex_cap = oc ? (tex_n * 4 > oc ? oc * 2 : oc) : 4096;
+        tex_set = calloc(tex_cap, sizeof *tex_set);
+        tex_used = 0;
+        for (uint32_t i = 0; i < oc; i++)
+            if (old[i].t && old[i].state) { tex_set[tex_slot(old[i].t)] = old[i]; tex_used++; }
+        free(old);
+    }
+    uint32_t h = tex_slot(t);
+    if (!(tex_set[h].t == t && tex_set[h].state)) { if (!tex_set[h].t) tex_used++; tex_n++; }
+    tex_set[h].t = t;
+    tex_set[h].state = state;
+    pthread_mutex_unlock(&tex_lock);
+}
+static int tex_set_get(NvnTexture *t) {
+    pthread_mutex_lock(&tex_lock);
+    int s = 0;
+    if (tex_cap) { uint32_t h = tex_slot(t); if (tex_set[h].t == t) s = tex_set[h].state; }
+    pthread_mutex_unlock(&tex_lock);
+    return s;
+}
+static void tex_set_drop(NvnTexture *t) {
+    pthread_mutex_lock(&tex_lock);
+    if (tex_cap) { uint32_t h = tex_slot(t); if (tex_set[h].t == t && tex_set[h].state) { tex_set[h].state = 0; tex_n--; } }
+    pthread_mutex_unlock(&tex_lock);
+}
+bool nvn_texture_exists(NvnTexture *t) { return t && tex_set_get(t) != 0; }
+uint32_t nvn_textures_count(void) { return tex_n; }
+
 NVN(nvnTextureInitialize) {
     NvnTexture *t = texture_from_builder(A(1));
+    tex_set_put(t, 1);
     if (t->flags & 2)
         LOG("[nvn] video texture %p: %ux%u fmt %#x flags %#x target %u addr %llx stride %llu\n", t, t->width, t->height,
             t->format, t->flags, t->target, t->addr, t->stride);
@@ -485,11 +536,18 @@ static void pool_entries_forget(NvnTexture *t);
 void nvn_texture_destroy(NvnTexture *t) {
     pool_entries_forget(t);
     backend_texture_destroyed(t);
+    tex_set_drop(t);
     free(t);
 }
 NVN(nvnTextureFinalize) {
     NvnTexture *t = HOST(NvnTexture, A(0));
+    if (t && tex_set_get(t) != 1) {  // (finalized already, or never ours: its memory may be gone - not touched)
+        static int nlog;
+        if (nlog++ < 20) LOG("[nvn] texture %p finalized again (or not one of ours): ignored\n", (void *)t);
+        t = NULL;
+    }
     if (t) {
+        tex_set_put(t, 2);
         if (rq_on()) rq_destroy_texture(t);  // after the queued lists that refer to it
         else { exec_lock_take(); nvn_texture_destroy(t); exec_lock_give(); }  // (not while a list on another thread reads it)
     }

@@ -533,21 +533,31 @@ static void destroy_image(TexBackend *b) {
     b->mem = VK_NULL_HANDLE;
 }
 
-// Live game textures: an in-place reboot (vk_textures_reset) destroys them all.
-static NvnTexture **g_live;
+// Live game textures: an in-place reboot (vk_textures_reset) destroys them all. The list holds the backends (ours,
+// freed only here) with their textures beside them, not the textures: #70 crashed in it on a texture freed under it,
+// its backend pointer garbage (objects.c nvn_texture_exists).
+static TexBackend **g_live;
 static int g_nlive, g_cap_live;
 static void live_add(NvnTexture *t, TexBackend *b) {
     if (g_nlive == g_cap_live) { g_cap_live = g_cap_live ? g_cap_live * 2 : 1024; g_live = realloc(g_live, g_cap_live * sizeof *g_live); }
-    g_live[g_nlive++] = t;
+    g_live[g_nlive++] = b;
     b->reg = g_nlive;
+    b->owner = t;
 }
 static void live_remove(TexBackend *b) {
     if (!b->reg) return;
-    NvnTexture *last = g_live[--g_nlive];
+    if (b->reg > g_nlive || g_live[b->reg - 1] != b) {  // (never seen: the list's own bookkeeping broken)
+        static int nlog;
+        if (nlog++ < 20) LOG("[vk] texture %p: not where the live list says (slot %d of %d) - left in place\n", (void *)b, b->reg, g_nlive);
+        b->reg = 0;
+        return;
+    }
+    TexBackend *last = g_live[--g_nlive];
     g_live[b->reg - 1] = last;
-    if (last->backend) ((TexBackend *)last->backend)->reg = b->reg;
+    last->reg = b->reg;
     b->reg = 0;
 }
+int vk_textures_live(void) { return g_nlive; }
 
 static TexBackend *tex_backend(NvnTexture *t) {
     TexBackend *b = t->backend;
@@ -587,14 +597,26 @@ void backend_texture_destroyed(NvnTexture *t) {
     t->backend = NULL;
 }
 
-// Reboot (device.c backend_reset; GPU idle): every game texture and its views go.
+// Reboot (device.c backend_reset; GPU idle): every game texture and its views go. A backend whose texture no longer
+// exists (or names another backend) is released on its own, its texture not touched.
 void vk_textures_reset(void) {
-    int n = g_nlive;
+    int n = g_nlive, stale = 0;
     extern void vk_alias_reset(void);
+    extern bool nvn_texture_exists(NvnTexture *t);
     vk_alias_reset();
-    while (g_nlive > 0) backend_texture_destroyed(g_live[g_nlive - 1]);
+    while (g_nlive > 0) {
+        TexBackend *b = g_live[g_nlive - 1];
+        NvnTexture *t = b->owner;
+        if (nvn_texture_exists(t) && t->backend == b) { backend_texture_destroyed(t); continue; }
+        stale++;
+        live_remove(b);
+        destroy_image(b);
+        free(b->pending_rgba);
+        free(b);
+    }
     vk_collect_dead();
-    LOG("[vk] reboot: %d textures released\n", n);
+    LOG("[vk] reboot: %d textures released%s\n", n, stale ? " (some without their texture: see below)" : "");
+    if (stale) LOG("[vk] reboot: %d of them belonged to textures already gone (#70)\n", stale);
 }
 
 
@@ -811,9 +833,8 @@ static void hd_switch(void) {
     hd_on = last;
     int n = 0;
     for (int i = 0; i < g_nlive; i++) {
-        NvnTexture *t = g_live[i];
-        TexBackend *b = t->backend;
-        if (!b) continue;
+        TexBackend *b = g_live[i];
+        NvnTexture *t = b->owner;
         if (was && !hd_on && b->hd && !(hd_sets[0].n && bsearch(&b->data_hash, hd_sets[0].h, hd_sets[0].n, sizeof b->data_hash, hd_cmp))) {
             destroy_image(b);
             b->hd = false;

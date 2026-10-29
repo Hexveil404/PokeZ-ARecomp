@@ -9202,3 +9202,6 @@ const char *vk_exec_buffer_kind(uint64_t handle) {
         }
     return NULL;
 }
+
+// The [mem] line's counts (device.c): what grows over a long session shows next to the process size (#70).
+void vk_exec_counts(uint32_t *progs, uint32_t *pipes) { *progs = prog_kv.n; *pipes = pipe_kv.n; }

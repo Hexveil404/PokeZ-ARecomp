@@ -1938,12 +1938,18 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     uint64_t proc, guest;
     if (now - last_mem >= 60 && plat_mem_usage(&proc, &guest)) {
         last_mem = now;
-        extern int kernel_live_threads(void);
+        extern int kernel_live_threads(void), vk_textures_live(void);
+        extern uint32_t nvn_textures_count(void);
+        extern void vk_exec_counts(uint32_t *progs, uint32_t *pipes);
+        uint32_t progs, pipes;
+        vk_exec_counts(&progs, &pipes);
+        char what[128];  // (#70: 7.5 -> 26 GB over 2.3 h on an RTX 3090 - which of these grows with it)
+        snprintf(what, sizeof what, "%d guest threads, %u textures (%d on the GPU), %u shader programs, %u pipelines",
+                 kernel_live_threads(), nvn_textures_count(), vk_textures_live(), progs, pipes);
         if (guest)
-            LOG("[mem] t=%.0f process %llu MB: guest %llu MB + host %llu MB (%d guest threads)\n", now,
-                (unsigned long long)(proc >> 20), (unsigned long long)(guest >> 20), (unsigned long long)((proc - guest) >> 20),
-                kernel_live_threads());
-        else LOG("[mem] t=%.0f process %llu MB (%d guest threads)\n", now, (unsigned long long)(proc >> 20), kernel_live_threads());
+            LOG("[mem] t=%.0f process %llu MB: guest %llu MB + host %llu MB (%s)\n", now,
+                (unsigned long long)(proc >> 20), (unsigned long long)(guest >> 20), (unsigned long long)((proc - guest) >> 20), what);
+        else LOG("[mem] t=%.0f process %llu MB (%s)\n", now, (unsigned long long)(proc >> 20), what);
     }
 }
 

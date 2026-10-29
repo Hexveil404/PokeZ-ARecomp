@@ -512,6 +512,12 @@ void backend_texture_destroyed(NvnTexture *t) {
     t->backend = NULL;
 }
 
+// nvnTextureReadTexels[Strided] (objects.c): not done on Metal yet - the data is left as it was (as before, #64)
+void backend_texture_read(NvnTexture *t, const void *view, const int32_t region[6], void *data, uint64_t row_stride,
+                          uint64_t image_stride) {
+    (void)t, (void)view, (void)region, (void)data, (void)row_stride, (void)image_stride;
+}
+
 static uint64_t g_frame_counter;  // presents so far (the game thread)
 static uint64_t full_hash_budget, full_hash_budget_frame;
 

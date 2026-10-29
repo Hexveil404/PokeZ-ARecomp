@@ -619,8 +619,30 @@ NVN(nvnTextureWriteTexels) {
     }
 }
 NVN(nvnTextureWriteTexelsStrided) { LOG("[nvn] WriteTexelsStrided not implemented\n"); (void)c; }
-NVN(nvnTextureReadTexels) { LOG("[nvn] ReadTexels not implemented\n"); (void)c; }
-NVN(nvnTextureReadTexelsStrided) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnTextureReadTexelsStrided\n"); }
+// The CPU reading a texture (#64: Royale Z-A's profile photo stayed black - a picture the game draws and then reads back
+// to keep; both were no-ops, the second one silent). The contents live in the backend's image, not in the texture's
+// pool memory: read there, on the render thread after the lists queued so far (the game waits for its GPU work
+// before reading), at the game's size (render-scaled targets filtered down: copy_texture_to_buffer).
+typedef struct { NvnTexture *t; const void *view; int32_t region[6]; void *data; uint64_t row, img; } TexRead;
+static void texture_read_run(void *p) {
+    TexRead *r = p;
+    backend_texture_read(r->t, r->view, r->region, r->data, r->row, r->img);
+}
+static void texture_read(uint64_t tex, uint64_t view, uint64_t region, uint64_t data, uint64_t row, uint64_t img, const char *fn) {
+    NvnTexture *t = tex ? HOST(NvnTexture, tex) : NULL;
+    if (!t || !data) return;
+    TexRead r = {.t = t, .view = view ? (const void *)(uintptr_t)view : NULL, .data = (void *)(uintptr_t)data, .row = row, .img = img};
+    if (region) memcpy(r.region, (const void *)(uintptr_t)region, sizeof r.region);
+    static int nlog;
+    if (nlog++ < 8)
+        LOG("[nvn] %s: %ux%u fmt %#x (%s), region %d,%d %dx%d, strides %llu / %llu\n", fn, t->width, t->height, t->format,
+            t->label[0] ? t->label : "no label", r.region[0], r.region[1], r.region[3], r.region[4], (unsigned long long)row,
+            (unsigned long long)img);
+    if (rq_on()) rq_call(texture_read_run, &r);
+    else { exec_lock_take(); texture_read_run(&r); exec_lock_give(); }
+}
+NVN(nvnTextureReadTexels) { texture_read(A(0), A(1), A(2), A(3), 0, 0, "ReadTexels"); }
+NVN(nvnTextureReadTexelsStrided) { texture_read(A(0), A(1), A(2), A(3), A(4), A(5), "ReadTexelsStrided"); }
 
 // ================================================================== samplers
 // SamplerBuilder: device@0 then an NvnSamplerDesc at 8

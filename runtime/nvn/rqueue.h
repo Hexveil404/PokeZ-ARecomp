@@ -15,7 +15,8 @@ uint64_t rq_submit(uint64_t handle);                     // a recorded command l
 void rq_present(NvnTexture *t, uint64_t frame, bool advance);  // show t (the present pass, overlay, shots); advance:
                                                               // a new frame (false: backend_represent's repeat)
 void rq_destroy_texture(NvnTexture *t);                  // backend_texture_destroyed + free(t), in queue order
-void rq_prefetch_texture(NvnTexture *t);                 // backend_prefetch_texture(t), in queue order
+void rq_prefetch_texture(NvnTexture *t);
+void rq_call(void (*fn)(void *), void *arg);             // fn(arg) on the render thread in queue order, waited for                 // backend_prefetch_texture(t), in queue order
 enum { RQ_UPLOAD_RGBA, RQ_UPLOAD_NV12 };
 void rq_upload(NvnTexture *t, int kind, void *data, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off);  // takes data
 

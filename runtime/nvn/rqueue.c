@@ -35,8 +35,8 @@ __thread uint64_t g_rq_lock_ns;
 __thread uint64_t g_present_ns, g_hooks_ns;  // (the backends' backend_present)
 extern __thread uint64_t g_blocked_ns;  // kernel.c: idle time of the presenting thread (frame pacing)
 
-enum { IT_EXEC, IT_PRESENT, IT_DESTROY, IT_UPLOAD, IT_FLUSH, IT_PREFETCH, IT_KINDS };
-static const char *const kind_name[] = {"exec", "present", "destroy", "upload", "flush", "prefetch"};
+enum { IT_EXEC, IT_PRESENT, IT_DESTROY, IT_UPLOAD, IT_FLUSH, IT_PREFETCH, IT_CALL, IT_KINDS };
+static const char *const kind_name[] = {"exec", "present", "destroy", "upload", "flush", "prefetch", "call"};
 typedef struct {
     int kind;
     uint64_t handle;  // EXEC (one list)
@@ -46,8 +46,9 @@ typedef struct {
     uint64_t frame;   // PRESENT
     bool advance;     // PRESENT: a new frame (false: the last one again, backend_represent)
     int up_kind;      // UPLOAD
-    void *data;
+    void *data;       // UPLOAD; CALL: fn's argument
     uint32_t w, h, stride, uv_off;
+    void (*fn)(void *);  // CALL
 } Item;
 
 #define RQ_CAP 1024  // items queued at most (power of two)
@@ -277,6 +278,7 @@ static void *run(void *arg) {
         case IT_UPLOAD: backend_upload_now(it.tex, it.up_kind, it.data, it.w, it.h, it.stride, it.uv_off); break;
         case IT_FLUSH: { extern void renderer_flush(void); renderer_flush(); break; }
         case IT_PREFETCH: backend_prefetch_texture(it.tex); break;
+        case IT_CALL: it.fn(it.data); break;
         }
         backend_pool_pop(pool);
         uint64_t gs = renderer_issued_seq(), c1 = plat_thread_cpu_ns();  // (its last submission; renderer_wait_seq waits for it)
@@ -396,6 +398,13 @@ void rq_destroy_texture(NvnTexture *t) {
 void rq_prefetch_texture(NvnTexture *t) {
     Item it = {.kind = IT_PREFETCH, .tex = t};
     enqueue(&it, NULL, 0);
+}
+
+// fn(arg) on the render thread after everything queued so far; returns once it ran (nvnTextureReadTexels: the CPU
+// reads what the lists before it drew)
+void rq_call(void (*fn)(void *), void *arg) {
+    Item it = {.kind = IT_CALL, .fn = fn, .data = arg};
+    rq_wait_item(enqueue(&it, NULL, 0));
 }
 
 void rq_upload(NvnTexture *t, int kind, void *data, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off) {

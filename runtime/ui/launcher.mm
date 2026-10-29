@@ -197,7 +197,8 @@ static void *update_thread(void *) {
         }
         at = q2;
     }
-    if (const char *z = getenv("LARECOMP_UPDATE_ZIP")) url = std::string("file:") + z;  // (test) install this zip
+    if (const char *z = getenv("LARECOMP_UPDATE_ZIP"))  // (test) install this zip: a local file or a link
+        url = strncmp(z, "http", 4) ? std::string("file:") + z : std::string(z), size = getenv("LARECOMP_UPDATE_SIZE") ? atoll(getenv("LARECOMP_UPDATE_SIZE")) : 0;
     if (!best.empty()) fprintf(stderr, "[launcher] update available: %s (this build %s)%s\n", best.c_str(), LARECOMP_VERSION,
                                url.empty() ? "" : ", installable from the start screen");
     pthread_mutex_lock(&g_update_lock);
@@ -220,6 +221,7 @@ static std::atomic<int> g_upd_state{UPD_IDLE};
 static std::string g_upd_error;  // (g_update_lock)
 static std::string g_upd_zip;    // the download's path (progress: its size)
 static bool g_update_go;         // "Update now" clicked (the start screen's thread)
+static std::string g_updated_tag;  // this run follows an update to it ("Updated to version ..." on the bar; g_update_lock)
 
 #ifdef _WIN32
 #include <filesystem>
@@ -294,6 +296,7 @@ static void *upd_thread(void *) {
     }
     fs::remove_all(u8p(work), ec);
     fprintf(stderr, "[update] %s installed: %d files (%d of the player's kept)\n", tag.c_str(), moved, kept);
+    if (FILE *f = fopen((dir + "\\_updated.txt").c_str(), "wb")) { fputs(tag.c_str(), f); fclose(f); }  // (the next run says so)
     g_upd_state = UPD_DONE;
     return NULL;
 }
@@ -303,6 +306,18 @@ static void *upd_cleanup(void *) {
     std::error_code ec;
     fs::path dir = u8p(rt_exe_dir());
     fs::remove_all(dir / "_update", ec);
+    std::string note = (dir / "_updated.txt").u8string();
+    if (FILE *f = fopen(note.c_str(), "rb")) {
+        char tag[64] = {0};
+        if (fgets(tag, sizeof tag, f)) {
+            pthread_mutex_lock(&g_update_lock);
+            g_updated_tag = tag;
+            pthread_mutex_unlock(&g_update_lock);
+            fprintf(stderr, "[update] this run follows the update to %s\n", tag);
+        }
+        fclose(f);
+        remove(note.c_str());
+    }
     int n = 0;
     for (auto it = fs::recursive_directory_iterator(dir, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
         if (it->is_directory(ec)) {
@@ -2914,10 +2929,12 @@ extern "C" void launcher_run(const char *root) {
 #endif
                 if (ust != UPD_IDLE && ust != UPD_DONE) {  // (updating: its progress instead of the link)
                     std::string msg;
+                    float frac = -1;  // the bar: done part, or -1 (unknown: a moving segment)
                     if (ust == UPD_DOWNLOAD) {
                         long long got = 0;
                         if (FILE *f = fopen(g_upd_zip.c_str(), "rb")) { fseek(f, 0, SEEK_END); got = ftell(f); fclose(f); }
                         int pc = upd_size > 0 ? (int)(got * 100 / upd_size) : -1;
+                        if (pc >= 0) frac = (pc > 100 ? 100 : pc) / 100.0f;
                         msg = std::string(TR("Downloading ", "Baixando a versão ")) + tag_label(upd, false) +
                               (pc >= 0 ? " — " + std::to_string(pc > 100 ? 100 : pc) + "%" : std::string("…"));
                     } else if (ust == UPD_UNPACK) msg = TR("Unpacking the update…", "Descompactando a atualização…");
@@ -2926,6 +2943,16 @@ extern "C" void launcher_run(const char *root) {
                                TR(") — download it from the releases page", ") — baixe pela página de versões");
                     ImVec2 ms = text_size(F_LABEL, 14, msg.c_str());
                     float mx = W_ - 28 - ms.x, my = H_ - 24 - ms.y / 2;
+                    if (ust != UPD_FAILED) {
+                        float bw = 180, bx0 = mx - 16 - bw, by0 = H_ - 24 - 3;
+                        dl->AddRectFilled(P(bx0, by0), P(bx0 + bw, by0 + 6), IM_COL32(255, 255, 255, 30), 3 * g_s);
+                        if (frac >= 0) dl->AddRectFilled(P(bx0, by0), P(bx0 + bw * frac, by0 + 6), C_TEAL, 3 * g_s);
+                        else {
+                            float t = (float)fmod(SDL_GetTicks() / 1000.0, 1.4) / 1.4f, seg = bw * 0.3f, a = bx0 + (bw + seg) * t - seg;
+                            float lo = a < bx0 ? bx0 : a, hi = a + seg > bx0 + bw ? bx0 + bw : a + seg;
+                            if (hi > lo) dl->AddRectFilled(P(lo, by0), P(hi, by0 + 6), C_TEAL, 3 * g_s);
+                        }
+                    }
                     if (ust == UPD_FAILED) {
                         ImGui::SetCursorScreenPos(P(mx, my));
                         if (ui_invisible_button("##updfail", S(ms.x, ms.y), ImGuiButtonFlags_EnableNav)) SDL_OpenURL((RELEASE_PAGE + upd).c_str());
@@ -2933,6 +2960,16 @@ extern "C" void launcher_run(const char *root) {
                     }
                     text(dl, F_LABEL, 14, mx, my, ust == UPD_FAILED ? C_GOLD : C_SOFT, msg.c_str());
                     upd.clear();  // (no link meanwhile)
+                }
+                pthread_mutex_lock(&g_update_lock);
+                std::string updated = g_updated_tag;
+                pthread_mutex_unlock(&g_update_lock);
+                if (!updated.empty() && upd.empty() && ust == UPD_IDLE) {  // (just updated: said for this run)
+                    std::string m = std::string(TR("Updated to version ", "Atualizado para a versão ")) + tag_label(updated, false);
+                    ImVec2 ms = text_size(F_LABEL, 14, m.c_str());
+                    float mx = W_ - 28 - ms.x, my = H_ - 24 - ms.y / 2;
+                    dl->AddCircleFilled(P(mx - 12, H_ - 24), 4.5f * g_s, C_TEAL);
+                    text(dl, F_LABEL, 14, mx, my, C_TEAL, m.c_str());
                 }
                 if (!upd.empty()) {
                     std::string link = std::string(TR("New version ", "Nova versão ")) + tag_label(upd, false) +

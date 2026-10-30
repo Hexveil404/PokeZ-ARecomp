@@ -8,14 +8,14 @@
 #define __forceinline inline __attribute__((always_inline))
 #define __int64 long long
 
-static inline unsigned char _BitScanForward(unsigned long *index, unsigned long mask) {
+static inline unsigned char _BitScanForward(unsigned long *index, uint32_t mask) {  // (32-bit mask: MSVC's unsigned long)
     if (!mask) return 0;
-    *index = (unsigned long)__builtin_ctzl(mask);
+    *index = (unsigned long)__builtin_ctz(mask);
     return 1;
 }
-static inline unsigned char _BitScanReverse(unsigned long *index, unsigned long mask) {
+static inline unsigned char _BitScanReverse(unsigned long *index, uint32_t mask) {
     if (!mask) return 0;
-    *index = 63ul - (unsigned long)__builtin_clzl(mask);
+    *index = 31ul - (unsigned long)__builtin_clz(mask);
     return 1;
 }
 #define _byteswap_ushort(x) __builtin_bswap16((uint16_t)(x))

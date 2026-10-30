@@ -28,6 +28,11 @@
 #include <stdlib.h>
 #include <codecvt>
 
+#ifndef _WIN32  // (ZA Recomp: the MSVC helper used below, for Linux builds; as in ../ffx_fsr2.cpp)
+#include <wchar.h>
+#define wcscpy_s(dst, src) wcscpy(dst, src)
+#endif
+
 // prototypes for functions in the interface
 FfxErrorCode GetDeviceCapabilitiesVK(FfxFsr2Interface* backendInterface, FfxDeviceCapabilities* deviceCapabilities, FfxDevice device);
 FfxErrorCode CreateBackendContextVK(FfxFsr2Interface* backendInterface, FfxDevice device);

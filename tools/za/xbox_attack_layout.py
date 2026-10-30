@@ -217,7 +217,7 @@ def prepare(romfs, mods, stamp, readers):
         result = install(data, guard, mods, stamp)
         print('[xbox-layout] '+result, flush=True)
         return True
-    except (OSError, ValueError, IndexError, KeyError, struct.error, UnicodeError, SystemExit) as e:
+    except (Exception, SystemExit) as e:  # (any failure: the layout stays off, never the icons)
         print('[xbox-layout] unavailable: '+str(e), flush=True)
         try:
             if not isinstance(e, OSError) and not Path(mods).is_symlink():

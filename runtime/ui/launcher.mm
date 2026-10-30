@@ -730,8 +730,7 @@ static bool prompts_wanted(void) {
     int tries = 0;
     prompts_marked("textures/prompts.tried", &tries);
     return rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool) &&
-           file_exists(g_root + "/romfs.bin") &&
-           (!prompts_marked("textures/prompts/.made") || xbox_layout_wanted()) && tries < 3;
+           file_exists(g_root + "/romfs.bin") && !prompts_marked("textures/prompts/.made") && tries < 3;
 }
 // wait: until made (the setup), else started and left running (a boot, a rebind)
 static bool make_prompts(bool wait) {
@@ -752,7 +751,7 @@ static bool make_prompts(bool wait) {
     const char *ini = getenv("LARECOMP_SETTINGS");  // (as runtime/settings.c: the bindings the icons name)
     if (!ini || !*ini) ini = "larecomp.ini";
     const char *argv[] = {tool, "--romfs", romfs.c_str(), "--settings", ini, "--mods", "mods", "--out", "textures/prompts",
-                          "--install", stamp.c_str(), "--xbox-attack-layout", NULL};
+                          "--install", stamp.c_str(), NULL};
     PlatProc p = plat_spawn(argv, "textures/prompts.log", false);
     if (!wait || !p) {
         fprintf(stderr, "[launcher] button icons: %s\n", p ? "being made (zaprompts, textures/prompts.log)" : "zaprompts didn't start");
@@ -762,28 +761,33 @@ static bool make_prompts(bool wait) {
     }
     int r = plat_proc_wait(p, true);
     fprintf(stderr, "[launcher] button icons: %s (zaprompts exit %d; textures/prompts.log)\n", r == 0 ? "made" : "not made", r);
-    if (xbox_layout_wanted()) fprintf(stderr, "[launcher] Xbox battle layout not prepared (textures/prompts.log)\n");
     g_prompts_busy = false;
     return r == 0;
 }
-// PLAY can be clicked while the background helper is still preparing an updated
-// install. Consume that process before mounting RomFS; never wait on the GPU.
+// The Xbox battle layout (only with its option on): zaprompts takes the one battle archive out of the game into
+// mods/_XboxAttackLayout before the game mounts the RomFS. Only that archive, not the icons: a second or two.
 static void xbox_layout_before_play(void) {
     if (!g_settings.xbox_attack_layout || !xbox_layout_wanted()) return;
-    if (g_prompts_proc) {
-        PlatProc p = g_prompts_proc;
-        g_prompts_proc = 0;
-        plat_proc_wait(p, true);
-    }
-    if (prompts_wanted()) make_prompts(true);
+    char tool[1100];
+    if (!rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool) ||
+        !file_exists(g_root + "/romfs.bin"))
+        return;
+    mkdir("textures", 0755);
+    std::string stamp = prompts_stamp(), romfs = g_root + "/romfs.bin";
+    const char *argv[] = {tool, "--romfs", romfs.c_str(), "--mods", "mods", "--install", stamp.c_str(),
+                          "--xbox-attack-layout-only", NULL};
+    PlatProc p = plat_spawn(argv, "textures/xbox-layout.log", false);
+    int r = p ? plat_proc_wait(p, true) : -1;
+    fprintf(stderr, "[launcher] Xbox battle layout: %s (zaprompts exit %d; textures/xbox-layout.log)\n",
+            r == 0 ? "prepared" : "not prepared", r);
 }
 // runtime/main.c, a set-up copy booting straight into the game: the icons made in the background if they never were,
 // or were made for other bindings
 extern "C" void launcher_prompts_kick(const char *root) {
     g_root = root;
     settings_load();  // (the bindings: the boot loads them later, runtime/main.c boot)
-    if (g_settings.xbox_attack_layout && xbox_layout_wanted()) xbox_layout_before_play();
-    else if (prompts_wanted()) make_prompts(false);
+    xbox_layout_before_play();
+    if (prompts_wanted()) make_prompts(false);
 }
 // runtime/ui/controls_ui.mm, a binding changed (larecomp.ini saved): the icons made again for it, from the next start
 extern "C" void launcher_prompts_refresh(void) {

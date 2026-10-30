@@ -27,7 +27,7 @@ fi
 USERPROFILE="$(cygpath -w ~)" build/gen-venv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN \
     --distpath build/helper --workpath build/pyinstaller tools/lasgen.spec
 build/gen-venv/Scripts/python.exe tools/pe_no_cfg.py build/helper/lasgen/lasgen.exe
-# 2b. the button icon maker (tools/za/prompt_textures.py + ooz, GPLv3: third_party/ooz/README.ZARecomp.md)
+# 2b. the button icons + opt-in battle layout preparer (zaprompts + ooz; all resources come from the player's game)
 mkdir -p build/ooz
 (cd third_party/ooz && g++ -O2 -shared -static -include sys/stat.h -Dmain=ooz_main kraken.cpp bitknit.cpp lzna.cpp \
     ooz_lib.cpp -o ../../build/ooz/ooz.dll -Wl,-u,__mingw_fe_dfl_env)  # (-u: newer MinGW libmingwex needs CRT_fp10 from libmingw32)
@@ -39,6 +39,7 @@ if [ ! -f build/prompts-venv/.ok2 ]; then  # (.ok2: texture2ddecoder, the team i
 fi
 USERPROFILE="$(cygpath -w ~)" build/prompts-venv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN \
     --distpath build/helper --workpath build/pyinstaller-prompts tools/zaprompts.spec
+build/helper/zaprompts/zaprompts.exe --xbox-attack-layout-version  # refuse a ZIP with an older/incomplete helper
 # 3. the LGPL FFmpeg, the exe (release: no console, log in lasrecomp.log) and zig with its runtime built ahead of time
 SRC_FF=build/deps-win/src/ffmpeg-9.0.2.tar.xz
 [ -f $SRC_FF ] || { mkdir -p build/deps-win/src; /c/Windows/System32/curl.exe -fsSL -o $SRC_FF https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz; }
@@ -66,6 +67,8 @@ cp docs/icon/icon_1024.png "$D/icon.png"
 cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$D/"
 cp third_party/fonts/Baloo2/OFL.txt "$D/Baloo2-OFL.txt"
 cp README.md LICENSE "$D/"
+mkdir -p "$D/docs"
+cp docs/XBOX-ATTACK-LAYOUT.md "$D/docs/"
 [ -f README.pt-BR.md ] && cp README.pt-BR.md "$D/"
 cp tools/za/za-default.ini "$D/larecomp.ini"
 # (every DLL but Windows' own and the Vulkan loader: also when copies sit next to the exe in $B, a dev setup)

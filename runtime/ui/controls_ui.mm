@@ -388,10 +388,11 @@ extern "C" void controls_tab_draw(float scale) {
                   "move is on the button where the game draws it. The rest of the game keeps your bindings.",
                   "Com ZL segurado, o A / B / X / Y do controle valem pela posição (o A do Switch fica à direita), então cada "
                   "golpe fica no botão onde o jogo desenha ele. O resto do jogo mantém os seus comandos."));
-    opt_toggle("Xbox attack layout", &g_settings.xbox_attack_layout, false,
-               "Experimental: place each battle move at its bound controller face button. Does not change controls. "
-               "Requires the local battle layout overlay and Battle moves by position OFF. "
-               "Restart the game after changing this option or controller bindings.");
+    opt_toggle(TR("Xbox attack layout", "Layout de golpes Xbox"), &g_settings.xbox_attack_layout, false,
+               TR("Place battle moves at their bound controller buttons without changing controls. Prepared automatically. "
+                  "Leave Battle moves by position off. Restart after changing this option or bindings.",
+                  "Posiciona os golpes nos botões configurados do controle, sem alterar os comandos. Preparado automaticamente. "
+                  "Deixe Golpes por posição desligado. Reinicie após mudar esta opção ou os comandos."));
     {
         const char *const names[] = {TR("Game layout", "Layout do jogo"), TR("Controller convention", "Padrão do controle")};
         opt_choice(TR("Confirm button", "Botão de confirmar"), &g_settings.menu_confirm, names, 2, MENU_CONFIRM_CONTROLLER,

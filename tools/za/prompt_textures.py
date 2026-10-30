@@ -41,10 +41,17 @@ ap.add_argument('--scale', type=int, default=4)
 ap.add_argument('--font', default=None, help='bold TrueType font for the labels')
 ap.add_argument('--mods', default='mods', help="mods folder (runtime/services/fs.c): their UI archives' icons too")
 ap.add_argument('--party-icons', metavar='DIR', help="the Pokémon box icons into DIR as PNG (then make nothing else)")
+ap.add_argument('--xbox-attack-layout', action='store_true', help='prepare the optional battle layout during setup')
+ap.add_argument('--xbox-attack-layout-only', action='store_true', help='prepare only the battle layout (release smoke test)')
+ap.add_argument('--xbox-attack-layout-version', action='store_true', help='check the frozen helper includes battle layout support')
 args = ap.parse_args()
+if args.xbox_attack_layout_version:
+    from xbox_attack_layout import FORMAT_VERSION
+    print('XboxAttackLayout schema', FORMAT_VERSION)
+    sys.exit(0)
 args.romfs = args.romfs or ['extracted/romfs' if os.path.isdir('extracted/romfs') else 'extracted/romfs.bin']
 FINAL = args.out
-if args.install:
+if args.install and not args.xbox_attack_layout_only:
     import shutil
     args.out = FINAL.rstrip('/\\') + '.new'
     shutil.rmtree(args.out, ignore_errors=True)
@@ -147,6 +154,14 @@ def sarc_files(d):
     for i in range(n):
         _, _, s, e = struct.unpack_from('<IIII', d, sfat + 0xC + 0x10 * i)
         yield d[doff + s:doff + e]
+
+
+if args.xbox_attack_layout or args.xbox_attack_layout_only:
+    from xbox_attack_layout import prepare
+    xbox_ok = prepare(args.romfs[-1], args.mods, args.install or 'standalone',
+                      {'open_game': open_game, 'game_files': game_files, 'FB': FB, 'unpack': unpack})
+    if args.xbox_attack_layout_only:
+        sys.exit(0 if xbox_ok else 1)
 
 
 def bntx_textures(d):

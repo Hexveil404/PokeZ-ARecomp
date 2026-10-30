@@ -130,6 +130,7 @@ bool plat_reset_guest(uint64_t lo, uint64_t hi) {
 }
 
 void plat_commit(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
+bool plat_page_state(uint64_t addr, char *out, size_t n) { (void)addr; (void)out; (void)n; return false; }
 
 int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page) {
     if (g_pagemap < 0 || addr < g_wt_lo || addr + size > g_wt_hi || max <= 0) return -1;

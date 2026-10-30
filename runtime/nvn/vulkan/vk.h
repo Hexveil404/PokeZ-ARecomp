@@ -145,6 +145,7 @@ typedef struct {
     bool map_placed, unmap_reserve;  // VK_EXT_map_memory_placed: driver memory mapped at a given address (exec.c guest_heap_dmabuf)
     bool ssbo_chunks;  // stores and atomics from fragment and vertex shaders (exec.c: the heap in chunks counts misses)
     bool lazy_heap, bda;  // the heap imported chunk by chunk (device.c lazy_heap_predicted), buffer device addresses enabled for it
+    bool gmem_addr;       // the guest window import's device address logged (AMD page faults, #39 #72: exec.c gmem_import)
     bool heap_probe;      // one import tried at the start, lazy chunks if it runs out of memory (exec.c whole_import_probe_oom)
     // on by default on integrated GPUs only (device.c; LARECOMP_VK_LEAN_USAGE / LARECOMP_VK_SMAA_STENCIL /
     // LARECOMP_NO_FRAME_CLEAR =0 / =1 override):

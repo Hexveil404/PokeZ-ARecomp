@@ -155,6 +155,18 @@ void plat_commit(uint64_t addr, uint64_t size) {
                 (unsigned long long)size, GetLastError());
 }
 
+// (gmem_fault_explain, #39 #72) committed? resident? A committed page nothing ever touched has no physical page yet
+bool plat_page_state(uint64_t addr, char *out, size_t n) {
+    MEMORY_BASIC_INFORMATION mi;
+    PSAPI_WORKING_SET_EX_INFORMATION ws = {.VirtualAddress = (void *)(uintptr_t)(addr & ~0xFFFull)};
+    bool q = VirtualQuery(ws.VirtualAddress, &mi, sizeof mi) != 0;
+    bool w = K32QueryWorkingSetEx(GetCurrentProcess(), &ws, sizeof ws) != 0;
+    snprintf(out, n, "%s, protection %#lx; %s%s", !q ? "?" : mi.State == MEM_COMMIT ? "committed" : mi.State == MEM_RESERVE ? "reserved only" : "free",
+             q ? mi.Protect : 0, !w ? "working set unknown" : ws.VirtualAttributes.Valid ? "resident" : "NOT resident (never touched, or paged out)",
+             w && ws.VirtualAttributes.Valid && ws.VirtualAttributes.Locked ? ", locked" : "");
+    return true;
+}
+
 int plat_protect(uint64_t addr, uint64_t size, int prot) {
     DWORD p = prot == PLAT_PROT_NONE ? PAGE_NOACCESS : prot == PLAT_PROT_READ ? PAGE_READONLY : PAGE_READWRITE, old;
     if (addr >= g_lo && addr < g_hi) plat_commit(addr, size);

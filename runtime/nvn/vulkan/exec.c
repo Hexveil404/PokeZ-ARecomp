@@ -3996,8 +3996,28 @@ static bool whole_import_probe_oom(void) {
 static bool gmem_import(uint64_t lo, uint64_t size) {
     VkBuffer buf;
     VkDeviceMemory mem;
-    VkResult r = host_import_ptr((void *)(uintptr_t)(gwin_base + lo), size, &buf, &mem, false);
+#ifdef _WIN32
+    // (test, #39 #72) LARECOMP_VK_GMEM_PREFAULT=1: every page of the window touched before the import - committed
+    // pages the game never wrote have no physical page yet, and a driver that maps only the pages present at the
+    // import would fault a shader's read of one. An atomic add of 0: a guest thread's store at the same moment stays.
+    const char *pf = ENV("LARECOMP_VK_GMEM_PREFAULT");
+    if (pf && atoi(pf)) {
+        uint64_t t0 = SDL_GetTicksNS();
+        for (uint64_t a = gwin_base + lo; a < gwin_base + lo + size; a += 4096) __atomic_fetch_add((volatile uint32_t *)(uintptr_t)a, 0, __ATOMIC_RELAXED);
+        LOG("[vk] gmem prefault: %llu MB touched in %llu ms (LARECOMP_VK_GMEM_PREFAULT)\n", (unsigned long long)(size >> 20),
+            (unsigned long long)((SDL_GetTicksNS() - t0) / 1000000));
+    }
+#endif
+    VkResult r = host_import_ptr((void *)(uintptr_t)(gwin_base + lo), size, &buf, &mem, g_vk.gmem_addr);
     if (r != VK_SUCCESS) { LOG("[vk] gmem import: %d (%llu MB)\n", r, (unsigned long long)(size >> 20)); return false; }
+    if (g_vk.gmem_addr) {  // (#39 #72: a page fault's address minus this start is the guest address base + lo + that)
+        VkBufferDeviceAddressInfo ai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = buf};
+        uint64_t va = vkGetBufferDeviceAddress(g_vk.dev, &ai);
+        LOG("[vk] guest window import at device address [%#llx, %#llx) = guest [%llx, %llx)\n", (unsigned long long)va,
+            (unsigned long long)(va + size), (unsigned long long)(gwin_base + lo), (unsigned long long)(gwin_base + lo + size));
+        extern uint64_t g_gmem_va, g_gmem_guest, g_gmem_va_size;
+        g_gmem_va = va, g_gmem_guest = gwin_base + lo, g_gmem_va_size = size;
+    }
     if (gmem_buf) vk_defer_buffer(gmem_buf, gmem_mem);  // the heap grew: the pending submission may still use the old import
     gmem_buf = buf;
     gmem_mem = mem;

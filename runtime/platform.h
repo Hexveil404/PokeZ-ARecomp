@@ -37,6 +37,8 @@ void plat_sample_focus(void);
 void plat_write_tracking_off(const char *why);  // tracking off from now on (unless LARECOMP_WRITE_TRACKING=1)
 #endif
 enum { PLAT_PROT_NONE = 0, PLAT_PROT_READ = 1, PLAT_PROT_RW = 3 };
+// A guest page's state on the host now (committed / resident...), for a GPU fault report; false where not known.
+bool plat_page_state(uint64_t addr, char *out, size_t n);
 int plat_protect(uint64_t addr, uint64_t size, int prot);  // 0 on success
 #define PLAT_PAGE 0x4000ull  // largest page size we deal with (macOS 16K; multiple of Windows' 4K)
 

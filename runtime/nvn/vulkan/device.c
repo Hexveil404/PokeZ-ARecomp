@@ -386,6 +386,24 @@ static void ab_describe(const char *what, uint32_t i, bool freed, uint64_t addr)
         e->internal ? ", driver-internal" : "", freed ? ", FREED since" : "");
 }
 
+// The guest window's import (exec.c gmem_import, with LARECOMP_VK_GMEM_ADDR): its device address range and the guest
+// address it starts at. A fault inside it is named as the guest page, with that page's state on the host now: the
+// address binding report doesn't list imported host memory, so these faults read as "no object ever held that page".
+uint64_t g_gmem_va, g_gmem_guest, g_gmem_va_size;
+static void gmem_fault_explain(uint64_t va) {
+    if (!g_gmem_va || va < g_gmem_va || va >= g_gmem_va + g_gmem_va_size) {
+        if (g_gmem_va) LOG("[vk]   (outside the guest window import [%#llx, %#llx))\n", (unsigned long long)g_gmem_va,
+                           (unsigned long long)(g_gmem_va + g_gmem_va_size));
+        return;
+    }
+    uint64_t ga = g_gmem_guest + (va - g_gmem_va);
+    extern int nvn_pool_flags_at(uint64_t addr);
+    LOG("[vk]   inside the guest window import: guest %llx (+%llu MB), memory pool flags %#x\n", (unsigned long long)ga,
+        (unsigned long long)((va - g_gmem_va) >> 20), nvn_pool_flags_at(ga));
+    char st[160];
+    if (plat_page_state(ga, st, sizeof st)) LOG("[vk]   that page now: %s\n", st);
+}
+
 // At a device fault: what held the faulting page [addr, addr + precision), and the live objects nearest to it
 static void ab_explain(uint64_t addr, uint64_t prec) {
     if (!ab_on) { LOG("[vk]   address owner: unknown (%s)\n", ab_inst_ext ? "the driver has no address binding report" :
@@ -468,6 +486,7 @@ void vk_device_fault_report(void) {
     {
         LOG("[vk]   address %s %#llx (precision %#llx)\n", addr[i].addressType < 7 ? kind[addr[i].addressType] : "?",
             (unsigned long long)addr[i].reportedAddress, (unsigned long long)addr[i].addressPrecision);
+        gmem_fault_explain(addr[i].reportedAddress);
         if (addr[i].addressType >= VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT &&
             addr[i].addressType <= VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT)
             ab_explain(addr[i].reportedAddress & ~(addr[i].addressPrecision ? addr[i].addressPrecision - 1 : 0), addr[i].addressPrecision);
@@ -722,6 +741,12 @@ static void create_device(void) {
     g_vk.lazy_heap = lazy_heap_predicted(budget, &probe);
     g_vk.heap_probe = !g_vk.lazy_heap && probe && g_vk.host_import && have12.bufferDeviceAddress;
     g_vk.bda = (g_vk.lazy_heap || g_vk.heap_probe) && have12.bufferDeviceAddress;
+    // (#39 #72: AMD's page faults land where no object the address binding report knows of lies - most likely inside
+    // the guest window's import, which that report doesn't list. Its device address, logged at the import, settles
+    // that; on by default on AMD, LARECOMP_VK_GMEM_ADDR=0 off / =1 on any GPU)
+    const char *ga = getenv("LARECOMP_VK_GMEM_ADDR");
+    g_vk.gmem_addr = (ga ? atoi(ga) != 0 : g_vk.props.vendorID == 0x1002) && have12.bufferDeviceAddress && g_vk.host_import;
+    g_vk.bda |= g_vk.gmem_addr;
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT div = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT,
         .vertexAttributeInstanceRateDivisor = VK_TRUE, .vertexAttributeInstanceRateZeroDivisor = VK_FALSE};

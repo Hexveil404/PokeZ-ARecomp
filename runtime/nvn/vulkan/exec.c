@@ -7611,7 +7611,30 @@ static void depth_blit_via_color(VkCommandBuffer cb, TexBackend *s, TexBackend *
     rec_CmdCopyBufferToImage(cb, buf, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
 }
 
+static void copy_texture_gpu(const TexRefRec *src, const TexRefRec *dst, uint64_t flags);
+// A copy into a pitch-linear texture (a stride: memory the CPU reads as it is) also lands in guest memory, read back
+// with the texture's own row pitch. Royale Z-A's profile photo: the frame is copied into a 1920x1080 linear RGBA8
+// texture, the CPU maps that memory, crops it to 852x444 and encodes it to BC1 itself (game fn 0x700189a880,
+// blocks by 0x700189bfb0): with the copy only in the Vulkan image the CPU read zeros - a black photo, saved black
+// (#64). Rare (one copy per photo), so the wait for the GPU is fine. LARECOMP_VK_LINEAR_WRITEBACK=0: the image only.
 static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t flags) {
+    copy_texture_gpu(src, dst, flags);
+    NvnTexture *dt = (NvnTexture *)(uintptr_t)dst->tex;
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_VK_LINEAR_WRITEBACK") || atoi(ENV("LARECOMP_VK_LINEAR_WRITEBACK")) != 0;
+    if (!on || !dt || !dt->stride || dt->addr < GUEST_LO || (dst->has_view && (dst->view.setmask & 1) && dst->view.base_level))
+        return;
+    const FormatInfo *fi = nvn_format_info(dt->format);
+    if (!fi || fi->bw != 1 || fi->bh != 1 || !fi->bpb || fi->bpb == 3 || dt->stride < (uint64_t)dt->width * fi->bpb) return;
+    TexRefRec whole = *dst;  // (the whole image: the rows the CPU sees, at the texture's pitch)
+    memset(whole.region, 0, sizeof whole.region);
+    uint64_t row = st.copy_row_stride, img = st.copy_image_stride;
+    st.copy_row_stride = dt->stride, st.copy_image_stride = dt->stride * dt->height;
+    copy_texture_to_buffer(&whole, dt->addr);
+    st.copy_row_stride = row, st.copy_image_stride = img;
+}
+
+static void copy_texture_gpu(const TexRefRec *src, const TexRefRec *dst, uint64_t flags) {
     snap_reason = "tex2tex"; snapshots_invalidate(NULL);
     NvnTexture *st_ = (NvnTexture *)(uintptr_t)src->tex, *dt = (NvnTexture *)(uintptr_t)dst->tex;
     if (!st_ || !dt) return;

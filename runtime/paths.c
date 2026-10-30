@@ -129,10 +129,11 @@ static void default_home(char *root, size_t n) {
 #ifdef _WIN32
     exe_dir(root, n);
 #elif defined(__linux__)
-    // (the AppImage is read-only): $XDG_DATA_HOME/lasrecomp, ~/.local/share/lasrecomp by default
+    // (the AppImage is read-only): $XDG_DATA_HOME/zarecomp, ~/.local/share/zarecomp by default (Pokémon Z-A: its own
+    // folder, not LAS Recomp's lasrecomp/ - both installed would share the game files' folder, saves and larecomp.ini)
     const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
-    if (xdg && *xdg == '/') snprintf(root, n, "%s/lasrecomp", xdg);
-    else snprintf(root, n, "%s/.local/share/lasrecomp", home && *home ? home : "/tmp");
+    if (xdg && *xdg == '/') snprintf(root, n, "%s/zarecomp", xdg);
+    else snprintf(root, n, "%s/.local/share/zarecomp", home && *home ? home : "/tmp");
 #else
     const char *home = getenv("HOME");
     snprintf(root, n, "%s/Library/Application Support/" RT_BUNDLE_ID, home && *home ? home : "/tmp");

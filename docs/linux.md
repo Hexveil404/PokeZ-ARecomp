@@ -153,26 +153,94 @@ Switches: `LARECOMP_VK_CS_SUBGROUP=0` leaves compute to the driver's 64-lane wav
 `submit` ms shows the kernel time inside the submit ioctl.
 
 ## ZA Recomp on Linux (native, x86-64)
-Experimental: runs natively (no Wine / Proton), packaged as an AppImage. Checked 2026-10-30 on Linux Mint 22.3 (kernel
-7.0, Intel Raptor Lake UHD, Mesa 25.2.8 ANV, X11 / Cinnamon, 7.4 GB RAM) with Z-A 2.0.2 from the player's own packages:
-imported by zaimport, game code built in 20 minutes (3 jobs), the opening scenes played without input (no errors): menus
-at 60 fps, 3D scenes 9-26 fps at `resolution = match` (10-16 at the release's 1.5x). Controls, saves and longer
-sessions untested. Report: `RELATORIO_PORT_LINUX.md`.
+Experimental. ZA Recomp builds and runs natively on Linux x86-64 (no Wine / Proton) and can be packaged as an
+AppImage. Most of what makes that possible was already here, from LAS Recomp: the Linux platform layer
+(`runtime/platform/linux.c`), the ELF game code library (`lasgame.so`), the Vulkan backend shared with Windows, page
+write tracking, the pinned dependency build (`tools/linux/build_deps.sh`), and the Steam Deck fixes (#7-#12) above. What
+was added for Pokémon Z-A on Linux:
 
-- Data folder: `~/.local/share/zarecomp` (`$XDG_DATA_HOME/zarecomp`), not LAS Recomp's `lasrecomp/`. A first run copies
-  the release's settings (`za-default.ini`, shipped next to the app) there as `larecomp.ini`, as the Windows zip does.
-- Build (Ubuntu 24.04 / Mint 22 packages; the script prints the apt line for what is missing):
+- FSR 2 compiles outside Windows (`FFX_GCC`, `size_t`, `wcscpy_s`); a dev build linked against `DEPS` gets an rpath.
+- Its own data folder, `~/.local/share/zarecomp` (`$XDG_DATA_HOME/zarecomp`), not LAS Recomp's `lasrecomp/` (both
+  installed would share saves, game files and `larecomp.ini`).
+- A first run copies the release's settings (`za-default.ini`, shipped next to the app) into the data folder as
+  `larecomp.ini`, as the Windows zip does with the `larecomp.ini` next to the exe.
+- `ooz` (the zaprompts helper's decompressor) builds as `libooz.so` through stand-in Windows headers
+  (`tools/za/ooz_posix/`); `third_party/ooz` itself is unchanged.
+- `tools/za/build-linux.sh` (native build) and `tools/za/dist-linux.sh` (the Z-A AppImage: zaimport for linux-x64,
+  lasgen, zaprompts, zig), the Linux counterparts of `tools/za/dist.sh`.
 
-      sudo apt install clang lld cmake ninja-build nasm pkg-config python3-venv curl git patchelf dotnet-sdk-8.0 \
-          libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxtst-dev \
-          libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libdrm-dev libgbm-dev \
-          libpulse-dev libasound2-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev libibus-1.0-dev libvulkan-dev
-      tools/za/build-linux.sh          # -> build/linux/x86_64/za/lasrecomp (run from the repo root)
-      GAME=1 tools/za/build-linux.sh   # + the game code from your own extracted/ (exefs/ + romfs.bin)
-      tools/za/dist-linux.sh           # -> build/dist/ZA Recomp-<version>-linux-x86_64.AppImage
+### Distributions
+Checked on Linux Mint 22.3 (Ubuntu 24.04 base). Any x86-64 distribution with glibc 2.35+, SDL3's build dependencies, a
+Vulkan 1.3 driver (Mesa RADV / ANV / NVK or NVIDIA's) and a CPU with AVX2 should work; package names below are
+Debian / Ubuntu / Mint ones. The AppImage made by `dist-linux.sh` needs the glibc of the machine that built it or newer
+(2.39 for Mint 22 / Ubuntu 24.04); the podman route above (`tools/linux/appimage.sh`, Ubuntu 22.04) is LAS Recomp's and
+does not package the Z-A helpers yet.
 
-  The AppImage is built against this machine's glibc (runs on distributions at least as new). It holds the start
-  screen, zig, lasgen, zaprompts (with ooz built through `tools/za/ooz_posix`), zaimport (linux-x64, self-contained)
-  and SDL3 / LGPL FFmpeg / shaderc; no game code or files.
-- An SDL3 built without the audio (ALSA / PulseAudio / PipeWire) and udev headers has no sound and fewer controller
-  features: `build-linux.sh` refuses to build until they are installed (`PKGCHECK=0` skips that, for a quick test only).
+### Dependencies
+
+    sudo apt install clang lld cmake ninja-build nasm pkg-config python3-venv curl git patchelf dotnet-sdk-8.0 \
+        libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxtst-dev \
+        libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libdrm-dev libgbm-dev \
+        libpulse-dev libasound2-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev libibus-1.0-dev libvulkan-dev
+
+SDL3 3.4, an LGPL-only FFmpeg, shaderc and the Vulkan / VMA headers are not taken from the system: `build-linux.sh`
+builds them once from pinned, hash-checked sources into `build/linux/x86_64/deps` (`tools/linux/build_deps.sh`).
+The system packages above are what SDL3's backends are compiled against; `build-linux.sh` checks them first and
+prints the `apt install` line for whatever is missing. `dotnet-sdk-8.0` is only needed for the AppImage (zaimport is
+published self-contained, so players need no .NET); `patchelf` likewise.
+
+### Building
+
+    tools/za/build-linux.sh          # the start screen: build/linux/x86_64/za/lasrecomp (run it from the repo root)
+    GAME=1 JOBS=3 tools/za/build-linux.sh   # + the game code (generated/ and lasgame.so) from your own extracted/
+    tools/za/dist-linux.sh           # build/dist/ZA Recomp-<version>-linux-x86_64.AppImage (ZAIMPORT=0: no importer)
+
+The app is built with the Windows release's game code flags (`GENOPT="-O1 -DGUEST_VOLATILE"`, x86-64-v3).
+`GAME=1` compiles giant functions at -O0 first, with the start screen's own rule (`runtime/gamebuild.c` cold_giant),
+so no single file holds the build for an hour. Each compiler process takes up to ~1.1 GB: lower `JOBS` on machines
+with little RAM.
+
+### Game files (your own)
+The start screen (AppImage) reads your .xci / .nsp packages (base game, update, DLC) with your `prod.keys` through
+zaimport, or an already extracted `exefs/` + `romfs/`, and builds the game code itself. For a source checkout, the same
+importer can write `extracted/` (dev mode: `extracted/` in the starting folder is used as the data folder):
+
+    build/linux/x86_64/zaimport/zaimport <prod.keys> extracted <base.nsp> [<update.nsp>] [<dlc.nsp>...]
+    GAME=1 JOBS=3 tools/za/build-linux.sh
+    build/linux/x86_64/za/lasrecomp extracted --play
+
+(`dist-linux.sh` builds zaimport into `build/linux/x86_64/zaimport/`.) Never commit `extracted/`, `generated/` or keys.
+
+### Tested (2026-10-30)
+Linux Mint 22.3, kernel 7.0, X11 / Cinnamon; Intel Core i5-13420H (8 cores / 12 threads); Intel UHD Graphics
+(Raptor Lake-P), Mesa 25.2.8 ANV, Vulkan 1.4; 8 GB of RAM (7.4 GB usable). Pokémon Legends: Z-A 2.0.2 from the
+player's own packages (base game + update).
+
+- Start screen, native and as an AppImage: opens, renders, finds its fonts and resources.
+- zaimport (linux-x64): base game + 2.0.2 update applied (build ID b1f12fd919eae86a).
+- `make gen`: 2 minutes 13 s, 4.4 GB peak. Game code: 1448 objects (160 giant functions at -O0), 20 minutes with
+  3 jobs; the library loads with ~270,000 functions (230,332 main + 40,069 sdk).
+- Two scripted ~4-minute sessions without input: the language selection and the opening cutscenes rendered correctly,
+  no errors in the log. Audio output opened (48 kHz stereo).
+- Played by hand by the tester: audio without noticeable stutter, movement works, occasional frame-rate dips.
+- Frame rate (window 1280x720, FSR 1 + SMAA): menus at 60 fps; 3D scenes about 15-26 fps at `resolution = match`,
+  down to about 10 fps in the heaviest scene; 10-16 fps at the release's `resolution = 1.5x`. Not a steady 30 fps on
+  this integrated GPU.
+
+### Known limitations and untested
+- Not yet tested: DualShock 4 and other controllers (rumble / LEDs / gyro need access to `/dev/hidraw*`, usually
+  Steam's udev rules), saving and loading, mods, other GPUs (AMD / NVIDIA desktop), long sessions, and the AppImage's
+  own full setup flow ("Prepare the game": zaimport + lasgen + zig inside the app; it picks
+  `min(cores, RAM GB - 2)` jobs, 5 on an 8 GB machine).
+- `za-default.ini` sets `resolution = 1.5x`, chosen for dedicated GPUs; on an integrated one `match` ran about 50 %
+  faster here.
+- 8 GB of RAM is the minimum: the generator peaks at 4.4 GB and the game ran in short sessions only.
+
+### Problems found and their fixes
+- `'__declspec' attributes are not enabled` building FSR 2: `-DFFX_GCC` (Makefile, Linux only).
+- `Couldn't find dependency package for XSCRNSAVER` building SDL3: the system headers above (`libxss-dev`, and the
+  audio / udev ones, without which SDL3 builds with no sound).
+- `-lvulkan` not found: `libvulkan-dev` (the loader's unversioned name; the loader itself is always the system's).
+- The start screen in a tiny bitmap font: run a dev build from the repo root (its resources are looked up from the
+  starting folder; the AppImage keeps them next to the executable).
+- A black screenshot in a test run: a fade between scenes (the log shows about one draw per frame there).

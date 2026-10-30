@@ -13,9 +13,10 @@ Nenhum push foi feito. Nenhum arquivo da Nintendo, chave ou código gerado a par
 | Importação dos pacotes (.nsp base + update) | **OK** | `zaimport` linux-x64: base + update 2.0.2 → build ID `b1f12fd919eae86a`, `romfs.bin` 6,0 GB |
 | Recompilação ARM64 → C → `lasgame.so` | **OK** | gerador 2 min 13 s (pico 4,4 GB); compilação 20 min com 3 jobs, 0 erros |
 | Jogo rodando nativo | **OK (sem interação)** | 2 sessões de ~4 min: seleção de idioma, abertura em Lumiose; 0 travamentos, 0 erros |
-| Áudio | **Parcial** | saída aberta (`[audout] opened 48000 Hz, 2 ch`); não foi ouvido |
+| Áudio | **OK** | saída aberta (`[audout] opened 48000 Hz, 2 ch`); ouvido pelo usuário, sem engasgos perceptíveis |
 | Desempenho na Intel UHD | **Abaixo de 30 fps em 3D** | menus a 60 fps; cenas 3D 9–26 fps (§5) |
-| Controles, DualShock 4, saves, mods | **Não testado** | as sessões rodaram sem entrada do jogador |
+| Gameplay | **OK (inicial)** | jogado à mão pelo usuário: movimentação funciona, pequenas quedas de desempenho |
+| DualShock 4, saves, mods, outras GPUs, sessões longas | **Não testado** | |
 
 ## 2. Auditoria (estado inicial)
 
@@ -34,7 +35,7 @@ Nenhum push foi feito. Nenhum arquivo da Nintendo, chave ou código gerado a par
 ## 3. Máquina de teste
 
 Linux Mint 22.3 (base Ubuntu 24.04), kernel 7.0.0-42, glibc 2.39, sessão X11/Cinnamon. Intel Core i5-13420H
-(8 núcleos/12 threads, AVX2/FMA/BMI2 → código do jogo em x86-64-v3). **7,4 GB de RAM** + 7 GB de swap. GPU Intel
+(8 núcleos/12 threads, AVX2/FMA/BMI2 → código do jogo em x86-64-v3). **8 GB de RAM** (7,4 GB utilizáveis) + 7 GB de swap. GPU Intel
 UHD (Raptor Lake-P), Mesa 25.2.8 ANV, Vulkan 1.4.318; o runtime reporta 5,6 GB de memória de vídeo (compartilhada) e um
 orçamento de ~2,3 GB no heap 0, por isso o heap do guest é importado em blocos.
 
@@ -48,8 +49,8 @@ orçamento de ~2,3 GB no heap 0, por isso o heap do guest é importado em blocos
 | `7299781` | `tools/za/build-linux.sh`: build nativo reproduzível (verifica pacotes e imprime o `apt install` do que falta). |
 | `9282558` | Primeira execução fora do Windows: copia o `za-default.ini` do app para a pasta de dados (60 fps, upscaler, resolução da release). |
 | `52aefc8` | `tools/za/dist-linux.sh`: AppImage do Z-A (zig, lasgen, zaprompts + ooz, zaimport linux-x64, fontes, `.desktop` próprio). |
-| `c7d2b68` | `docs/linux.md` (seção Z-A), READMEs, este relatório. |
-| `830dc3f` | `build-linux.sh GAME=1`: funções gigantes em `-O0`, como no build do launcher (160 arquivos na 2.0.2). |
+| `286f23c` | `build-linux.sh GAME=1`: funções gigantes em `-O0`, como no build do launcher (160 arquivos na 2.0.2). |
+| `f5e40af` + docs | `docs/linux.md` (seção Z-A), READMEs, este relatório. |
 
 Nenhuma das mudanças altera o `GAMELIB_ID`: jogadores do Windows não precisam recompilar o jogo.
 
@@ -98,8 +99,8 @@ Nenhuma das mudanças altera o `GAMELIB_ID`: jogadores do Windows não precisam 
 
 ## 6. Pendências
 
-1. **Jogar de verdade**: teclado, mouse, DualShock 4 (rumble/LED/giroscópio pedem acesso a `/dev/hidraw*`, regras
-   udev do Steam), salvar e carregar, mods, áudio ouvido. As sessões de teste rodaram sem entrada.
+1. **Testes completos de jogo**: o usuário jogou o início (áudio e movimentação OK). Faltam DualShock 4
+   (rumble/LED/giroscópio pedem acesso a `/dev/hidraw*`, regras udev do Steam), salvar e carregar, mods, outras GPUs.
 2. **Desempenho na Intel UHD**: medir com `LARECOMP_VK_PROF=1` se o gargalo é a GPU ou a CPU (thread de renderização),
    e decidir se o `za-default.ini` deve deixar a resolução em `auto` para GPUs integradas.
 3. **Memória**: 7,4 GB nesta máquina (o README pede 8). Funcionou nas sessões curtas; sessões longas não testadas.
@@ -120,6 +121,9 @@ Nenhuma das mudanças altera o `GAMELIB_ID`: jogadores do Windows não precisam 
   decisão fica com os mantenedores.
 - `tools/test_translate.sh`: o commit de referência `652e234` não existe neste fork, e a lista de renomeações está
   desatualizada (símbolos duplicados no link). Testado aqui com `REF=HEAD` e `--allow-multiple-definition` no modo GLSL.
+- `tools/test_save.py` (o `test_save_errors.c` não compila) e `tools/test_gamebuild_resume.py` (símbolo
+  `gamelib_old_cpu` indefinido) falham no Linux também no `pokemon-za` original, sem as nossas mudanças.
+  `test_build_cache.py` e `test_settings.py` (125 casos) passam.
 - `tools/test_vk_pipelines.sh`: não linka mais (símbolos que mudaram de arquivo). Não executado.
 - Mensagens do runtime ainda citam "LAS Recomp" em alguns diálogos (ex.: pasta de dados indisponível).
 

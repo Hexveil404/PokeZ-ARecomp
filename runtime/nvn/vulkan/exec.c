@@ -1671,7 +1671,22 @@ static void begin_pass(void) {
         placeholder = e ? atoi(e) != 0 : g_vk.props.vendorID == 0x8086;
     }
     bool placed = false;
-    if (placeholder && !pass_ncolor && (has_d || has_s)) {
+    // The same driver on an Iris Xe (Vulkan 1.3.212) crashed there on an empty slot before a bound one ("empty color
+    // slot 0 of 2", #88): on Intel such a hole gets a throwaway attachment too (R8, which the pipelines then take for
+    // that slot: whatever the shader writes there is dropped), and so does a pass with no attachment at all
+    if (placeholder && (layers == UINT32_MAX || layers == 1)) {  // (the placeholder has one layer: not in a layered pass)
+        for (uint32_t i = 0; i < pass_ncolor; i++) {
+            if (ca[i].imageView) continue;
+            VkImageView v = vk_dummy_color_view(minw, minh, pass_samples);
+            if (!v) break;
+            ca[i] = (VkRenderingAttachmentInfo){.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = v,
+                                                .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                                .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE};
+            pass_color[i] = VK_FORMAT_R8_UNORM;
+            placed = true;
+        }
+    }
+    if (placeholder && !pass_ncolor) {
         VkImageView v = vk_dummy_color_view(minw, minh, pass_samples);
         if (v) {
             ca[0] = (VkRenderingAttachmentInfo){.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = v,

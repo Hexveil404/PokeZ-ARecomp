@@ -151,3 +151,28 @@ Switches: `LARECOMP_VK_CS_SUBGROUP=0` leaves compute to the driver's 64-lane wav
 `LARECOMP_VK_GMEM_WINDOW=0` imports the whole 3.2 GB heap again (87 % of the render thread then goes into
 `vkQueueSubmit2`). `perf record -t <render thread>` sees user space only (perf_event_paranoid=2); the `[vk] t=` log line's
 `submit` ms shows the kernel time inside the submit ioctl.
+
+## ZA Recomp on Linux (native, x86-64)
+Experimental: runs natively (no Wine / Proton), packaged as an AppImage. Checked 2026-10-30 on Linux Mint 22.3 (kernel
+7.0, Intel Raptor Lake UHD, Mesa 25.2.8 ANV, X11 / Cinnamon, 7.4 GB RAM) with Z-A 2.0.2 from the player's own packages:
+imported by zaimport, game code built in 20 minutes (3 jobs), the opening scenes played without input (no errors): menus
+at 60 fps, 3D scenes 9-26 fps at `resolution = match` (10-16 at the release's 1.5x). Controls, saves and longer
+sessions untested. Report: `RELATORIO_PORT_LINUX.md`.
+
+- Data folder: `~/.local/share/zarecomp` (`$XDG_DATA_HOME/zarecomp`), not LAS Recomp's `lasrecomp/`. A first run copies
+  the release's settings (`za-default.ini`, shipped next to the app) there as `larecomp.ini`, as the Windows zip does.
+- Build (Ubuntu 24.04 / Mint 22 packages; the script prints the apt line for what is missing):
+
+      sudo apt install clang lld cmake ninja-build nasm pkg-config python3-venv curl git patchelf dotnet-sdk-8.0 \
+          libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxtst-dev \
+          libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libdrm-dev libgbm-dev \
+          libpulse-dev libasound2-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev libibus-1.0-dev libvulkan-dev
+      tools/za/build-linux.sh          # -> build/linux/x86_64/za/lasrecomp (run from the repo root)
+      GAME=1 tools/za/build-linux.sh   # + the game code from your own extracted/ (exefs/ + romfs.bin)
+      tools/za/dist-linux.sh           # -> build/dist/ZA Recomp-<version>-linux-x86_64.AppImage
+
+  The AppImage is built against this machine's glibc (runs on distributions at least as new). It holds the start
+  screen, zig, lasgen, zaprompts (with ooz built through `tools/za/ooz_posix`), zaimport (linux-x64, self-contained)
+  and SDL3 / LGPL FFmpeg / shaderc; no game code or files.
+- An SDL3 built without the audio (ALSA / PulseAudio / PipeWire) and udev headers has no sound and fewer controller
+  features: `build-linux.sh` refuses to build until they are installed (`PKGCHECK=0` skips that, for a quick test only).

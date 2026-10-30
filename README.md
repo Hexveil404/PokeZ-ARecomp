@@ -86,7 +86,8 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 | **Disk** | About 12 GB free |
 | **Game** | Pokémon Legends: Z-A **1.0.0, 2.0.0 or 2.0.2**, optionally with the *Mega Dimension* DLC |
 
-Linux is not officially supported yet. On a Mac, use [MonZaMac](https://github.com/lucabravi/MonZaMac) by
+Linux is not officially supported yet: an experimental native build (x86-64, AppImage) is described in
+[docs/linux.md](docs/linux.md#za-recomp-on-linux-native-x86-64). On a Mac, use [MonZaMac](https://github.com/lucabravi/MonZaMac) by
 [@lucabravi](https://github.com/lucabravi), a native macOS port based on this project.
 
 ## Installation

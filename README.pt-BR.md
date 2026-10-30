@@ -86,7 +86,8 @@ para *The Legend of Zelda: Link's Awakening*.
 | **Disco** | Cerca de 12 GB livres |
 | **Jogo** | Pokémon Legends: Z-A **1.0.0, 2.0.0 ou 2.0.2**, com ou sem a DLC *Mega Dimension* |
 
-O Linux ainda não é suportado oficialmente. No Mac, use o [MonZaMac](https://github.com/lucabravi/MonZaMac), do
+O Linux ainda não é suportado oficialmente: há um build nativo experimental (x86-64, AppImage), descrito em
+[docs/linux.md](docs/linux.md#za-recomp-on-linux-native-x86-64). No Mac, use o [MonZaMac](https://github.com/lucabravi/MonZaMac), do
 [@lucabravi](https://github.com/lucabravi), um port nativo para macOS baseado neste projeto.
 
 ## Instalação

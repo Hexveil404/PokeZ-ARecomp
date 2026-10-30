@@ -4815,7 +4815,7 @@ static bool gmerge_init(void) {
                                               .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
     VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 3, .pBindings = b};
     VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &gmerge_set_layout));
-    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 12};
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
     VkPipelineLayoutCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
                                      .pSetLayouts = &gmerge_set_layout, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
     VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &pi, NULL, &gmerge_layout));
@@ -5038,7 +5038,10 @@ static void gfast_finish(VkCommandBuffer cb) {
         rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, gmerge_pipe);
         rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, gmerge_layout, 0, 1, &set, 0, NULL);
         for (int i = 0; i < gfast_back_n; i++) {
-            uint32_t pc[3] = {(uint32_t)(gfast_back[i].srcOffset / 4), (uint32_t)(gfast_back[i].dstOffset / 4), (uint32_t)(gfast_back[i].size / 4)};
+            static int cpu_wins = -1;  // (gfast_merge.comp: a word both rewrote keeps the CPU's; LARECOMP_VK_GFAST_CPU_WINS=0: the dispatch's)
+            if (cpu_wins < 0) cpu_wins = !ENV("LARECOMP_VK_GFAST_CPU_WINS") || atoi(ENV("LARECOMP_VK_GFAST_CPU_WINS")) != 0;
+            uint32_t pc[4] = {(uint32_t)(gfast_back[i].srcOffset / 4), (uint32_t)(gfast_back[i].dstOffset / 4), (uint32_t)(gfast_back[i].size / 4),
+                              (uint32_t)cpu_wins};
             rec_CmdPushConstants(cb, gmerge_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
             rec_CmdDispatch(cb, (pc[2] + 255) / 256, 1, 1);
         }

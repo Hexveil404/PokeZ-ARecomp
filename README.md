@@ -144,6 +144,11 @@ graphics options, controls, button icons and more. Settings are saved immediatel
 
 All bindings can be changed in **Settings > Controls > Configure inputs**.
 
+**Xbox attack layout** (off by default) places the four battle moves at their configured physical face buttons,
+without changing controls. Setup prepares the private UI resource automatically from your own game files.
+Leave **Battle moves by position** off, enable the Xbox option, then restart. See
+[Xbox attack layout](docs/XBOX-ATTACK-LAYOUT.md) for compatibility and troubleshooting.
+
 ## Saves
 
 Saves are the game's own files, kept in `save/save_0/` next to `lasrecomp.exe`. They are the same as on the Switch, so

@@ -15,6 +15,7 @@ OOZ = os.path.join(ROOT, 'build', 'ooz', 'ooz.dll' if sys.platform == 'win32' el
 a = Analysis(
     [os.path.join(TOOLS, 'za', 'prompt_textures.py')],
     pathex=[os.path.join(TOOLS, 'za')],
+    hiddenimports=['xbox_attack_layout'],  # setup's private battle overlay; no source files needed on the player's PC
     binaries=[(OOZ, '.')],  # (_internal/: prompt_textures.py looks there, sys._MEIPASS)
     datas=collect_data_files('cffsubr', include_py_files=False),  # (its tx program, which subroutinizes the fonts)
     excludes=['tkinter', 'pydoc', 'doctest', 'unittest', 'pdb', 'IPython', 'setuptools', '_distutils_hack',

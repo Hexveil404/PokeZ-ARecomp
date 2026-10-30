@@ -41,6 +41,7 @@ extern "C" {
 #include "romfs_build.h"
 #include "settings.h"
 #include "input_bind.h"
+#include "xbox_attack_layout.h"
 bool controls_ui_took_back(void);  // ui/controls_ui.mm: B went back a step on Configure inputs
 void input_mouse_release(SDL_Window *w);   // runtime/hle/input.c
 void ui_window_init(void);
@@ -667,7 +668,7 @@ static bool import_packages(const std::vector<std::string> &pkgs, const std::str
 // Controls tab (both in the background: from the next start). zaprompts --install draws them into textures/prompts.new
 // and swaps that in whole itself (a game never sees half a set). Up to 3 tries per stamp (textures/prompts.tried):
 // failing leaves the game's own icons. Log: textures/prompts.log.
-#define PROMPTS_VERSION "3"
+#define PROMPTS_VERSION "4-xbox1"
 static std::atomic<bool> g_prompts_busy{false};
 static PlatProc g_prompts_proc;  // (the one left running: a newer rebind ends it and starts over)
 static std::string prompts_stamp(void) {
@@ -677,6 +678,20 @@ static std::string prompts_stamp(void) {
     };
     mix(g_bind_pad, sizeof g_bind_pad);
     mix(g_bind_key, sizeof g_bind_key);
+    // An imported/replaced game must regenerate its private resources too, even
+    // when bindings did not change. Runtime still verifies the actual source bytes.
+    for (const char *name : {"/romfs.bin", "/exefs/main"}) {
+        struct stat sb;
+        uint64_t identity[2] = {0, 0};
+        if (!stat((g_root + name).c_str(), &sb)) identity[0] = sb.st_size, identity[1] = sb.st_mtime;
+        mix(identity, sizeof identity);
+    }
+    uint8_t build_id[32] = {0};  // NSO build ID: updates with preserved size/mtime must not reuse old assets
+    if (FILE *f = fopen((g_root + "/exefs/main").c_str(), "rb")) {
+        if (!fseek(f, 0x40, SEEK_SET)) fread(build_id, 1, sizeof build_id, f);
+        fclose(f);
+    }
+    mix(build_id, sizeof build_id);
     char s[48];
     snprintf(s, sizeof s, "%s-%016llx", PROMPTS_VERSION, (unsigned long long)h);
     return s;
@@ -687,10 +702,27 @@ static bool prompts_marked(const char *path, int *tries = NULL) {
     if (!f) return false;
     char v[48] = "";
     int n = 0;
-    bool ok = fscanf(f, "%47s %d", v, &n) >= 1 && prompts_stamp() == v;
+    bool ok = fscanf(f, "%47s %d", v, &n) >= (tries ? 2 : 1) && prompts_stamp() == v;
     fclose(f);
     if (tries) *tries = ok ? n : 0;
     return ok;
+}
+// A negative preparation is remembered only for this game/helper stamp. An
+// unsupported layout must not make every launch redraw all controller icons.
+static bool xbox_layout_wanted(void) {
+    int ready = 0;
+    if (!prompts_marked(XBOX_ATTACK_STATUS, &ready)) return true;
+    if (!ready) return false;
+    if (ready != 1) return true;
+    uint8_t bytes[XBOX_ATTACK_METADATA_SIZE];
+    XboxAttackResource xr;
+    FILE *f = fopen(XBOX_ATTACK_METADATA, "rb");
+    if (!f) return true;
+    bool ok = fread(bytes, 1, sizeof bytes, f) == sizeof bytes && fgetc(f) == EOF && !ferror(f) &&
+              xbox_attack_resource(bytes, sizeof bytes, &xr);
+    fclose(f);
+    struct stat sb;
+    return !ok || stat(XBOX_ATTACK_HOST, &sb) || (uint64_t)sb.st_size != xr.arc_size;
 }
 // (3 tries: a game closed before zaprompts is done may end it with the process)
 static bool prompts_wanted(void) {
@@ -698,7 +730,8 @@ static bool prompts_wanted(void) {
     int tries = 0;
     prompts_marked("textures/prompts.tried", &tries);
     return rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool) &&
-           file_exists(g_root + "/romfs.bin") && !prompts_marked("textures/prompts/.made") && tries < 3;
+           file_exists(g_root + "/romfs.bin") &&
+           (!prompts_marked("textures/prompts/.made") || xbox_layout_wanted()) && tries < 3;
 }
 // wait: until made (the setup), else started and left running (a boot, a rebind)
 static bool make_prompts(bool wait) {
@@ -719,7 +752,7 @@ static bool make_prompts(bool wait) {
     const char *ini = getenv("LARECOMP_SETTINGS");  // (as runtime/settings.c: the bindings the icons name)
     if (!ini || !*ini) ini = "larecomp.ini";
     const char *argv[] = {tool, "--romfs", romfs.c_str(), "--settings", ini, "--mods", "mods", "--out", "textures/prompts",
-                          "--install", stamp.c_str(), NULL};
+                          "--install", stamp.c_str(), "--xbox-attack-layout", NULL};
     PlatProc p = plat_spawn(argv, "textures/prompts.log", false);
     if (!wait || !p) {
         fprintf(stderr, "[launcher] button icons: %s\n", p ? "being made (zaprompts, textures/prompts.log)" : "zaprompts didn't start");
@@ -729,15 +762,28 @@ static bool make_prompts(bool wait) {
     }
     int r = plat_proc_wait(p, true);
     fprintf(stderr, "[launcher] button icons: %s (zaprompts exit %d; textures/prompts.log)\n", r == 0 ? "made" : "not made", r);
+    if (xbox_layout_wanted()) fprintf(stderr, "[launcher] Xbox battle layout not prepared (textures/prompts.log)\n");
     g_prompts_busy = false;
     return r == 0;
+}
+// PLAY can be clicked while the background helper is still preparing an updated
+// install. Consume that process before mounting RomFS; never wait on the GPU.
+static void xbox_layout_before_play(void) {
+    if (!g_settings.xbox_attack_layout || !xbox_layout_wanted()) return;
+    if (g_prompts_proc) {
+        PlatProc p = g_prompts_proc;
+        g_prompts_proc = 0;
+        plat_proc_wait(p, true);
+    }
+    if (prompts_wanted()) make_prompts(true);
 }
 // runtime/main.c, a set-up copy booting straight into the game: the icons made in the background if they never were,
 // or were made for other bindings
 extern "C" void launcher_prompts_kick(const char *root) {
     g_root = root;
     settings_load();  // (the bindings: the boot loads them later, runtime/main.c boot)
-    if (prompts_wanted()) make_prompts(false);
+    if (g_settings.xbox_attack_layout && xbox_layout_wanted()) xbox_layout_before_play();
+    else if (prompts_wanted()) make_prompts(false);
 }
 // runtime/ui/controls_ui.mm, a binding changed (larecomp.ini saved): the icons made again for it, from the next start
 extern "C" void launcher_prompts_refresh(void) {
@@ -3078,6 +3124,7 @@ extern "C" void launcher_run(const char *root) {
     }
     // play: hand the window to the game
     settings_save();
+    xbox_layout_before_play();
 #ifdef __APPLE__
     ImGui_ImplMetal_Shutdown();
 #else

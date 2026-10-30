@@ -7,8 +7,11 @@
 #include "xbox_attack_resource.h"
 
 #define XBOX_ATTACK_VIRTUAL "ui/data/btl_app/btl_app_waza_00.arc"
-#define XBOX_ATTACK_ROOT "mods/_XboxAttackLayout/romfs"
+#define XBOX_ATTACK_BASE "mods/_XboxAttackLayout"
+#define XBOX_ATTACK_ROOT XBOX_ATTACK_BASE "/romfs"
 #define XBOX_ATTACK_HOST XBOX_ATTACK_ROOT "/" XBOX_ATTACK_VIRTUAL
+#define XBOX_ATTACK_METADATA XBOX_ATTACK_BASE "/resource.bin"
+#define XBOX_ATTACK_STATUS "mods/.XboxAttackLayout.prepared"
 
 static uint64_t xbox_attack_fnv(const uint8_t *data, size_t size) {
     uint64_t h = UINT64_C(0xcbf29ce484222645);
@@ -37,20 +40,21 @@ static bool xbox_attack_mapping(const int16_t pad[4], uint8_t visual[4]) {
 
 // Fail closed before changing any byte: exact supported resource and four
 // distinct face bindings only. A mismatch leaves both resource and input intact.
-static bool xbox_attack_relabel(uint8_t *data, size_t size, const int16_t pad[4], const char **why) {
+static bool xbox_attack_relabel(uint8_t *data, size_t size, const int16_t pad[4],
+                                const XboxAttackResource *resource, const char **why) {
     uint8_t visual[4];
     if (!xbox_attack_mapping(pad, visual)) { *why = "bindings must use four distinct face buttons"; return false; }
-    if (size != XBOX_ATTACK_ARC_SIZE || xbox_attack_fnv(data, size) != XBOX_ATTACK_ARC_FNV) {
+    if (size != resource->arc_size || xbox_attack_fnv(data, size) != resource->arc_fnv) {
         *why = "unsupported battle resource"; return false;
     }
     for (unsigned i = 0; i < 4; i++) {
-        size_t at = xbox_attack_digits[i];
+        uint64_t at = resource->digits[i];
         if (at < 8 || at >= size || size-at < 2 ||
             memcmp(data+at-8, "L_waza_0", 8) || data[at] != '0'+i || data[at+1]) {
             *why = "pane identity mismatch"; return false;
         }
     }
-    for (unsigned i = 0; i < 4; i++) data[xbox_attack_digits[i]] = (uint8_t)('0'+visual[i]);
+    for (unsigned i = 0; i < 4; i++) data[resource->digits[i]] = (uint8_t)('0'+visual[i]);
     *why = NULL;
     return true;
 }

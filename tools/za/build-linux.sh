@@ -67,6 +67,18 @@ if [ ! -f tools/venv/.ok ]; then
     touch tools/venv/.ok
 fi
 [ -f generated/main/main_build_id.txt ] || make gen
-# (generated objects take minutes each at -O1 for a few giant functions; JOBS lower on machines with little RAM)
+# Giant functions at -O0 first, as the start screen's build does (runtime/gamebuild.c cold_giant: a file of one
+# function with over 1000 labels, unless it is in HOT_GIANTS, read from there): clang -O1 takes up to an hour on some.
+# make then finds those objects up to date. JOBS lower on machines with little RAM (each clang can take ~1 GB).
+FLAGS=$(make -s --eval='pv: ; @echo $(GENFLAGS)' GENOPT="$GENOPT" pv)
+HOT=$(sed -n '/HOT_GIANTS\[\] = {/,/};/p' runtime/gamebuild.c | grep -o 'f_[0-9a-f]*' | sort -u)
+giants=()
+for f in generated/main/*.c generated/sdk/*.c; do
+    name=$(awk '/^void f_.*\(Cpu \*c\) \{/ {n++; s=$2} /^L_/ {l++} END {if (n == 1 && l > 1000) {sub(/\(.*/, "", s); print s}}' "$f")
+    [ -n "$name" ] && ! grep -qx "$name" <<<"$HOT" && giants+=("$f")
+done
+echo "build-linux: ${#giants[@]} giant functions at -O0"
+printf '%s\n' "${giants[@]}" | xargs -P "$JOBS" -I{} sh -c 'o="$1/obj/${2#generated/}"; o="${o%.c}.o"; [ "$o" -nt "$2" ] ||
+    { mkdir -p "$(dirname "$o")" && clang $3 -O0 -c "$2" -o "$o"; }' _ "$B" {} "$FLAGS"
 make -j"$JOBS" B="$B" DEPS="$P" SHADERC=-lshaderc_shared GENOPT="$GENOPT" "$B/lasgame.so"
 echo "build-linux: $B/lasgame.so"

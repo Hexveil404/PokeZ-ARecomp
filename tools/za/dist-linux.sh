@@ -20,6 +20,7 @@ APPDIR=$L/za-AppDir
 VERSION=$(sed -n 's/^#define LARECOMP_VERSION "\(.*\)"/\1/p' runtime/ui/launcher.mm)
 OUT="build/dist/ZA Recomp-$VERSION-linux-$ARCH.AppImage"
 ZAIMPORT=${ZAIMPORT:-1}
+PY=${PYTHON:-python3}  # (the helpers' venvs; e.g. PYTHON=python3.12 in tools/linux/Containerfile's image)
 
 for t in patchelf llvm-strip readelf; do
     command -v $t >/dev/null || { echo "dist-linux: $t missing (sudo apt install patchelf llvm)"; exit 1; }
@@ -36,7 +37,7 @@ tools/za/build-linux.sh
 # 3. the generator helper (its own venv: only what gen.py needs)
 GV=$L/gen-venv
 if [ ! -f "$GV/.ok" ]; then
-    rm -rf "$GV" && python3 -m venv "$GV"
+    rm -rf "$GV" && "$PY" -m venv "$GV"
     "$GV/bin/pip" install -q capstone==5.0.9 unicorn==2.1.4 lz4==4.4.5 pyinstaller==6.22.3
     touch "$GV/.ok"
 fi
@@ -49,7 +50,7 @@ g++ -O2 -shared -fPIC -Itools/za/ooz_posix -include tools/za/ooz_posix/ooz_posix
     -Dmain=ooz_main $O/kraken.cpp $O/bitknit.cpp $O/lzna.cpp $O/ooz_lib.cpp -o build/ooz/libooz.so
 PV=$L/prompts-venv
 if [ ! -f "$PV/.ok" ]; then
-    rm -rf "$PV" && python3 -m venv "$PV"
+    rm -rf "$PV" && "$PY" -m venv "$PV"
     "$PV/bin/pip" install -q pillow==13.0.0 numpy==2.5.4 fonttools==4.67.0 cffsubr==0.4.0 texture2ddecoder==1.0.6 \
         pyinstaller==6.22.3
     touch "$PV/.ok"

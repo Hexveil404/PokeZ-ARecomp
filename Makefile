@@ -80,8 +80,9 @@ OSFLAGS  := -Wno-format  # (%llx for uint64_t, which is unsigned long here: the 
 # shaderc as the system's pkg-config file names it (Arch / Fedora / AOSC ship only libshaderc_shared, issue #22);
 # without one -lshaderc (Debian / Ubuntu's libshaderc.so). SHADERC=... overrides it.
 SHADERC  ?= $(shell pkg-config --libs shaderc 2>/dev/null || echo -lshaderc)
-# -rdynamic: crash backtraces name host functions (runtime/platform/linux.c)
-LDFLAGS  := -fuse-ld=lld -rdynamic $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
+# -rdynamic: crash backtraces name host functions (runtime/platform/linux.c). DEPS' rpath: a dev build runs without
+# LD_LIBRARY_PATH (the AppImage replaces it with its own: tools/linux/package.sh patchelf)
+LDFLAGS  := -fuse-ld=lld -rdynamic $(if $(DEPS),-L$(DEPS)/lib -Wl$(comma)-rpath$(comma)$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
             -lvulkan $(SHADERC) -lpthread -ldl -lm
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
@@ -174,6 +175,11 @@ $(B)/inc/fsr2_shaders.inc: $(FSR2_SHADERS)
 $(B)/rt/nvn/vulkan/fsr2_shaders.o: $(B)/inc/fsr2_shaders.inc
 $(B)/rt/nvn/vulkan/fsr2_shaders.o: CXXFLAGS += -I$(B)/inc
 FSR2_OBJ := $(B)/fsr2/ffx_fsr2.o $(B)/fsr2/ffx_assert.o $(B)/fsr2/vk/ffx_fsr2_vk.o
+# (FFX_GCC: FidelityFX's own switch for an empty FFX_API - without it every API function is __declspec(dllexport),
+# which only Windows' clang accepts; Linux: "'__declspec' attributes are not enabled")
+ifeq ($(PLATFORM),linux)
+$(FSR2_OBJ) $(B)/rt/nvn/vulkan/fsr2.o $(B)/rt/nvn/vulkan/fsr2_shaders.o: CXXFLAGS += -DFFX_GCC
+endif
 $(B)/fsr2/%.o: third_party/fsr2/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -Wno-absolute-value -c $< -o $@

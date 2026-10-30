@@ -1,0 +1,37 @@
+# ZA Recomp's Linux AppImage (tools/za/dist-linux.sh) built in Ubuntu 22.04 - tools/linux/Containerfile's image, the
+# one LAS Recomp's AppImages use - so it runs on glibc 2.35+ distributions (Ubuntu 22.04+, Mint 21+, Debian 12, Fedora,
+# Arch...), not only on the builder's. Started by hand (Actions > Linux AppImage > Run workflow, once the file is on the
+# default branch) or by a push to ci/linux-appimage; the AppImage is the run's artifact. No game code or game files: the start screen builds them from the player's own dump.
+name: Linux AppImage
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/linux-appimage]
+
+jobs:
+  appimage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build environment (Ubuntu 22.04, clang 21, Python 3.12)
+        run: docker build -t za-linux-build -f tools/linux/Containerfile tools/linux
+
+      - name: AppImage
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src za-linux-build bash -euo pipefail -c '
+            apt-get update
+            apt-get install -y --no-install-recommends dotnet-sdk-8.0 python3-venv
+            git config --global --add safe.directory /src
+            PYTHON=python3.12 tools/za/dist-linux.sh
+            # the newest glibc symbol it needs: what the AppImage runs on
+            find build/linux/x86_64/za-AppDir -type f \( -name "*.so*" -o -perm -u+x \) -exec objdump -T {} + 2>/dev/null |
+                grep -o "GLIBC_[0-9.]*" | sort -uV | tail -1'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ZA-Recomp-linux-x86_64
+          path: build/dist/*.AppImage
+          if-no-files-found: error

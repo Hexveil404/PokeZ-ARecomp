@@ -31,7 +31,7 @@ para *The Legend of Zelda: Link's Awakening*.
 - [Imagens](#imagens)
 - [Recursos](#recursos)
 - [Requisitos](#requisitos)
-- [Instalação](#instalação) ([DLC Mega Dimension](#dlc-mega-dimension))
+- [Instalação](#instalação) ([DLC Mega Dimension](#dlc-mega-dimension), [Linux (experimental)](#linux-experimental))
 - [Controles](#controles)
 - [Saves](#saves)
 - [Mods](#mods)
@@ -79,14 +79,15 @@ para *The Legend of Zelda: Link's Awakening*.
 
 | | |
 |---|---|
-| **Sistema** | Windows 10 (1903 ou mais novo) ou Windows 11, 64 bits |
+| **Sistema** | Windows 10 (1903 ou mais novo) ou Windows 11, 64 bits. Linux x86-64: experimental, veja [Linux](#linux-experimental) |
 | **CPU** | x86-64 com AVX2 (2013 ou mais nova). CPUs mais antigas com SSE4.2 também funcionam, mas compilam e rodam mais devagar |
 | **GPU** | Vulkan 1.2 ou mais novo (1.3 recomendado), com driver atualizado |
 | **RAM** | 8 GB (16 GB recomendado) |
 | **Disco** | Cerca de 12 GB livres |
 | **Jogo** | Pokémon Legends: Z-A **1.0.0, 2.0.0 ou 2.0.2**, com ou sem a DLC *Mega Dimension* |
 
-O Linux ainda não é suportado oficialmente. No Mac, use o [MonZaMac](https://github.com/lucabravi/MonZaMac), do
+O Linux roda nativamente (x86-64, sem Wine nem Proton) em uma versão **experimental**: veja [Linux (experimental)](#linux-experimental).
+No Mac, use o [MonZaMac](https://github.com/lucabravi/MonZaMac), do
 [@lucabravi](https://github.com/lucabravi), um port nativo para macOS baseado neste projeto.
 
 ## Instalação
@@ -118,6 +119,56 @@ A DLC é suportada pelo caminho do **dump** (as pastas extraídas `exefs` / `rom
 
 Já preparou o jogo sem a DLC? Clique em **Trocar pasta do jogo**, escolha a pasta de novo com a DLC junto e prepare de
 novo. Os seus saves e configurações são mantidos.
+
+### Linux (experimental)
+
+O ZA Recomp roda nativamente no Linux x86-64, sem Wine nem Proton. Ainda não há download pronto para Linux: você
+compila uma vez na sua máquina (os scripts fazem tudo) e depois prepara o jogo como no Windows.
+
+**Testado até agora:** Linux Mint 22.3 com GPU integrada Intel UHD e 8 GB de RAM, Pokémon Legends: Z-A 2.0.2. Cutscenes,
+áudio e movimentação funcionam; nessa GPU integrada as cenas 3D rodam a cerca de 15-26 fps (menus a 60). Controles,
+saves, mods, outras GPUs e sessões longas ainda não foram testados - relatos são bem-vindos.
+
+**Precisa de:** uma distribuição 64 bits com glibc 2.35 ou mais nova (Ubuntu 22.04+, Linux Mint 21+, Debian 12, Fedora,
+Arch...), driver Vulkan 1.3 (Mesa ou o da NVIDIA), CPU com AVX2, 8 GB de RAM e cerca de 12 GB livres. Os comandos abaixo
+são para Ubuntu / Linux Mint / Debian; nas outras distribuições os pacotes têm nomes equivalentes (no Debian, o
+`dotnet-sdk-8.0` vem do repositório de pacotes da Microsoft).
+
+1. Instale as ferramentas e bibliotecas de compilação (uma vez):
+
+   ```bash
+   sudo apt install git clang lld cmake ninja-build nasm pkg-config python3-venv curl patchelf dotnet-sdk-8.0 \
+       libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxtst-dev \
+       libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libdrm-dev libgbm-dev \
+       libpulse-dev libasound2-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev libibus-1.0-dev libvulkan-dev
+   ```
+
+2. Baixe o código e gere o AppImage (na primeira vez ele baixa e compila as bibliotecas, o que demora um pouco):
+
+   ```bash
+   git clone https://github.com/Hexveil404/PokeZ-ARecomp.git
+   cd PokeZ-ARecomp
+   tools/za/dist-linux.sh
+   ```
+
+   O resultado é `build/dist/ZA Recomp-<versão>-linux-x86_64.AppImage`. Copie para onde quiser.
+
+3. Abra o AppImage (se precisar, dê `chmod +x` antes). Na tela inicial, escolha a pasta do jogo (`exefs` + `romfs`
+   extraídos, ou os seus `.xci` / `.nsp` com o seu `prod.keys`), clique em **Preparar o jogo** e depois em **Jogar**,
+   como no Windows. Configurações, saves e arquivos do jogo ficam em `~/.local/share/zarecomp`.
+
+Se a preparação pela tela inicial falhar, há um caminho manual, que é o testado de ponta a ponta até agora. Troque os
+caminhos pelos dos seus arquivos:
+
+```bash
+tools/za/build-linux.sh                       # o programa
+build/linux/x86_64/zaimport/zaimport ~/caminho/prod.keys extracted ~/caminho/base.nsp ~/caminho/update.nsp
+GAME=1 JOBS=3 tools/za/build-linux.sh         # compila o código do jogo: cerca de 20 minutos, uma vez
+build/linux/x86_64/za/lasrecomp extracted --play
+```
+
+Numa GPU integrada, baixe a **Resolução** no menu F1 para o jogo rodar mais liso. Mais detalhes, outras opções e
+problemas conhecidos: [docs/linux.md](docs/linux.md#za-recomp-on-linux-native-x86-64).
 
 ## Controles
 

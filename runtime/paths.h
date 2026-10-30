@@ -10,7 +10,8 @@
 //      app); asks to try again / use the default when it's missing (a drive not connected)
 //   4. macOS: ~/Library/Application Support/com.peiikai.lasrecomp (the .app bundle itself is never written to)
 //      Windows: the folder of the .exe (portable, no installer); refuses to start, with a message, if not writable
-//      Linux: $XDG_DATA_HOME/lasrecomp (~/.local/share/lasrecomp)
+//      Linux: $XDG_DATA_HOME/zarecomp (~/.local/share/zarecomp; Pokémon Z-A: not LAS Recomp's lasrecomp/, its saves
+//      and larecomp.ini would be shared)
 //      LARECOMP_DATA_HOME (tests) stands in for it.
 //
 // Resources: files that ship with the app (helper programs, the window icon) - next to the executable (the

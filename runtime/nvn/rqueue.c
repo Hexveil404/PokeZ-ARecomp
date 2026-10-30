@@ -221,7 +221,18 @@ static void lock_timed(void) {  // (LARECOMP_LOG_PACE: the game thread's time wa
 static uint64_t enqueue(const Item *it, const uint64_t *fences, int nfences) {
     lock_timed();
     uint64_t t0 = 0;
-    if (!has_room(0)) { t0 = plat_now_ns(); wait_until(&cv_done, has_room, 0, false, "queue full"); }
+    // the texture pool registrations made since the last item, first (objects.c register_texture: in queue order)
+    extern void *nvn_pool_regs_take(void);
+    extern void nvn_pool_regs_apply(void *arg);
+    void *regs = nvn_pool_regs_take();
+    if (regs) {
+        if (!has_room(0)) { t0 = plat_now_ns(); wait_until(&cv_done, has_room, 0, false, "queue full"); }
+        uint64_t rq = ++q_enq;
+        items[rq % RQ_CAP] = (Item){.kind = IT_CALL, .fn = nvn_pool_regs_apply, .data = regs};
+        kind_of[rq % RQ_HIST] = IT_CALL;
+        enq_ns[rq % RQ_HIST] = plat_now_ns();
+    }
+    if (!has_room(0)) { if (!t0) t0 = plat_now_ns(); wait_until(&cv_done, has_room, 0, false, "queue full"); }
     if (it->kind == IT_PRESENT) {
         if (!t0) t0 = plat_now_ns();
         wait_until(&cv_done, no_present, 0, true, "present (the previous one to finish)");

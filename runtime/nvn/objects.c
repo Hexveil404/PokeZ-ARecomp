@@ -706,8 +706,8 @@ NVN(nvnSamplerGetDebugID) { RET(A(0)); }
 NvnDescPool *g_texture_pools[64], *g_sampler_pools[64];
 // Texture pool registrations (the game's threads) and the emptying of a finalized texture's slots (the render thread
 // when it's on: nvn_texture_destroy) both change entries and pool_refs: this lock keeps them from crossing. (Reads by
-// the translation take no lock: the game doesn't change a slot that queued work still uses before its fence, as on
-// the Switch, and the emptying runs on the translating thread itself.)
+// the translation take no lock: with the render thread on, registrations are applied by it in queue order -
+// register_texture - and the emptying runs on the translating thread itself.)
 static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
 RT_ON_RESET(desc_pools_reset) { memset(g_texture_pools, 0, sizeof g_texture_pools); memset(g_sampler_pools, 0, sizeof g_sampler_pools); }
 
@@ -735,27 +735,72 @@ NVN(nvnTexturePoolSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && EN
 NVN(nvnTexturePoolGetMemoryPool) { RET(G(uint64_t, A(0), 8)); }
 NVN(nvnTexturePoolGetMemoryOffset) { RET(G(uint64_t, A(0), 16)); }
 NVN(nvnTexturePoolGetSize) { RET(G(uint32_t, A(0), 24)); }
+// A registration takes effect in render-queue order: queued with the next item (rq_submit, a present, a texture's
+// destruction...), so the lists submitted before it are translated with the slot as it was. The render thread runs
+// about a frame behind the game, and Pokémon Z-A's UI registers another texture in the same slot from one frame to
+// the next (a layout's texture pattern animation: the battle moves' type symbols all showed the first one, Normal's,
+// whenever the translation saw the next frame's registration). LARECOMP_POOL_IMMEDIATE=1: applied at once, as before.
+typedef struct { NvnDescPool *d; int id; NvnTexture *tex; bool has_view; NvnTextureView view; } PoolReg;
+typedef struct { int n, cap; PoolReg r[]; } PoolRegs;
+static PoolRegs *g_regs;  // (g_pool_lock) not queued yet
+RT_ON_RESET(pool_regs_reset) { free(g_regs); g_regs = NULL; }
+
+static void pool_reg_apply(const PoolReg *r) {  // (g_pool_lock held)
+    NvnTexEntry *e = &((NvnTexEntry *)r->d->entries)[r->id];
+    if (e->tex && e->tex->pool_refs) e->tex->pool_refs--;
+    e->tex = r->tex;
+    if (e->tex) e->tex->pool_refs++;
+    e->dead_format = 0;
+    e->has_view = r->has_view;
+    if (r->has_view) e->view = r->view;
+}
+// rqueue.c enqueue: the registrations made so far, as one item ahead of the one being queued (NULL: none)
+void *nvn_pool_regs_take(void) {
+    pthread_mutex_lock(&g_pool_lock);
+    PoolRegs *b = g_regs;
+    g_regs = NULL;
+    pthread_mutex_unlock(&g_pool_lock);
+    return b;
+}
+void nvn_pool_regs_apply(void *arg) {  // (the render thread, in queue order)
+    PoolRegs *b = arg;
+    pthread_mutex_lock(&g_pool_lock);
+    for (int i = 0; i < b->n; i++) pool_reg_apply(&b->r[i]);
+    pthread_mutex_unlock(&g_pool_lock);
+    free(b);
+}
+
 static void register_texture(Cpu *c) {
     NvnDescPool *d = HOST(NvnDescPool, A(0));
     int id = (int)A(1);
     if (id < 0 || id >= d->count) return;
-    NvnTexEntry *e = &((NvnTexEntry *)d->entries)[id];
+    PoolReg r = {.d = d, .id = id, .tex = HOST(NvnTexture, A(2)), .has_view = A(3) != 0};
+    if (r.has_view) memcpy(&r.view, AP(3), sizeof r.view);
+    if (r.has_view) nvn_texture_note_view(r.tex, &r.view);
+    static int immediate = -1;
+    if (immediate < 0) immediate = ENV("LARECOMP_POOL_IMMEDIATE") != NULL;
     pthread_mutex_lock(&g_pool_lock);
-    if (e->tex && e->tex->pool_refs) e->tex->pool_refs--;
-    e->tex = HOST(NvnTexture, A(2));
-    if (e->tex) e->tex->pool_refs++;
+    if (immediate || !rq_on()) pool_reg_apply(&r);
+    else {
+        if (!g_regs || g_regs->n == g_regs->cap) {
+            int cap = g_regs ? g_regs->cap * 2 : 64;
+            PoolRegs *b = realloc(g_regs, sizeof *b + sizeof b->r[0] * (size_t)cap);
+            if (!b) FATAL("texture pool registrations: out of memory\n");
+            if (!g_regs) b->n = 0;
+            b->cap = cap;
+            g_regs = b;
+        }
+        g_regs->r[g_regs->n++] = r;
+    }
+    pthread_mutex_unlock(&g_pool_lock);
     // Its data uploaded ahead of its first draw, on the render thread (textures.c backend_prefetch_texture). Not render
     // targets (NVN flags display 1, compressible 8, linear render target 0x40: the GPU fills those). The image flag (4)
     // is on nearly all of Pokémon Z-A's textures: kept - a GPU write after the upload replaces it, one before skips it.
+    // (Queued after the lock: enqueue takes the registrations above with it.)
     static int prefetch = -1;
     // (F1 > Compatibility)
     if (prefetch < 0) prefetch = gpu_feature_on(GPU_TEX_PREFETCH, "LARECOMP_TEX_PREFETCH");
-    if (prefetch && e->tex && rq_on() && !(e->tex->flags & (0x1 | 0x8 | 0x40))) rq_prefetch_texture(e->tex);
-    e->dead_format = 0;
-    e->has_view = A(3) != 0;
-    if (e->has_view) memcpy(&e->view, AP(3), sizeof e->view);
-    if (e->has_view) nvn_texture_note_view(e->tex, &e->view);
-    pthread_mutex_unlock(&g_pool_lock);
+    if (prefetch && r.tex && rq_on() && !(r.tex->flags & (0x1 | 0x8 | 0x40))) rq_prefetch_texture(r.tex);
 }
 
 // A finalized texture can stay registered: the game frees a room's textures on a level / room change and leaves

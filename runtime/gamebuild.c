@@ -428,8 +428,16 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         return false;
     }
     if (t.zig) {  // keep its caches with this installation; the explicit Clear action removes them too
-        char zc[1200];
-        snprintf(zc, sizeof zc, "%s" SEP "zig-cache", work);
+        // (an absolute path, made here: zig under Wine / Proton couldn't open the relative one - "unable to open
+        // global cache directory: Unexpected" on the Steam Deck, issue #79)
+        char zc[1200], rel[1200];
+        snprintf(rel, sizeof rel, "%s" SEP "zig-cache", work);
+        mkdir(rel, 0755);
+#ifdef _WIN32
+        if (!_fullpath(zc, rel, sizeof zc)) strlcpy(zc, rel, sizeof zc);
+#else
+        if (!realpath(rel, zc)) strlcpy(zc, rel, sizeof zc);
+#endif
 #ifdef _WIN32
         _putenv_s("ZIG_GLOBAL_CACHE_DIR", zc);
         _putenv_s("ZIG_LOCAL_CACHE_DIR", zc);

@@ -9,7 +9,8 @@
 #
 # SDL3 3.4, an LGPL FFmpeg, shaderc and the Vulkan / VMA headers come from pinned sources (tools/linux/build_deps.sh,
 # into build/linux/x86_64/deps); the system only provides the compiler and the headers SDL3's backends are built
-# against (X11, Wayland, audio, udev). Those are checked first, with the apt command for what is missing.
+# against (X11, Wayland, audio, udev). Those are checked first, with the apt command for what is missing (PKGCHECK=0
+# skips that: a deps/ prefix already built, e.g. an SDL3 without some backends for a quick test).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ARCH=x86_64
@@ -36,7 +37,7 @@ for m in x11:libx11-dev xext:libxext-dev xrandr:libxrandr-dev xcursor:libxcursor
          dbus-1:libdbus-1-dev libudev:libudev-dev ibus-1.0:libibus-1.0-dev; do
     pkg-config --exists "${m%%:*}" || missing+=("${m#*:}")
 done
-if [ ${#missing[@]} -gt 0 ]; then
+if [ ${#missing[@]} -gt 0 ] && [ "${PKGCHECK:-1}" != 0 ]; then
     echo "build-linux: missing system packages. Install them with:"
     echo "    sudo apt install ${missing[*]}"
     exit 1

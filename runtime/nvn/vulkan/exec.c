@@ -161,6 +161,34 @@ uint64_t vk_completed_seq(void) {
     return v;
 }
 
+// The indirect draws whose parameters the GPU reads in place (draw_indirect), the last IR_N of them - always on, a
+// few KB: a GPU that never finishes a submission (the 10 s stop, #70 #81 #82 #86) or loses the device shows the ones
+// still in flight with their parameters as translated and as they are now, which is what the GPU reads.
+#define IR_N 256  // (a power of two)
+static struct { uint64_t seq, pa, vs; uint32_t rec[5]; } ir_ring[IR_N];
+static unsigned ir_n;
+static void ir_note(uint64_t pa, const uint32_t *p, uint64_t vs) {
+    unsigned i = ir_n++ & (IR_N - 1);
+    ir_ring[i].seq = submit_seq + 1; ir_ring[i].pa = pa; ir_ring[i].vs = vs;
+    memcpy(ir_ring[i].rec, p, sizeof ir_ring[i].rec);
+}
+static void ir_dump(void) {
+    uint64_t done = 0;
+    vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &done);  // (not VK_CHECK: the device may be lost)
+    unsigned lo = ir_n > IR_N ? ir_n - IR_N : 0, n = 0;
+    for (unsigned k = lo; k < ir_n; k++) n += ir_ring[k & (IR_N - 1)].seq > done;
+    LOG("[vk] indirect draws in flight (GPU done up to submission %llu): %u of the last %u\n", (unsigned long long)done, n, ir_n - lo);
+    unsigned skip = n > 48 ? n - 48 : 0;  // (the last 48 of them)
+    for (unsigned k = lo; k < ir_n; k++) {
+        const typeof(ir_ring[0]) *e = &ir_ring[k & (IR_N - 1)];
+        if (e->seq <= done) continue;
+        if (skip) { skip--; continue; }
+        const uint32_t *q = (const uint32_t *)(uintptr_t)e->pa, *w = e->rec;
+        LOG("[vk]   submission %llu vs %llx args %llx: recorded %u %u %u %d %u, now %u %u %u %d %u\n", (unsigned long long)e->seq,
+            (unsigned long long)e->vs, (unsigned long long)e->pa, w[0], w[1], w[2], (int)w[3], w[4], q[0], q[1], q[2], (int)q[3], q[4]);
+    }
+}
+
 // (LARECOMP_VK_PROF) waits on the GPU by cause: the caller names it in wait_why just before waiting
 static __thread const char *wait_why;
 static struct { const char *why; uint64_t ns, n; } wait_tab[12];
@@ -202,11 +230,14 @@ void vk_wait_seq(uint64_t seq) {
     __atomic_fetch_add(&cum_wait, waited, __ATOMIC_RELAXED);
     wait_account(waited);
     // Callers recycle command buffers and allocations after this returns; a timeout is not completion.
-    if (r == VK_TIMEOUT) FATAL("[vk] GPU did not finish submission %llu within 10 s; stopping before reusing in-flight resources\n",
-                              (unsigned long long)seq);
-    else if (r == VK_SUCCESS) cq_resolve_done(seq);  // (the game reads its timing counters after waiting)
+    if (r == VK_TIMEOUT) {
+        ir_dump();
+        FATAL("[vk] GPU did not finish submission %llu within 10 s; stopping before reusing in-flight resources\n",
+              (unsigned long long)seq);
+    } else if (r == VK_SUCCESS) cq_resolve_done(seq);  // (the game reads its timing counters after waiting)
     else {
         extern void vk_devlost_dump(void);
+        ir_dump();
         vk_devlost_dump();
         vk_device_fault_report();
         FATAL("vkWaitSemaphores: %d (device lost)\n", r);
@@ -7174,6 +7205,32 @@ static bool ib_overrun(CmdRec *r, const uint32_t *p, uint64_t pa) {
     stat_skipped_here();
     return true;
 }
+// Parameters no draw can have, in blocks the GPU reads in place (#70 #81 #82 #86: the GPU stopped for 10 s, or the
+// device was lost, where blocks held other data for frames on end - every field near one small number, a base
+// instance in the hundreds of thousands): a count over 4M (ib_overrun leaves those alone), or a base instance whose
+// first element already lies past a per-instance stream's buffer (the instance attributes read far beyond it).
+// Checked as the CPU sees them, as ib_overrun (the base instance is the CPU's; only the instance count is the GPU's),
+// and skipped; LARECOMP_IB_GUARD=0 draws them.
+static bool ind_args_bad(const uint32_t *p, uint64_t pa, bool elements) {
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_IB_GUARD") || atoi(ENV("LARECOMP_IB_GUARD")) != 0;
+    if (!on) return false;
+    uint32_t binst = elements ? p[4] : p[3];
+    const char *why = p[0] > (1u << 22) ? "count over 4M" : NULL;
+    for (int a = 0; a < st.nattrib && !why; a++) {
+        if (!(st.attrib[a] & 0xFF)) continue;
+        uint32_t s = st.attrib[a] >> 8 & 0x1F, off = st.attrib[a] >> 13;
+        if (s >= (uint32_t)st.nstream || !st.stream[s][1] || !st.stream[s][0] || !st.vbuf[s].size) continue;
+        if ((uint64_t)binst * st.stream[s][0] + off + 4 > st.vbuf[s].size) why = "base instance past an instance stream";
+    }
+    if (!why) return false;
+    static int nlog;
+    if (nlog++ < 60)
+        LOG("[ibguard] frame %llu: skipped draw (%s): args %llx = %u %u %u %d %u\n", (unsigned long long)renderer_present_count(),
+            why, (unsigned long long)pa, p[0], p[1], p[2], (int)p[3], elements ? p[4] : 0);
+    stat_skipped_here();
+    return true;
+}
 // Indirect draws: the parameters (GL / Vulkan layout: arrays {count, instances, first, base instance}, elements
 // {count, instances, first index, base vertex, base instance}) read from guest memory when the list runs, each made a
 // direct draw. Arguments: DrawArraysIndirect (mode, indirect), DrawElementsIndirect (mode, index type, index buffer,
@@ -7233,7 +7290,8 @@ static void draw_indirect(CmdRec *r) {
                 LOG("[vk] gpu args %llx: count %u instances %u first %u base %d base inst %u (cpu: %u %u)\n", (unsigned long long)pa,
                     q[0], q[1], q[2], (int)q[3], q[4], p[0], p[1]);
             }
-            if (elements && ib_overrun(r, p, pa)) continue;
+            if (ind_args_bad(p, pa, elements) || (elements && ib_overrun(r, p, pa))) continue;
+            ir_note(pa, p, st.program ? st.program->stages[0].code_addr : 0);
             g_ind_gpu = true; g_ind_off = GM_OFF(pa); g_ind_stride = stride;
             d.x[0] = r->x[0];
             if (elements) {

@@ -1648,6 +1648,7 @@ static void draw_art(ImDrawList *dl, ImVec2 o, ImVec2 ds) {
 
 // ---- first PLAY ever: the aspect ratio question, then how to open the in-game menu
 static bool g_tip_test;  // (LARECOMP_LAUNCHER_SHOT=<frame>:tip / :aspect)
+static bool g_video_test;  // (LARECOMP_LAUNCHER_SHOT=<frame>:video - the recommended video settings question)
 static bool begin_question(const char *id, float s) {
     ImVec2 ds = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowPos(ImVec2(ds.x * 0.5f, ds.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
@@ -1682,6 +1683,57 @@ static bool aspect_prompt(float s) {
         if (pick >= 0) {
             g_settings.aspect = pick;
             g_settings.aspect_asked = true;
+            settings_save();
+            ImGui::CloseCurrentPopup();
+            done = true;
+        }
+        ImGui::EndPopup();
+    }
+    return done;
+}
+// ---- first PLAY with a settings file from before the recommendation: offer this PC's video settings (settings.c
+// settings_video_recommend). Either answer is kept (video_recommended = done): asked once.
+static const char *res_label(int m) {
+    static char b[2][24];
+    static int k;
+    char *o = b[k ^= 1];
+    const char *n = settings_res_name(m);
+    if (!strcmp(n, "match")) snprintf(o, 24, "%s", TR("the window's", "a da janela"));
+    else snprintf(o, 24, "%s", n);
+    return o;
+}
+static bool video_prompt(float s) {
+    bool done = false;
+    if (begin_question("##videorec", s)) {
+        const VideoRec *r = &g_video_rec;
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextUnformatted(TR("Recommended video settings for your PC", "Configurações de vídeo recomendadas para o seu PC"));
+        ImGui::Spacing();
+        if (g_pt)
+            ImGui::Text("%s - perfil %s: resolução %s, %s fps.", r->gpu, video_profile_name(r->profile, true),
+                                res_label(r->res_mode), r->fps60 ? "60" : "30");
+        else
+            ImGui::Text("%s - %s profile: resolution %s, %s fps.", r->gpu, video_profile_name(r->profile, false),
+                                res_label(r->res_mode), r->fps60 ? "60" : "30");
+        if (g_pt)
+            ImGui::TextDisabled("Agora: resolução %s, %s fps. Dá para mudar quando quiser em Configurações.",
+                                res_label(g_settings.res_mode), g_settings.fps60 ? "60" : "30");
+        else
+            ImGui::TextDisabled("Now: resolution %s, %s fps. You can change this any time in Settings.",
+                                res_label(g_settings.res_mode), g_settings.fps60 ? "60" : "30");
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 14 * s));
+        float bw = 300 * s, gap = 20 * s;
+        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - 2 * bw - gap) * 0.5f);
+        int pick = -1;
+        ImGui::SetItemDefaultFocus();
+        if (ImGui::Button(TR("Use the recommended", "Usar as recomendadas"), ImVec2(bw, 44 * s))) pick = 1;
+        ImGui::SameLine(0, gap);
+        if (ImGui::Button(TR("Keep mine", "Manter as minhas"), ImVec2(bw, 44 * s))) pick = 0;
+        if (pick >= 0) {
+            if (pick) settings_video_apply_recommended();
+            fprintf(stderr, "[launcher] recommended video settings %s\n", pick ? "applied" : "declined");
+            g_settings.video_rec = VREC_DONE;
             settings_save();
             ImGui::CloseCurrentPopup();
             done = true;
@@ -2272,6 +2324,7 @@ extern "C" void launcher_run(const char *root) {
         if (pg && !strncmp(pg + 1, "fail", 4)) g_changing_folder = true, set_failure(atoi(pg + 5));  // (the failure messages)
         if (pg && !strncmp(pg + 1, "tip", 3)) g_settings.menu_tip_seen = false, g_tip_test = true;
         if (pg && !strncmp(pg + 1, "aspect", 6)) g_settings.aspect_asked = g_settings.menu_tip_seen = false, g_tip_test = true;
+        if (pg && !strncmp(pg + 1, "video", 5)) g_settings.video_rec = VREC_ASK, g_video_test = true;
     }
 
     static int runs;  // (test: =once - only the first time, so a "Title screen" reboot lands on the start screen)
@@ -2651,12 +2704,23 @@ extern "C" void launcher_run(const char *root) {
                     party_icons_kick();
                     party_panel(dl, x, ty + 68 + 34, w);
                     if (g_play_pending) pressed = true, g_play_pending = false;
-                    if (pressed) {  // first PLAY ever: the aspect ratio question, then how to reach our menu
-                        if (!g_settings.aspect_asked) ImGui::OpenPopup("##aspect");
+                    // (a settings file from before the recommendation that already holds it: nothing to offer)
+                    if (g_settings.video_rec == VREC_ASK && g_video_rec.known && settings_video_matches_recommended())
+                        g_settings.video_rec = VREC_DONE, settings_save();
+                    bool offer_video = g_settings.video_rec == VREC_ASK && g_video_rec.known;
+                    if (pressed) {  // first PLAY ever: this PC's video settings, the aspect ratio question, how to reach our menu
+                        if (offer_video) ImGui::OpenPopup("##videorec");
+                        else if (!g_settings.aspect_asked) ImGui::OpenPopup("##aspect");
                         else if (!g_settings.menu_tip_seen) ImGui::OpenPopup("##menutip");
                         else play = true;
                     }
                     if (g_tip_test) ImGui::OpenPopup(g_settings.aspect_asked ? "##menutip" : "##aspect"), g_tip_test = false;
+                    if (g_video_test && g_video_rec.known) ImGui::OpenPopup("##videorec"), g_video_test = false;
+                    if (video_prompt(s)) {
+                        if (!g_settings.aspect_asked) ImGui::OpenPopup("##aspect");
+                        else if (!g_settings.menu_tip_seen) ImGui::OpenPopup("##menutip");
+                        else play = true;
+                    }
                     if (aspect_prompt(s)) {
                         if (g_settings.menu_tip_seen) play = true;
                         else ImGui::OpenPopup("##menutip");

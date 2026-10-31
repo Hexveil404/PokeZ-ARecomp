@@ -1,4 +1,5 @@
 #include "settings.h"
+#include <SDL3/SDL.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -140,6 +141,8 @@ static const char *res_name(int m) {
     return m == RES_X15 ? "1.5x" : m == RES_DYNAMIC ? "dynamic" : m == RES_Q75 ? "75%" : m == RES_Q50 ? "50%" : m == RES_Q25 ? "25%" : "match";
 }
 
+const char *settings_res_name(int m) { return res_name(m); }  // ("1.5x", "75%", "match"...: the ini's words)
+
 void settings_resolve_defaults(bool integrated) {
     const char *e = getenv("LARECOMP_INTEGRATED");
     if (e && *e) integrated = atoi(e) != 0;
@@ -154,6 +157,93 @@ void settings_resolve_defaults(bool integrated) {
         g_settings.antialias == AA_SMAA ? "smaa" : "off");
 }
 
+// ---- recommended video settings (settings.h VideoRec)
+// Players with a modest PC started at the release's 1.5x and 60 fps and got a slow 30 fps game. The profile comes from
+// the GPU first (integrated or dedicated, video memory, the model number in its name), then the CPU's threads (the game
+// code's speed is what 60 fps needs) and the RAM (the game takes 6-8 GB) can only lower it. Light: 75% of the display,
+// 30 fps, plain texture filtering; Medium: 1x (the Switch's 1080p), 30 fps; High: 1x, 60 fps; Ultra: 1.5x, 60 fps.
+// LARECOMP_VIDEO_PROFILE=light/medium/high/ultra: that profile (tests).
+VideoRec g_video_rec;
+
+const char *video_profile_name(int profile, bool pt) {
+    static const char *const en[VPROF_N] = {"Light", "Medium", "High", "Ultra"}, *const ptn[VPROF_N] = {"Leve", "Médio", "Alto", "Ultra"};
+    return profile >= 0 && profile < VPROF_N ? (pt ? ptn : en)[profile] : "?";
+}
+
+// The model number after a family name in the GPU's name ("GeForce RTX 3060 Ti" + "RTX " -> 3060), 0 if none
+static int model_after(const char *name, const char *family) {
+    const char *p = strstr(name, family);
+    if (!p) return 0;
+    p += strlen(family);
+    while (*p == ' ') p++;
+    return isdigit((unsigned char)*p) ? atoi(p) : 0;
+}
+
+static int gpu_profile(unsigned vendor, bool integrated, uint64_t vram, const char *name) {
+    uint64_t gb = (vram + (512ull << 20)) >> 30;
+    if (integrated || gb < 4) return VPROF_LIGHT;
+    int m;
+    if (vendor == 0x10DE) {  // NVIDIA
+        if ((m = model_after(name, "RTX "))) {
+            int gen = m / 100, tier = m % 100;  // 3060 -> 30, 60
+            if (gen >= 30 && tier >= 60 && gb >= 8) return VPROF_ULTRA;
+            return gb >= 6 ? VPROF_HIGH : VPROF_MEDIUM;  // (RTX 20, xx50, 6 GB cards)
+        }
+        if (model_after(name, "GTX ")) return VPROF_MEDIUM;  // (GTX 10 / 16)
+    } else if (vendor == 0x1002) {  // AMD
+        if ((m = model_after(name, "RX "))) {
+            if (m >= 6000 && m % 1000 >= 600 && gb >= 8) return VPROF_ULTRA;  // (RX 6600+, 7600+, 9060+)
+            if (m < 1000) return VPROF_MEDIUM;  // (RX 400 / 500 / Vega)
+            return gb >= 6 ? VPROF_HIGH : VPROF_MEDIUM;
+        }
+    }
+    return gb >= 6 ? VPROF_HIGH : VPROF_MEDIUM;  // (other dedicated GPUs: Intel Arc, unknown names)
+}
+
+void settings_video_recommend(unsigned vendor, bool integrated, uint64_t vram, const char *gpu_name) {
+    // (the settings file read first: on Linux a game started with --play makes its window before the boot reads it,
+    // and the defaults' "auto" would have been applied and saved over the player's own file)
+    settings_load();
+    int threads = SDL_GetNumLogicalCPUCores(), ram_gb = (SDL_GetSystemRAM() + 512) / 1024;
+    int p = gpu_profile(vendor, integrated, vram, gpu_name ? gpu_name : "");
+    if (threads < 8 && p > VPROF_MEDIUM) p = VPROF_MEDIUM;
+    if (threads < 6 || ram_gb < 12) p = VPROF_LIGHT;
+    else if (ram_gb < 16 && p > VPROF_HIGH) p = VPROF_HIGH;
+    const char *e = getenv("LARECOMP_VIDEO_PROFILE");
+    if (e && *e)
+        for (int i = 0; i < VPROF_N; i++)
+            if (!strcasecmp(e, video_profile_name(i, false))) p = i;
+    VideoRec *r = &g_video_rec;
+    r->profile = p;
+    r->res_mode = p == VPROF_LIGHT ? RES_Q75 : p == VPROF_ULTRA ? RES_X15 : 1;
+    r->fps60 = p >= VPROF_HIGH;
+    r->aniso16 = p != VPROF_LIGHT;
+    snprintf(r->gpu, sizeof r->gpu, "%s", gpu_name ? gpu_name : "");
+    r->known = true;
+    LOG("[settings] recommended video: %s (%s, %llu GB video memory, %d threads, %d GB RAM): resolution %s, %s fps%s\n",
+        video_profile_name(p, false), r->gpu, (unsigned long long)((vram + (512ull << 20)) >> 30), threads, ram_gb,
+        res_name(r->res_mode), r->fps60 ? "60" : "30", g_settings.video_rec == VREC_AUTO ? " - applied (first start)" :
+        g_settings.video_rec == VREC_ASK ? " - offered on the start screen" : "");
+    if (g_settings.video_rec == VREC_AUTO) {  // (the release's settings file: this PC's profile from the first start)
+        settings_video_apply_recommended();
+        g_settings.video_rec = VREC_DONE;
+        settings_save();
+    }
+}
+
+void settings_video_apply_recommended(void) {
+    const VideoRec *r = &g_video_rec;
+    if (!r->known) return;
+    g_settings.res_mode = r->res_mode, g_settings.res_auto = false;
+    g_settings.fps60 = r->fps60;
+    g_settings.aniso16 = r->aniso16;
+}
+
+bool settings_video_matches_recommended(void) {
+    const VideoRec *r = &g_video_rec;
+    return r->known && g_settings.res_mode == r->res_mode && g_settings.fps60 == r->fps60 && g_settings.aniso16 == r->aniso16;
+}
+
 void settings_load(void) {
     static bool loaded;
     if (loaded) return;
@@ -161,7 +251,7 @@ void settings_load(void) {
     FILE *f = fopen(SETTINGS_FILE, "r");
     if (!f) return;
     char line[1200];
-    bool tip_key = false, aspect_key = false;
+    bool tip_key = false, aspect_key = false, video_key = false;
     while (fgets(line, sizeof line, f)) {
         line[strcspn(line, "\r\n")] = 0;
         char key[64];
@@ -259,6 +349,8 @@ void settings_load(void) {
         else if (!strcmp(key, "tracker_filters")) g_settings.tracker_filters = atoi(val);
         else if (!strcmp(key, "menu_tip_seen")) g_settings.menu_tip_seen = atoi(val) != 0, tip_key = true;
         else if (!strcmp(key, "aspect_asked")) g_settings.aspect_asked = atoi(val) != 0, aspect_key = true;
+        else if (!strcmp(key, "video_recommended"))
+            g_settings.video_rec = !strcmp(val, "auto") ? VREC_AUTO : !strcmp(val, "done") ? VREC_DONE : VREC_ASK, video_key = true;
         else if (!strcmp(key, "onedrive_kept")) g_settings.onedrive_kept = atoi(val) != 0;
         else if (!strcmp(key, "chaos_letters"))
             g_settings.chaos_letters = !strcmp(val, "off") ? CHAOS_LETTERS_OFF : !strcmp(val, "explored") ? CHAOS_LETTERS_EXPLORED : CHAOS_LETTERS_MAP;
@@ -296,6 +388,7 @@ void settings_load(void) {
     fclose(f);
     if (!tip_key) g_settings.menu_tip_seen = true;  // (a settings file from before the note: not a first launch)
     if (!aspect_key) g_settings.aspect_asked = true;  // (likewise: the aspect ratio was chosen already)
+    if (!video_key) g_settings.video_rec = VREC_ASK;  // (a file from before the recommendation: offered once, not imposed)
     if (g_settings.volume < 0) g_settings.volume = 0;
     if (g_settings.volume > 2) g_settings.volume = 2;
     if (!(g_settings.mouse_sens >= 0.1f && g_settings.mouse_sens <= 5)) g_settings.mouse_sens = 1.0f;
@@ -366,6 +459,8 @@ void settings_save(void) {
     fprintf(f, "tracker = %d\n", g_settings.tracker);
     if (g_settings.tracker_filters >= 0) fprintf(f, "tracker_filters = %d\n", g_settings.tracker_filters);
     fprintf(f, "aspect_asked = %d\n", g_settings.aspect_asked);
+    fprintf(f, "video_recommended = %s\n",
+            g_settings.video_rec == VREC_AUTO ? "auto" : g_settings.video_rec == VREC_DONE ? "done" : "none");
     fprintf(f, "menu_tip_seen = %d\n", g_settings.menu_tip_seen);
     fprintf(f, "onedrive_kept = %d\n", g_settings.onedrive_kept);
     static const char *const letters[] = {"off", "explored", "map"};

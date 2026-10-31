@@ -280,6 +280,15 @@ static void pick_device(void) {
             VK_API_VERSION_MINOR(g_vk.props.apiVersion), VK_API_VERSION_PATCH(g_vk.props.apiVersion));
     }
     settings_resolve_defaults(g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU);
+    {   // this PC's recommended video settings (settings.c): applied at the first start, offered to older settings files
+        VkPhysicalDeviceMemoryProperties mp;
+        vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+        uint64_t vram = 0;
+        for (uint32_t i = 0; i < mp.memoryHeapCount; i++)
+            if (mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) vram += mp.memoryHeaps[i].size;
+        settings_video_recommend(g_vk.props.vendorID, g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, vram,
+                                 g_vk.props.deviceName);
+    }
     // On by default on integrated GPUs only: lean usage and the SMAA stencil measured faster on an Intel UHD 770 and
     // slightly slower on an RTX 3080 Ti; skipping the per-frame target clears saved 3.7 ms on the UHD 770 (2x) with
     // identical images. LARECOMP_VK_LEAN_USAGE / LARECOMP_VK_SMAA_STENCIL / LARECOMP_NO_FRAME_CLEAR =0 / =1 override.

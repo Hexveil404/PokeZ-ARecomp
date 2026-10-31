@@ -2,6 +2,7 @@
 #pragma once
 #include "cosmetic_colour.h"
 #include <stdbool.h>
+#include <stdint.h>
 
 enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1 };
 enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25 = 11, RES_Q50 = 12, RES_X15 = 13 };
@@ -92,6 +93,7 @@ typedef struct {
     int tracker_filters; // its filter bar (runtime/ui/tracker_overlay.mm bits), -1 = the defaults; no menu row
     int chaos_letters;   // CHAOS_LETTERS_*: room-shuffle doorway letters on the dungeon map
     bool aspect_asked;   // the start screen's one-time "authentic 16:9 or unlocked?" question was answered
+    int video_rec;       // VREC_*: the recommended video settings (settings_video_recommend) - applied, to apply, to offer
     bool menu_tip_seen;  // the start screen's one-time "how to open the menu" note was shown (first PLAY ever)
     bool onedrive_kept;  // the start screen's OneDrive warning (Windows) was answered with Keep here
     // cheats (runtime/ui/cheats.mm), applied every frame while a save is loaded
@@ -152,6 +154,26 @@ void settings_save(void);
 // display. A player's own choice is kept. Anti-aliasing is off by default everywhere. LARECOMP_INTEGRATED=0/1 (test):
 // treat the GPU as dedicated / integrated.
 void settings_resolve_defaults(bool integrated);
+
+// Recommended video settings for this PC (settings.c settings_video_recommend, from the GPU device setup): a profile
+// from the GPU (type, video memory, model), the CPU's threads and the RAM, setting the internal resolution, 60 fps and
+// texture filtering. larecomp.ini "video_recommended": auto (the release's file: applied at the first start), done
+// (applied or declined), none / the key missing (a settings file from before: the start screen offers it once).
+enum { VREC_AUTO = 0, VREC_ASK = 1, VREC_DONE = 2 };
+enum { VPROF_LIGHT = 0, VPROF_MEDIUM, VPROF_HIGH, VPROF_ULTRA, VPROF_N };
+typedef struct {
+    bool known;          // computed (the GPU device is set up)
+    int profile;         // VPROF_*
+    int res_mode;        // RES_*
+    bool fps60, aniso16;
+    char gpu[96];        // the GPU's name, for the start screen's question
+} VideoRec;
+extern VideoRec g_video_rec;
+const char *video_profile_name(int profile, bool pt);
+void settings_video_recommend(unsigned vendor, bool integrated, uint64_t vram, const char *gpu_name);
+void settings_video_apply_recommended(void);  // the recommended values into g_settings (not saved)
+bool settings_video_matches_recommended(void);
+const char *settings_res_name(int res_mode);
 extern int g_default_upscaler;  // UPSCALE_*: what the menu shows as the default
 extern int g_default_res_mode;  // RES_*: likewise
 // An integrated GPU (as settings_resolve_defaults was told): the fixed 1x renders 1280x720 there, what the game itself

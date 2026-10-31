@@ -225,6 +225,7 @@ static bool has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
 
 // Discrete GPU first, Vulkan 1.3 before 1.2 (LARECOMP_GPU=<index> picks one); needs Vulkan 1.2 and a queue that can
 // present. A Vulkan 1.2 GPU does without the 1.3 features (compat.c).
+static bool g_intel_rp;  // (pick_device: this Intel driver runs on render passes)
 static void pick_device(void) {
     uint32_t n = 0;
     vkEnumeratePhysicalDevices(g_vk.inst, &n, NULL);
@@ -248,7 +249,12 @@ static void pick_device(void) {
     free(pd);
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
     g_gpu_vendor = g_vk.props.vendorID;  // (settings.c gpu_feature_on: the Compatibility features' Auto)
-    g_vkc.api = g_vk.props.apiVersion >= VK_API_VERSION_1_3 && !ENV("LARECOMP_VK_COMPAT") ? VK_API_VERSION_1_3 : VK_API_VERSION_1_2;
+    // Intel's Windows drivers before Vulkan 1.3.216 (UHD 630 1.3.215 #8 #46, Iris Xe 1.3.212 #88) crash inside
+    // vkCmdBeginRendering reading near a null pointer, and placeholder attachments only moved the crash to a later pass:
+    // those run on render passes instead, the compat_rp.c way (LARECOMP_VK_INTEL_RENDER_PASSES=0: dynamic rendering)
+    const char *irp = getenv("LARECOMP_VK_INTEL_RENDER_PASSES");
+    g_intel_rp = irp ? atoi(irp) != 0 : g_vk.props.vendorID == 0x8086 && g_vk.props.apiVersion < VK_MAKE_API_VERSION(0, 1, 3, 216);
+    g_vkc.api = g_vk.props.apiVersion >= VK_API_VERSION_1_3 && !ENV("LARECOMP_VK_COMPAT") && !g_intel_rp ? VK_API_VERSION_1_3 : VK_API_VERSION_1_2;
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
     VkQueueFamilyProperties *qp = calloc(nq, sizeof *qp);
@@ -563,6 +569,7 @@ static void create_device(void) {
     // Vulkan 1.2: the 1.3 features the driver has as extensions. LARECOMP_VK_COMPAT=1 takes none of them (the compat.c
     // ways), =<names> only leaves out those: rendering, sync, eds, eds2 (e.g. =sync)
     const char *cm = ENV("LARECOMP_VK_COMPAT");
+    if (!cm && g_intel_rp) cm = "rendering";  // (only that: the other 1.3 features stay, as extensions)
 #define VK_OFF(name) (cm && (!strcmp(cm, "1") || strstr(cm, name)))
     bool v13 = g_vkc.api >= VK_API_VERSION_1_3;
     bool x_dr = !v13 && !VK_OFF("rendering") && has_ext(ep, ne, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);

@@ -4,3 +4,7 @@ import sys
 
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
+
+# a native crash (unicorn, a Python extension) writes where it was: otherwise its log is empty (#99)
+import faulthandler
+faulthandler.enable()

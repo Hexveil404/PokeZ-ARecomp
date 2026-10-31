@@ -184,7 +184,30 @@ typedef struct {
     int exit;                // -1 while running
     int files;               // chunk files written so far (complete)
     unsigned long long ci, n;  // functions written / all
+    bool retried;            // started again after stopping with an empty log
 } Gen;
+
+static PlatProc gen_start(const Tools *t, const Gen *g, int i, const char *game_dir) {
+    static const char *const base[2] = {"0x7000000000", "0x7008000000"};
+    char nso[1100];
+    snprintf(nso, sizeof nso, "%s" SEP "exefs" SEP "%s", game_dir, g->name);
+    Args a = {0};
+    add(&a, t->gen);
+    if (t->gen_script[0]) add(&a, t->gen_script);
+    add(&a, g->name);
+    add(&a, nso);
+    add(&a, base[i]);
+    add(&a, g->out);
+    if (i == 1) { add(&a, "--hle"); add(&a, t->hle); }
+    PlatProc p = spawn(a.v, g->log);
+    args_free(&a);
+    return p;
+}
+
+static bool gen_log_empty(const Gen *g) {
+    struct stat sb;
+    return stat(g->log, &sb) || sb.st_size == 0;
+}
 
 static void read_gen_log(Gen *g) {
     FILE *f = fopen(g->log, "rb");
@@ -261,6 +284,11 @@ static void helper_failed(const char *what, int r, const char *log, char *why, s
 #endif
     if (!last[0]) {
         snprintf(how, sizeof how, "exit status %d", r);
+        // (nothing written at all: not disk space, which is what the start screen would say next - something stopped it as
+        // it started, or it crashed there: #99, a generator that worked on every other PC. gamebuild_killed: this text is shown)
+        snprintf(why, why_size, "A build helper stopped as soon as it started. An antivirus or Windows' exploit protection can "
+                 "do this: add the ZA Recomp folder as an exception and try again.");
+        g_killed = true;
     }
     LOG("[gamebuild] %s failed: %s%s%s\n", what, how, how[0] && last[0] ? ": " : "", last);
 }
@@ -452,7 +480,6 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
 
     // 1. the generator, both modules at once; their finished files are compiled while it goes on
     Gen gens[2] = {{.name = "main"}, {.name = "sdk"}};
-    static const char *const base[2] = {"0x7000000000", "0x7008000000"};
     bool ok = true;
     for (int i = 0; i < 2 && ok; i++) {
         Gen *g = &gens[i];
@@ -464,18 +491,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             LOG("[gamebuild] reused generated %s: %d chunks\n", g->name, g->files);
             continue;
         }
-        char nso[1100];
-        snprintf(nso, sizeof nso, "%s" SEP "exefs" SEP "%s", game_dir, g->name);
-        Args a = {0};
-        add(&a, t.gen);
-        if (t.gen_script[0]) add(&a, t.gen_script);
-        add(&a, g->name);
-        add(&a, nso);
-        add(&a, base[i]);
-        add(&a, g->out);
-        if (i == 1) { add(&a, "--hle"); add(&a, t.hle); }
-        g->p = spawn(a.v, g->log);
-        args_free(&a);
+        g->p = gen_start(&t, g, i, game_dir);
         if (!g->p) { snprintf(why, why_size, "the game code builder didn't start"); ok = false; }
     }
 
@@ -507,7 +523,15 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                 if (r >= 0) {
                     g->exit = r;
                     read_gen_log(g);
-                    if (r != 0) {
+                    // (stopped before its first line: once more, whatever stopped it may have been a scan of a new file, #99)
+                    if (r != 0 && !g->retried && gen_log_empty(g)) {
+                        g->retried = true;
+                        LOG("[gamebuild] generator (%s) stopped before writing anything (exit status %d): starting it again\n", g->name, r);
+                        g->p = gen_start(&t, g, i, game_dir);
+                        if (g->p) g->exit = -1;
+                    }
+                    if (g->exit < 0) {
+                    } else if (r != 0) {
                         char what[64];
                         snprintf(what, sizeof what, "generator (%s)", g->name);
                         snprintf(why, why_size, "the game code couldn't be prepared");

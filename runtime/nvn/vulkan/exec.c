@@ -938,6 +938,12 @@ static VkSpan guest_copy_ex(uint64_t addr, uint64_t size, bool scan) {
 }
 static VkSpan guest_copy(uint64_t addr, uint64_t size) { return guest_copy_ex(addr, size, false); }
 
+static bool ib_guard_on(void) {  // (LARECOMP_IB_GUARD=0: draws with parameters no draw can have go through)
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_IB_GUARD") || atoi(ENV("LARECOMP_IB_GUARD")) != 0;
+    return on;
+}
+
 // ================================================================== worker threads (shader / pipeline builds)
 // First-use compiles run off the render thread; draws needing them are skipped until ready (as on Metal).
 // LARECOMP_SYNC_SHADERS=1 builds on first use, blocking (deterministic tests).
@@ -7314,6 +7320,21 @@ static void draw_(CmdRec *r, bool indexed) {
     uint64_t prof_t2_ = prof ? SDL_GetTicksNS() : 0;
     // ---- indices (copied; the largest index bounds the vertex data copied below)
     uint32_t first = 0, count = (uint32_t)r->x[2], inst, base_inst, max_index = 0;
+    {   // A count no draw has (ind_args_bad's limit, for the draws that don't pass through it): indices are copied by count, and
+        // 550 M of them, indirect parameters holding other data, ended an Intel laptop's run with "out of memory for uploads
+        // (2100 MB needed)" (Reddit, i3-1115G4, UHD). LARECOMP_TEST_HUGE_DRAW=<frame>: one such draw there
+        static long test_at = -1;
+        if (test_at < 0) test_at = ENV("LARECOMP_TEST_HUGE_DRAW") ? atol(ENV("LARECOMP_TEST_HUGE_DRAW")) : 0;
+        if (test_at && indexed && (long)renderer_present_count() >= test_at) test_at = 0, count = 550502400;
+        if (count > (1u << 22) && ib_guard_on()) {
+            static int nlog;
+            if (nlog++ < 20)
+                LOG("[ibguard] frame %llu: skipped draw: count %u, %s\n", (unsigned long long)renderer_present_count(), count,
+                    indexed ? "indexed" : "not indexed");
+            stat_skipped_here();
+            return;
+        }
+    }
     int32_t base_vertex = 0;
     VkSpan ib = {0};
     VkIndexType itype_vk = VK_INDEX_TYPE_UINT32;
@@ -7423,6 +7444,20 @@ static void draw_(CmdRec *r, bool indexed) {
             }
             else need = (uint64_t)max_index * stride + 256;
             if (v.size && need > v.size) need = v.size;
+            {   // No stream is this big (the game's whole mesh pool is 245 MB): the size came from indirect parameters holding
+                // other data. The draw is left out, as ind_args_bad does (LARECOMP_IB_GUARD=0: copied)
+                enum { STREAM_COPY_MAX = 512 << 20 };
+                if (need > STREAM_COPY_MAX && ib_guard_on()) {
+                    static int nlog;
+                    if (nlog++ < 20)
+                        LOG("[ibguard] frame %llu: skipped draw: stream %d copy of %llu MB (%llx+%llx, stride %llu, divisor %u, "
+                            "max index %u, first instance %u, %u instances)\n", (unsigned long long)renderer_present_count(), s,
+                            (unsigned long long)(need >> 20), (unsigned long long)v.addr, (unsigned long long)v.size,
+                            (unsigned long long)stride, vl.divisor[s], max_index, base_inst, inst);
+                    stat_skipped_here();
+                    return;
+                }
+            }
             if (!v.addr) { static const uint8_t zero[256]; sp = vk_transient_copy(zero, 256, 16); }
             else sp = guest_copy(v.addr, need ? need : 16);
         }

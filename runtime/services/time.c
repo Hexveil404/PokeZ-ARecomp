@@ -137,3 +137,16 @@ HLE_FUNC("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE"
     if (c->x[0]) *(int64_t *)(uintptr_t)c->x[0] = unix_now();
     c->x[0] = 0;  // ResultSuccess
 }
+
+// std::chrono::system_clock::now() (the SDK's libc++: microseconds since 1970): the host clock (unix_now() and the
+// host's sub-second part). The SDK's own path read the realtime clock as ~0 here, and Pokémon Z-A stamps each donut
+// with it in milliseconds (game fn 0x7002d564d8): a donut stamped 0 reads as an empty slot (the pocket adds into the
+// first slot whose stamp is 0, fn 0x7002ad5874), so Ansha's donuts never showed up and each new one overwrote the
+// last (#66, #73).
+HLE_FUNC("_ZNSt3__16chrono12system_clock3nowEv", time_chrono_system_now) {
+    struct timespec ts;
+    timespec_get(&ts, TIME_UTC);
+    static int n;
+    if (n++ < 3) LOG("[time] std::chrono::system_clock::now (host clock)\n");
+    c->x[0] = (uint64_t)(unix_now() * 1000000ll + ts.tv_nsec / 1000);
+}

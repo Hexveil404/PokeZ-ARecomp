@@ -28,8 +28,12 @@ bool gpu_feature_on(int feature, const char *env) {
     int cs = feature >= 0 && feature < GPU_COMPAT_N ? g_settings.gpu_compat[feature] : GPU_AUTO;
     if (cs != GPU_AUTO) return cs == GPU_ON;
     // Auto: on, but robust access 2 on AMD GPUs - with it the RX 9070 XT on driver 26.10.1 lost the device entering the
-    // world ("read invalid 0xbeefdeadc000", #39: restored alone of the four, it crashed; the other three didn't)
-    return !(g_gpu_vendor == 0x1002 && feature == GPU_ROBUST2);
+    // world ("read invalid 0xbeefdeadc000", #39: restored alone of the four, it crashed; the other three didn't) - and
+    // the shaders prepared at the start on AMD GPUs: every battle fault with an AMD log (GPU page fault in the driver's
+    // own memory, Focus Blast on an RX 9060 XT every time: #63; #92) came from a run that prepared them, and the same
+    // player's runs without them, a long one too, never faulted. (The pipelines are then built as the game first uses
+    // them: a short hitch the first time an effect shows.)
+    return !(g_gpu_vendor == 0x1002 && (feature == GPU_ROBUST2 || feature == GPU_SHADER_PREP));
 }
 
 Settings g_settings = {

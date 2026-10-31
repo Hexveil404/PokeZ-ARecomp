@@ -70,7 +70,7 @@ cp README.md LICENSE "$D/"
 mkdir -p "$D/docs"
 cp docs/XBOX-ATTACK-LAYOUT.md "$D/docs/"
 [ -f README.pt-BR.md ] && cp README.pt-BR.md "$D/"
-cp tools/za/za-default.ini "$D/larecomp.ini"
+cp tools/za/za-default.ini "$D/za-default.ini"  # (not larecomp.ini: the first run copies it, runtime/paths.c - a new zip unzipped over an install keeps the player's own)
 # (every DLL but Windows' own and the Vulkan loader: also when copies sit next to the exe in $B, a dev setup)
 PATH="$PWD/build/deps-win/bin:$PATH" ldd $B/lasrecomp.exe | awk 'tolower($3) !~ /^\/c\/windows\// && !/vulkan-1/ {print $3}' | sort -u |
     while read -r f; do cp "$f" "$D/"; done

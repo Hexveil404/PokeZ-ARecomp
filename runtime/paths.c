@@ -333,13 +333,13 @@ void rt_paths_init(void) {
     if (!getcwd(g_root, sizeof g_root)) snprintf(g_root, sizeof g_root, "%s", root);
     fprintf(stderr, "[paths] data: %s\n", g_root);
     if (!g_dev && !(env && *env)) finish_moves(g_root, NULL);
-#ifndef _WIN32
-    // Pokémon Z-A's release settings (60 fps, the upscaler, the resolution...): Windows ships them as the larecomp.ini
-    // next to the exe, its data folder (tools/za/dist.sh); here the data folder starts empty, so a first run copies
-    // the app's za-default.ini there (tools/za/dist-linux.sh). Not in dev mode or with LARECOMP_SETTINGS (test runs).
+    // Pokémon Z-A's release settings (the upscaler, the anti-aliasing, video_recommended = auto...): the app ships them
+    // as za-default.ini (tools/za/dist.sh, dist-linux.sh) and a first run copies them into the data folder as the
+    // player's larecomp.ini. The release zip no longer holds a larecomp.ini, so unzipping a new version over an install
+    // keeps the player's settings (Windows: the zip used to replace them). Not with LARECOMP_SETTINGS (test runs); a
+    // source checkout has no za-default.ini next to its executable, so nothing is copied there.
     char def[1100];
-    if (!g_dev && !getenv("LARECOMP_SETTINGS") && !exists("larecomp.ini") &&
-        rt_resource("za-default.ini", NULL, def, sizeof def)) {
+    if (!getenv("LARECOMP_SETTINGS") && !exists("larecomp.ini") && rt_resource("za-default.ini", NULL, def, sizeof def)) {
         FILE *in = fopen(def, "rb"), *out = in ? fopen("larecomp.ini", "wb") : NULL;
         char buf[4096];
         size_t k;
@@ -347,7 +347,6 @@ void rt_paths_init(void) {
         if (in) fclose(in);
         if (out) fclose(out), fprintf(stderr, "[paths] first run: the release's settings from %s\n", def);
     }
-#endif
 }
 
 const char *rt_data_root(void) { return g_root; }

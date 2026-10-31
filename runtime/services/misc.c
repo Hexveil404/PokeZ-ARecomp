@@ -39,6 +39,34 @@ SERVICE("pctl:s", pctl_s) { pctl_root(s, req, resp); }
 SERVICE("pctl:a", pctl_a) { pctl_root(s, req, resp); }
 SERVICE("pctl:r", pctl_r) { pctl_root(s, req, resp); }
 
+// ------------------------------------------------------------------ friend:u / friend:a
+// Pokémon Legends Arceus opens the friend service at boot (Z-A doesn't): an offline Switch with no friends. The
+// logging stub returned no IFriendService, and the SDK read through the missing object (a crash at boot).
+static void friend_service(Service *s, IpcReq *req, IpcResp *resp) {
+    (void)s;
+    switch (req->cmd) {
+    case 0: resp->copy_handles[resp->ncopy++] = new_event_handle(); break;  // GetCompletionEvent
+    case 10100: OUT(int32_t, 0) = 0; resp_size(resp, 4); break;            // GetFriendCount: none
+    case 10101: case 10102: case 10110: case 20101: case 20102:            // friend lists, counts: empty
+        OUT(int32_t, 0) = 0; resp_size(resp, 4); break;
+    default: LOG("[friend] IFriendService cmd %u (ok)\n", req->cmd); resp_size(resp, 0x10);
+    }
+}
+static void friend_notification(Service *s, IpcReq *req, IpcResp *resp) {
+    (void)s;
+    if (req->cmd == 0) resp->copy_handles[resp->ncopy++] = new_event_handle();  // GetEvent (never signalled)
+    else LOG("[friend] INotificationService cmd %u (ok)\n", req->cmd);
+}
+static void friend_root(Service *s, IpcReq *req, IpcResp *resp) {
+    (void)s;
+    if (req->cmd == 0) ipc_return_object(resp, service_new("IFriendService", friend_service, NULL));
+    else if (req->cmd == 1) ipc_return_object(resp, service_new("INotificationService", friend_notification, NULL));
+    else LOG("[friend] cmd %u (ok)\n", req->cmd);
+}
+SERVICE("friend:u", friend_u) { friend_root(s, req, resp); }
+SERVICE("friend:a", friend_a) { friend_root(s, req, resp); }
+SERVICE("friend:v", friend_v) { friend_root(s, req, resp); }
+
 // ------------------------------------------------------------------ csrng
 // GenerateRandomBytes (cmd 0) into the output buffer. Z-A asks it for the seeds of its rolls, hundreds of times a
 // session; the logging stub left the buffer as it was, so every roll came out the same - each ball caught (#61).

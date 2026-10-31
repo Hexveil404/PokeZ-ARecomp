@@ -31,8 +31,10 @@ static inline void __attribute__((format(printf, 1, 2))) rt_log(const char *fmt,
 #define GUEST_LO     0x7000000000ull
 #ifdef __APPLE__
 #define GUEST_HI     0x7320000000ull
-#else  // room for an SDK's virtual address memory too (Pokémon Legends Z-A reserves 12 GB; MAP_NORESERVE)
-#define GUEST_HI     0x7800000000ull
+#else  // room for an SDK's virtual address memory too (Pokémon Legends Z-A reserves 12 GB, Pokémon Legends Arceus
+       // 32 GB in one piece for its main StandardAllocator, in the alias region below; MAP_NORESERVE). The top of the
+       // Switch's 39-bit address space.
+#define GUEST_HI     0x8000000000ull
 #endif
 #define MAIN_BASE    0x7000000000ull
 #define SDK_BASE     0x7008000000ull   // (128 MB for main: Pokémon Legends Z-A's image is 0x5f7a000)
@@ -49,7 +51,7 @@ static inline void __attribute__((format(printf, 1, 2))) rt_log(const char *fmt,
 #define ALIAS_SIZE   0x0100000000ull
 #else  // alias region (svcMapMemory targets; an SDK's virtual address memory reserves its address regions here)
 #define ALIAS_BASE   0x7400000000ull
-#define ALIAS_SIZE   0x0400000000ull   // 16 GB, up to GUEST_HI
+#define ALIAS_SIZE   0x0C00000000ull   // 48 GB, up to GUEST_HI (16 GB fit Z-A; Arceus reserves 32 GB in one piece)
 #endif
 #define HEAP_BASE    0x7240000000ull
 #define HEAP_MAX     0x00D0000000ull   // 3.25 GB

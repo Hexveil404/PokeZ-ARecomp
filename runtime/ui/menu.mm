@@ -428,7 +428,7 @@ extern "C" void renderer_get_scale(float *sx, float *sy);
 extern "C" int input_pad_family(void);  // runtime/hle/input.c
 extern "C" double output_scale_dynamic_factor(void);
 
-static void tab_display(void) {
+static void tab_display(bool in_game) {
     float scale = ImGui::GetFontSize() / 34;
     bool la = g_game_is_la && menu_la_tabs;  // (Link's Awakening's own rows)
     opt_begin("##video", scale);
@@ -447,25 +447,34 @@ static void tab_display(void) {
     }
     opt_toggle(TR("Show FPS", "Mostrar FPS"), &g_settings.show_fps, false,
                TR("Shows the frame rate in the top right corner.", "Mostra a taxa de quadros no canto superior direito."));
-    {   // Pokémon Z-A's frame mode (runtime/hle/framepace.c rt_za_frame_cfg): applies from the next frame
+    {   // Pokémon Z-A's frame mode (runtime/hle/framepace.c rt_za_frame_cfg): applies from the next frame. Two rows: the
+        // rate, and whether 60 falls back to 30 by itself (fps60_lock off) - that fallback is the player's own choice,
+        // the recommended settings (settings.c) set 60 without it. Shown on the start screen too (saved for the next
+        // start); in game only with the frame hook (a supported game version).
         extern bool g_za_frame_hook, g_fps60_fell_back;
-        if (g_za_frame_hook) {
-            int fr = g_settings.fps60 ? (g_settings.fps60_lock ? 2 : 1) : 0;
-            const char *rates[] = {TR("30 fps (Switch)", "30 fps (Switch)"), TR("60 fps (experimental)", "60 fps (experimental)"),
-                                   TR("60 fps (always)", "60 fps (sempre)")};
-            if (opt_choice(TR("Frame rate", "Taxa de quadros"), &fr, rates, 3, 0,
-                           TR("30 fps: as on the Switch (recommended). 60 fps (experimental): the game presents every vsync "
-                              "and steps its world 1/60 s a frame - smoother, but it needs a fast CPU: the game counts "
-                              "frames, not time, so below 60 fps everything moves in slow motion. When this PC doesn't "
-                              "keep 60, ZA Recomp goes back to 30 by itself (choose 60 again to retry). 60 fps (always): "
-                              "never goes back to 30 - the game slows down whenever the frame rate drops below 60.",
-                              "30 fps: como no Switch (recomendado). 60 fps (experimental): o jogo mostra um quadro a cada "
-                              "vsync e avança o mundo 1/60 s por quadro - mais fluido, mas pede uma CPU rápida: o jogo conta "
-                              "quadros, não tempo, então abaixo de 60 fps tudo fica em câmera lenta. Quando este PC não "
-                              "segura 60, o ZA Recomp volta para 30 sozinho (escolha 60 de novo para tentar outra vez). "
-                              "60 fps (sempre): nunca volta para 30 - o jogo fica lento quando a taxa cai abaixo de 60.")))
-                g_settings.fps60 = fr >= 1, g_settings.fps60_lock = fr == 2;
-            if (g_settings.fps60 && g_fps60_fell_back)
+        if (!in_game || g_za_frame_hook) {  // (g_game_is_la stays 1 until the boot: no help on the start screen)
+            int fr = g_settings.fps60 ? 1 : 0;
+            const char *rates[] = {TR("30 fps (Switch)", "30 fps (Switch)"), "60 fps"};
+            if (opt_choice(TR("Frame rate", "Taxa de quadros"), &fr, rates, 2, 0,
+                           TR("30 fps: as on the Switch. 60 fps: the game presents every refresh and steps its world 1/60 s "
+                              "a frame - smoother, but it needs a fast CPU and GPU: the game counts frames, not time, so "
+                              "below 60 fps everything moves in slow motion (see the next option).",
+                              "30 fps: como no Switch. 60 fps: o jogo mostra um quadro a cada atualização da tela e avança o "
+                              "mundo 1/60 s por quadro - mais fluido, mas pede CPU e GPU rápidas: o jogo conta quadros, não "
+                              "tempo, então abaixo de 60 fps tudo fica em câmera lenta (veja a próxima opção).")))
+                g_settings.fps60 = fr == 1;
+            bool fall = !g_settings.fps60_lock;
+            ImGui::BeginDisabled(!g_settings.fps60);
+            if (opt_toggle(TR("Drop to 30 fps when needed", "Cair para 30 fps quando preciso"), &fall, true,
+                           TR("With 60 fps: when this PC doesn't keep 60 for a few seconds, the game goes back to 30 fps by "
+                              "itself instead of running in slow motion (choose 60 fps again to retry). Off: it stays at "
+                              "60 - smoother when the PC keeps up, slow motion whenever it doesn't.",
+                              "Com 60 fps: quando este PC não segura 60 por alguns segundos, o jogo volta para 30 fps sozinho "
+                              "em vez de rodar em câmera lenta (escolha 60 fps de novo para tentar outra vez). Desligado: "
+                              "fica em 60 - mais fluido quando o PC acompanha, câmera lenta quando não acompanha.")))
+                g_settings.fps60_lock = !fall;
+            ImGui::EndDisabled();
+            if (in_game && g_settings.fps60 && g_fps60_fell_back)
                 ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s",
                                    TR("Running at 30 fps: this PC didn't keep 60 fps.", "Rodando a 30 fps: este PC não segurou 60 fps."));
         }
@@ -1184,7 +1193,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 }
                 switch (t.id) {
                 case -1: prelaunch(scale); break;
-                case 0: tab_display(); break;
+                case 0: tab_display(in_game); break;
                 case 1: tab_audio(); break;
                 case 2:
                     if (game_in_play()) save_editor_draw(scale);

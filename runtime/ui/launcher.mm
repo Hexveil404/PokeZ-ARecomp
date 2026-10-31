@@ -1709,18 +1709,18 @@ static bool video_prompt(float s) {
         ImGui::PushTextWrapPos(0);
         ImGui::TextUnformatted(TR("Recommended video settings for your PC", "Configurações de vídeo recomendadas para o seu PC"));
         ImGui::Spacing();
-        if (g_pt)
-            ImGui::Text("%s - perfil %s: resolução %s, %s fps.", r->gpu, video_profile_name(r->profile, true),
-                                res_label(r->res_mode), r->fps60 ? "60" : "30");
-        else
-            ImGui::Text("%s - %s profile: resolution %s, %s fps.", r->gpu, video_profile_name(r->profile, false),
-                                res_label(r->res_mode), r->fps60 ? "60" : "30");
-        if (g_pt)
-            ImGui::TextDisabled("Agora: resolução %s, %s fps. Dá para mudar quando quiser em Configurações.",
-                                res_label(g_settings.res_mode), g_settings.fps60 ? "60" : "30");
-        else
-            ImGui::TextDisabled("Now: resolution %s, %s fps. You can change this any time in Settings.",
-                                res_label(g_settings.res_mode), g_settings.fps60 ? "60" : "30");
+        ImGui::TextDisabled("%s (%s %s)", r->gpu, TR("profile", "perfil"), video_profile_name(r->profile, g_pt));
+        ImGui::Spacing();
+        auto fps_text = [](bool fps60, bool lock) {
+            return !fps60 ? "30 fps" : lock ? TR("60 fps (stays at 60)", "60 fps (sem cair para 30)")
+                                            : TR("60 fps (drops to 30 when needed)", "60 fps (cai para 30 quando preciso)");
+        };
+        ImGui::Text("%s  %s %s, %s", TR("Recommended:", "Recomendado:"), TR("resolution", "resolução"), res_label(r->res_mode),
+                    fps_text(r->fps60, r->fps60));
+        ImGui::TextDisabled("%s  %s %s, %s", TR("Now:", "Agora:"), TR("resolution", "resolução"), res_label(g_settings.res_mode),
+                            fps_text(g_settings.fps60, g_settings.fps60_lock));
+        ImGui::Spacing();
+        ImGui::TextDisabled("%s", TR("You can change this any time in Settings.", "Dá para mudar quando quiser em Configurações."));
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0, 14 * s));
         float bw = 300 * s, gap = 20 * s;

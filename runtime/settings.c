@@ -162,6 +162,8 @@ void settings_resolve_defaults(bool integrated) {
 // the GPU first (integrated or dedicated, video memory, the model number in its name), then the CPU's threads (the game
 // code's speed is what 60 fps needs) and the RAM (the game takes 6-8 GB) can only lower it. Light: 75% of the display,
 // 30 fps, plain texture filtering; Medium: 1x (the Switch's 1080p), 30 fps; High: 1x, 60 fps; Ultra: 1.5x, 60 fps.
+// 60 fps is recommended as "60 fps (always)": the experimental mode that falls back to 30 by itself stays the player's
+// own choice (F1), not a recommendation.
 // LARECOMP_VIDEO_PROFILE=light/medium/high/ultra: that profile (tests).
 VideoRec g_video_rec;
 
@@ -186,18 +188,19 @@ static int gpu_profile(unsigned vendor, bool integrated, uint64_t vram, const ch
     if (vendor == 0x10DE) {  // NVIDIA
         if ((m = model_after(name, "RTX "))) {
             int gen = m / 100, tier = m % 100;  // 3060 -> 30, 60
-            if (gen >= 30 && tier >= 60 && gb >= 8) return VPROF_ULTRA;
-            return gb >= 6 ? VPROF_HIGH : VPROF_MEDIUM;  // (RTX 20, xx50, 6 GB cards)
+            if (gen >= 30 && tier >= 70 && gb >= 10) return VPROF_ULTRA;  // (RTX 3080 / 4070 / 5070 and up)
+            if (gen >= 30 && tier >= 60 && gb >= 8) return VPROF_HIGH;    // (an RTX 4060 Ti: 60 fps at 1x, not 1.5x)
+            return VPROF_MEDIUM;  // (RTX 20, xx50, 6 GB cards)
         }
         if (model_after(name, "GTX ")) return VPROF_MEDIUM;  // (GTX 10 / 16)
     } else if (vendor == 0x1002) {  // AMD
         if ((m = model_after(name, "RX "))) {
-            if (m >= 6000 && m % 1000 >= 600 && gb >= 8) return VPROF_ULTRA;  // (RX 6600+, 7600+, 9060+)
-            if (m < 1000) return VPROF_MEDIUM;  // (RX 400 / 500 / Vega)
-            return gb >= 6 ? VPROF_HIGH : VPROF_MEDIUM;
+            if (m >= 6000 && m % 1000 >= 700 && gb >= 10) return VPROF_ULTRA;  // (RX 6700+, 7700+, 9070+)
+            if (m >= 6000 && m % 1000 >= 600 && gb >= 8) return VPROF_HIGH;    // (RX 6600, 7600, 9060)
+            return VPROF_MEDIUM;  // (RX 400 / 500 / Vega / 5000, 6500...)
         }
     }
-    return gb >= 6 ? VPROF_HIGH : VPROF_MEDIUM;  // (other dedicated GPUs: Intel Arc, unknown names)
+    return gb >= 8 ? VPROF_HIGH : VPROF_MEDIUM;  // (other dedicated GPUs: Intel Arc, unknown names)
 }
 
 void settings_video_recommend(unsigned vendor, bool integrated, uint64_t vram, const char *gpu_name) {
@@ -206,7 +209,7 @@ void settings_video_recommend(unsigned vendor, bool integrated, uint64_t vram, c
     settings_load();
     int threads = SDL_GetNumLogicalCPUCores(), ram_gb = (SDL_GetSystemRAM() + 512) / 1024;
     int p = gpu_profile(vendor, integrated, vram, gpu_name ? gpu_name : "");
-    if (threads < 8 && p > VPROF_MEDIUM) p = VPROF_MEDIUM;
+    if (threads < 8 && p > VPROF_MEDIUM) p = VPROF_MEDIUM;  // (60 fps needs the game code's speed)
     if (threads < 6 || ram_gb < 12) p = VPROF_LIGHT;
     else if (ram_gb < 16 && p > VPROF_HIGH) p = VPROF_HIGH;
     const char *e = getenv("LARECOMP_VIDEO_PROFILE");
@@ -235,13 +238,14 @@ void settings_video_apply_recommended(void) {
     const VideoRec *r = &g_video_rec;
     if (!r->known) return;
     g_settings.res_mode = r->res_mode, g_settings.res_auto = false;
-    g_settings.fps60 = r->fps60;
+    g_settings.fps60 = g_settings.fps60_lock = r->fps60;  // (60 fps: "always", not the experimental fallback)
     g_settings.aniso16 = r->aniso16;
 }
 
 bool settings_video_matches_recommended(void) {
     const VideoRec *r = &g_video_rec;
-    return r->known && g_settings.res_mode == r->res_mode && g_settings.fps60 == r->fps60 && g_settings.aniso16 == r->aniso16;
+    return r->known && g_settings.res_mode == r->res_mode && g_settings.fps60 == r->fps60 &&
+           g_settings.fps60_lock == r->fps60 && g_settings.aniso16 == r->aniso16;
 }
 
 void settings_load(void) {

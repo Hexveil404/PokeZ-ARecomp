@@ -193,7 +193,13 @@ published self-contained, so players need no .NET); `patchelf` likewise.
 
     tools/za/build-linux.sh          # the start screen: build/linux/x86_64/za/lasrecomp (run it from the repo root)
     GAME=1 JOBS=3 tools/za/build-linux.sh   # + the game code (generated/ and lasgame.so) from your own extracted/
-    tools/za/dist-linux.sh           # build/dist/ZA Recomp-<version>-linux-x86_64.AppImage (ZAIMPORT=0: no importer)
+    tools/za/dist-linux.sh           # build/dist/ZA Recomp-<version>-linux-x86_64.AppImage (ZAIMPORT=0: no importer),
+                                     # + ...-linux-x86_64.zip and zarecomp_<version>_amd64.deb (ZIP=0 / DEB=0: not those)
+
+The three hold the same files. The .zip is the AppImage's folder (start it with `./zarecomp`: no FUSE needed); the .deb
+installs it into `/opt/zarecomp`, with a `zarecomp` command and a menu entry (`sudo apt install ./zarecomp_*.deb`;
+removed with `sudo apt remove zarecomp`, which leaves `~/.local/share/zarecomp` alone). Its `libc6` dependency is the
+newest glibc symbol the build needed: 2.39 from Mint 22 / Ubuntu 24.04, 2.35 from the CI workflow's Ubuntu 22.04 image.
 
 The app is built with the Windows release's game code flags (`GENOPT="-O1 -DGUEST_VOLATILE"`, x86-64-v3).
 `GAME=1` compiles giant functions at -O0 first, with the start screen's own rule (`runtime/gamebuild.c` cold_giant),

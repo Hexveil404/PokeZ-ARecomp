@@ -1,6 +1,8 @@
 #!/bin/bash
 # ZA Recomp release for Linux x86-64, built natively (the Linux counterpart of tools/za/dist.sh):
-# build/dist/ZA Recomp-<version>-linux-x86_64.AppImage. No game code or game files: the start screen reads the player's
+# build/dist/ZA Recomp-<version>-linux-x86_64.AppImage, and from the same files ZA Recomp-<version>-linux-x86_64.zip
+# (a folder to unpack anywhere: no FUSE needed) and zarecomp_<version>_amd64.deb (Debian / Ubuntu / Mint: installs into
+# /opt/zarecomp, with a zarecomp command and a menu entry). No game code or game files: the start screen reads the player's
 # own .xci / .nsp with their prod.keys (zaimport/) or an extracted exefs + romfs, and recompiles the game on their
 # machine (lasgen/ = tools/gen.py frozen by PyInstaller, zig/ = the compiler, gamelib-src/ = the headers it includes).
 # Built against this machine's glibc: the AppImage runs on distributions at least as new (Linux Mint 22 / Ubuntu 24.04
@@ -9,7 +11,7 @@
 # Needs: what tools/za/build-linux.sh checks, the .NET 8 SDK (dotnet-sdk-8.0: the importer, self-contained so players
 # need no .NET) and patchelf. Downloads once, pinned and hash-checked where the tools allow: zig (tools/fetch_zig.sh),
 # appimagetool and its runtime (as tools/linux/package.sh), the helpers' Python packages (PyPI), LibHac (NuGet).
-# ZAIMPORT=0: no importer (a test build: extracted game files only).
+# ZAIMPORT=0: no importer (a test build: extracted game files only). ZIP=0 / DEB=0: no .zip / no .deb.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ARCH=x86_64
@@ -20,10 +22,12 @@ APPDIR=$L/za-AppDir
 VERSION=$(sed -n 's/^#define LARECOMP_VERSION "\(.*\)"/\1/p' runtime/ui/launcher.mm)
 OUT="build/dist/ZA Recomp-$VERSION-linux-$ARCH.AppImage"
 ZAIMPORT=${ZAIMPORT:-1}
+ZIP=${ZIP:-1}
+DEB=${DEB:-1}
 PY=${PYTHON:-python3}  # (the helpers' venvs; e.g. PYTHON=python3.12 in tools/linux/Containerfile's image)
 
-for t in patchelf llvm-strip readelf; do
-    command -v $t >/dev/null || { echo "dist-linux: $t missing (sudo apt install patchelf llvm)"; exit 1; }
+for t in patchelf llvm-strip readelf objdump $([ "$ZIP" = 1 ] && echo zip) $([ "$DEB" = 1 ] && echo dpkg-deb); do
+    command -v $t >/dev/null || { echo "dist-linux: $t missing (sudo apt install patchelf llvm binutils zip dpkg)"; exit 1; }
 done
 if [ "$ZAIMPORT" = 1 ] && ! command -v dotnet >/dev/null; then
     echo "dist-linux: the .NET 8 SDK is missing (sudo apt install dotnet-sdk-8.0), or ZAIMPORT=0 for a test build"
@@ -140,3 +144,55 @@ rm -f "$OUT"
 APPIMAGE_EXTRACT_AND_RUN=1 ARCH=$ARCH build/linux/src/appimagetool-x86_64.AppImage --no-appstream \
     --runtime-file build/linux/src/runtime-x86_64 "$APPDIR" "$OUT"
 ls -la "$OUT"
+
+# ---- zip: the AppDir as a folder (AppRun starts it; everything it writes still goes to ~/.local/share/zarecomp)
+if [ "$ZIP" = 1 ]; then
+    ZOUT="$PWD/build/dist/ZA Recomp-$VERSION-linux-$ARCH.zip"
+    ZD=$L/zip/"ZA Recomp-$VERSION-linux-$ARCH"
+    rm -rf "$L/zip" "$ZOUT" && mkdir -p "$ZD"
+    cp -R "$APPDIR/usr" "$APPDIR/zarecomp.desktop" "$APPDIR/zarecomp.png" "$ZD/"
+    cp "$APPDIR/AppRun" "$ZD/zarecomp"  # (AppRun finds usr/bin next to itself)
+    (cd "$L/zip" && zip -qry9 "$ZOUT" "ZA Recomp-$VERSION-linux-$ARCH")  # (-y: links as links; modes are kept)
+    ls -la "$ZOUT"
+fi
+
+# ---- deb: /opt/zarecomp/{bin,lib} (lasrecomp's rpath is $ORIGIN/../lib, its resources sit next to it), a zarecomp
+# command, the menu entry and its icon. Depends on the glibc the build needed (this machine's, or 2.35 from CI's
+# Ubuntu 22.04 image), the C++ runtime and the system's Vulkan loader; SDL3 opens X11 / Wayland / audio at run time.
+if [ "$DEB" = 1 ]; then
+    DV=${VERSION#v}
+    DR=$L/deb
+    DOUT="$PWD/build/dist/zarecomp_${DV}_amd64.deb"
+    rm -rf "$DR" "$DOUT" && mkdir -p "$DR/DEBIAN" "$DR/opt/zarecomp" "$DR/usr/bin" "$DR/usr/share/applications" \
+        "$DR/usr/share/icons/hicolor/1024x1024/apps" "$DR/usr/share/pixmaps" "$DR/usr/share/doc/zarecomp"
+    cp -R "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$DR/opt/zarecomp/"
+    printf '#!/bin/sh\nexec /opt/zarecomp/bin/lasrecomp "$@"\n' > "$DR/usr/bin/zarecomp" && chmod 755 "$DR/usr/bin/zarecomp"
+    sed 's/^Exec=.*/Exec=zarecomp/' "$APPDIR/zarecomp.desktop" > "$DR/usr/share/applications/zarecomp.desktop"
+    cp docs/icon/icon_1024.png "$DR/usr/share/icons/hicolor/1024x1024/apps/zarecomp.png"
+    cp docs/icon/icon_1024.png "$DR/usr/share/pixmaps/zarecomp.png"  # (menus that skip hicolor's 1024 size)
+    cp LICENSE "$DR/usr/share/doc/zarecomp/copyright"
+    chmod -R u+rwX,go+rX,go-w "$DR"  # (root-owned files: writable by root only, whatever the umask was)
+    GLIBC=$({ find "$DR/opt" -type f \( -name '*.so*' -o -perm -u+x \) -exec objdump -T {} + 2>/dev/null || true; } |
+        grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 | sed 's/GLIBC_//')  # (|| true: zig's scripts aren't ELF files)
+    [ -n "$GLIBC" ] || { echo "dist-linux: no glibc version found for the .deb"; exit 1; }
+    MAINT=${DEB_MAINTAINER:-ZA Recomp <noreply@github.com>}
+    cat > "$DR/DEBIAN/control" <<EOF
+Package: zarecomp
+Version: $DV
+Architecture: amd64
+Maintainer: $MAINT
+Installed-Size: $(du -sk --exclude=DEBIAN "$DR" | cut -f1)
+Depends: libc6 (>= $GLIBC), libstdc++6, libgcc-s1, libvulkan1
+Recommends: mesa-vulkan-drivers | vulkan-icd
+Section: games
+Priority: optional
+Homepage: https://github.com/Hexveil404/PokeZ-ARecomp
+Description: Pokémon Legends: Z-A, recompiled for PC (bring your own game files)
+ ZA Recomp is a static-recompilation PC port. No game code or game files are
+ included: the start screen reads your own .xci / .nsp with your prod.keys and
+ builds the game code on this machine. Data, saves and settings live in
+ ~/.local/share/zarecomp. Needs a Vulkan 1.3 driver and a CPU with AVX2.
+EOF
+    dpkg-deb --root-owner-group -Zxz --build "$DR" "$DOUT" >/dev/null  # (xz: older dpkg can't read zstd)
+    ls -la "$DOUT"
+fi

@@ -122,8 +122,11 @@ novo. Os seus saves e configurações são mantidos.
 
 ### Linux (experimental)
 
-O ZA Recomp roda nativamente no Linux x86-64, sem Wine nem Proton. Ainda não há download pronto para Linux: você
-compila uma vez na sua máquina (os scripts fazem tudo) e depois prepara o jogo como no Windows.
+O ZA Recomp roda nativamente no Linux x86-64, sem Wine nem Proton. Quando a release tiver arquivos para Linux, escolha
+um: `zarecomp_<versão>_amd64.deb` (Ubuntu / Linux Mint / Debian: `sudo apt install ./zarecomp_<versão>_amd64.deb`, depois
+**ZA Recomp** no menu ou `zarecomp` no terminal), o `.AppImage` (dê `chmod +x` e abra) ou o `.zip` (descompacte onde
+quiser e abra `./zarecomp`), e prepare o jogo como no passo 3 abaixo. Senão, você compila uma vez na sua máquina (os
+scripts fazem tudo).
 
 **Testado até agora:** Linux Mint 22.3 com GPU integrada Intel UHD e 8 GB de RAM, Pokémon Legends: Z-A 2.0.2. Cutscenes,
 áudio e movimentação funcionam; nessa GPU integrada as cenas 3D rodam a cerca de 15-26 fps (menus a 60). Controles,
@@ -151,7 +154,8 @@ são para Ubuntu / Linux Mint / Debian; nas outras distribuições os pacotes t�
    tools/za/dist-linux.sh
    ```
 
-   O resultado é `build/dist/ZA Recomp-<versão>-linux-x86_64.AppImage`. Copie para onde quiser.
+   O resultado é `build/dist/ZA Recomp-<versão>-linux-x86_64.AppImage` (e os mesmos arquivos em `.zip` e `.deb`).
+   Copie para onde quiser.
 
 3. Abra o AppImage (se precisar, dê `chmod +x` antes). Na tela inicial, escolha a pasta do jogo (`exefs` + `romfs`
    extraídos, ou os seus `.xci` / `.nsp` com o seu `prod.keys`), clique em **Preparar o jogo** e depois em **Jogar**,

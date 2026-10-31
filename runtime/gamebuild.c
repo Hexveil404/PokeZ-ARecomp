@@ -37,6 +37,9 @@
 // ------------------------------------------------------------------ child processes
 // Every one running, so that quitting mid-build ends them too (atexit) instead of leaving compilers behind.
 #define MAX_PROCS 80
+#undef LOG
+#define LOG(...) rt_launcher_log(__VA_ARGS__)  // (a build's few lines, and failed helpers' log ends: logs/launcher.log too)
+
 static pthread_mutex_t g_plock = PTHREAD_MUTEX_INITIALIZER;
 static PlatProc g_procs[MAX_PROCS];
 static int g_nprocs;
@@ -492,7 +495,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             continue;
         }
         g->p = gen_start(&t, g, i, game_dir);
-        if (!g->p) { snprintf(why, why_size, "the game code builder didn't start"); ok = false; }
+        if (!g->p) { snprintf(why, why_size, "The game code builder didn't start: an antivirus may have blocked or removed it. See logs/launcher.log."); g_killed = true; ok = false; }
     }
 
     Units units = {0};

@@ -123,7 +123,7 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
         size_t l = strlen(what);
         snprintf(what + l, sizeof what - l, " You have mods on: if this keeps happening, turn them off and see whether it stops.");
     }
-    fprintf(stderr, "[crash] %s\n", head);
+    rt_launcher_log("[crash] %s (%s)\n", head, g_line);
     if (log_path && *log_path) snprintf(out, n, "%s\n\n%s\n\nLog file:\n%s", head, what, log_path);
     else snprintf(out, n, "%s\n\n%s", head, what);
 }

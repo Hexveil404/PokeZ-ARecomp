@@ -63,7 +63,7 @@ static void log_system(void) {
              __builtin_cpu_supports("avx2") ? "yes" : "no", __builtin_cpu_supports("fma") ? "yes" : "no",
              __builtin_cpu_supports("bmi2") ? "yes" : "no", gamelib_old_cpu() ? "v2" : "v3");
 #endif
-    LOG("[system] ZA Recomp %s | %s | CPU: %s (%d threads%s) | RAM %d GB\n", rt_version(), os, cpu,
+    rt_launcher_log("[system] ZA Recomp %s | %s | CPU: %s (%d threads%s) | RAM %d GB\n", rt_version(), os, cpu,
         SDL_GetNumLogicalCPUCores(), feat, (SDL_GetSystemRAM() + 512) / 1024);
 #ifdef _WIN32
     plat_run_begin();
@@ -298,6 +298,7 @@ int main(int argc, char **argv) {
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
+    launcher_log_open();
     {   // Pokémon Legends Z-A (exefs/main build 7222e13ecf6adb32: 1.0.0, 8a1c86c437394b69: 2.0.0,
         // b1f12fd919eae86a: 2.0.2): the start screen sets its files up from the player's packages (zaimport). Started
         // without a log redirect (a double click): the log goes to logs/play.log (the previous one: logs/play-anterior.log).

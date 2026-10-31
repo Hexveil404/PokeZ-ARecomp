@@ -78,7 +78,7 @@ static void save_png(id<MTLTexture> tex, const char *path) {
         CGImageDestinationAddImage(dest, img, NULL);
         CGImageDestinationFinalize(dest);
         CFRelease(dest);
-    } else fprintf(stderr, "[launcher] can't write %s\n", path);
+    } else rt_launcher_log("[launcher] can't write %s\n", path);
     CFRelease(url), CGImageRelease(img), CGContextRelease(ctx), CGColorSpaceRelease(cs);
 }
 #endif
@@ -102,6 +102,7 @@ static bool build_is_za(const uint8_t id[8]) { return build_version(id) && memcm
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
 // it): ZA Recomp's v<major>.<minor>.<patch> (Hexveil404/PokeZ-ARecomp releases).
 #define LARECOMP_VERSION "v0.1.13"
+extern "C" void rt_launcher_log(const char *fmt, ...);  // runtime/launcher_log.c: logs/launcher.log and stderr
 extern "C" const char *rt_version(void) { return LARECOMP_VERSION; }  // (runtime/main.c: the log's first line)
 extern "C" const char *larecomp_version(void) { return LARECOMP_VERSION; }  // (the shader caches' tag)
 
@@ -200,7 +201,7 @@ static void *update_thread(void *) {
     }
     if (const char *z = getenv("LARECOMP_UPDATE_ZIP"))  // (test) install this zip: a local file or a link
         url = strncmp(z, "http", 4) ? std::string("file:") + z : std::string(z), size = getenv("LARECOMP_UPDATE_SIZE") ? atoll(getenv("LARECOMP_UPDATE_SIZE")) : 0;
-    if (!best.empty()) fprintf(stderr, "[launcher] update available: %s (this build %s)%s\n", best.c_str(), LARECOMP_VERSION,
+    if (!best.empty()) rt_launcher_log("[launcher] update available: %s (this build %s)%s\n", best.c_str(), LARECOMP_VERSION,
                                url.empty() ? "" : ", installable from the start screen");
     pthread_mutex_lock(&g_update_lock);
     g_update_tag = best;
@@ -230,7 +231,7 @@ namespace fs = std::filesystem;
 static fs::path u8p(const std::string &s) { return fs::u8path(s); }
 
 static void upd_fail(const char *what) {
-    fprintf(stderr, "[update] failed: %s\n", what);
+    rt_launcher_log("[update] failed: %s\n", what);
     pthread_mutex_lock(&g_update_lock);
     g_upd_error = what;
     pthread_mutex_unlock(&g_update_lock);
@@ -248,7 +249,7 @@ static void *upd_thread(void *) {
     if (ec) return upd_fail("can't create the _update folder next to the program"), (void *)NULL;
     const char *sr = getenv("SystemRoot");
     std::string sys = std::string(sr ? sr : "C:\\Windows") + "\\System32\\";
-    fprintf(stderr, "[update] %s: %s -> %s\n", tag.c_str(), url.c_str(), zip.c_str());
+    rt_launcher_log("[update] %s: %s -> %s\n", tag.c_str(), url.c_str(), zip.c_str());
     if (url.compare(0, 5, "file:") == 0) {
         fs::copy_file(u8p(url.substr(5)), u8p(zip), fs::copy_options::overwrite_existing, ec);
         if (ec) return upd_fail("can't copy the test zip"), (void *)NULL;
@@ -289,14 +290,14 @@ static void *upd_thread(void *) {
                 old += "." + std::to_string((long long)time(NULL)) + ".old";
             }
             fs::rename(to, old, ec);
-            if (ec) { fprintf(stderr, "[update] %s: %s\n", to.u8string().c_str(), ec.message().c_str()); return upd_fail("a program file couldn't be replaced (in use?)"), (void *)NULL; }
+            if (ec) { rt_launcher_log("[update] %s: %s\n", to.u8string().c_str(), ec.message().c_str()); return upd_fail("a program file couldn't be replaced (in use?)"), (void *)NULL; }
         }
         fs::rename(from, to, ec);
-        if (ec) { fprintf(stderr, "[update] %s: %s\n", to.u8string().c_str(), ec.message().c_str()); return upd_fail("a new file couldn't be put in place"), (void *)NULL; }
+        if (ec) { rt_launcher_log("[update] %s: %s\n", to.u8string().c_str(), ec.message().c_str()); return upd_fail("a new file couldn't be put in place"), (void *)NULL; }
         moved++;
     }
     fs::remove_all(u8p(work), ec);
-    fprintf(stderr, "[update] %s installed: %d files (%d of the player's kept)\n", tag.c_str(), moved, kept);
+    rt_launcher_log("[update] %s installed: %d files (%d of the player's kept)\n", tag.c_str(), moved, kept);
     if (FILE *f = fopen((dir + "\\_updated.txt").c_str(), "wb")) { fputs(tag.c_str(), f); fclose(f); }  // (the next run says so)
     g_upd_state = UPD_DONE;
     return NULL;
@@ -314,7 +315,7 @@ static void *upd_cleanup(void *) {
             pthread_mutex_lock(&g_update_lock);
             g_updated_tag = tag;
             pthread_mutex_unlock(&g_update_lock);
-            fprintf(stderr, "[update] this run follows the update to %s\n", tag);
+            rt_launcher_log("[update] this run follows the update to %s\n", tag);
         }
         fclose(f);
         remove(note.c_str());
@@ -329,7 +330,7 @@ static void *upd_cleanup(void *) {
         }
         if (it->path().extension() == ".old" && fs::remove(it->path(), ec)) n++;
     }
-    if (n) fprintf(stderr, "[update] %d replaced files deleted\n", n);
+    if (n) rt_launcher_log("[update] %d replaced files deleted\n", n);
     return NULL;
 }
 #endif
@@ -424,10 +425,10 @@ static const char *fail_hint(int k, bool pt) {
         "ZA Recomp runs versions 1.0.0, 2.0.0 and 2.0.2 of the game (base game, or base game + the 2.0.0 or 2.0.2 "
         "update).",
         "Some files are missing. Choose the folder again; if it happens again, dump the game again.",
-        "Make sure there's about 4 GB free and try again. If it keeps happening, report it on GitHub.",
+        "Make sure there's about 4 GB free and try again. If it keeps happening, report it on GitHub with logs/launcher.log.",
         "Put the prod.keys (and title.keys) dumped from your own Switch in the folder with the game files. Any file "
         "name works (prod.keys.txt, keys.txt...): it is recognized by what is inside it.",
-        "The full reason is in lasrecomp.log next to the program."};
+        "The full reason is in logs/launcher.log, in the data folder."};
     static const char *const ptb[] = {
         "",
         "Escolha a pasta com o seu Pokémon Legends Z-A extraído (pastas exefs e romfs), ou com o seu dump (.xci / .nsp) "
@@ -436,15 +437,16 @@ static const char *fail_hint(int k, bool pt) {
         "Veja se há uns 12 GB livres e tente de novo.",
         "O ZA Recomp roda as versões 1.0.0, 2.0.0 e 2.0.2 do jogo (jogo base, ou jogo base + atualização 2.0.0 ou 2.0.2).",
         "Faltam arquivos. Escolha a pasta de novo; se acontecer outra vez, faça o dump do jogo de novo.",
-        "Veja se há uns 4 GB livres e tente de novo. Se continuar, avise no GitHub.",
+        "Veja se há uns 4 GB livres e tente de novo. Se continuar, avise no GitHub com o arquivo logs/launcher.log.",
         "Coloque o prod.keys (e o title.keys) do seu próprio Switch na pasta dos arquivos do jogo. Qualquer nome serve "
         "(prod.keys.txt, keys.txt...): ele é reconhecido pelo conteúdo.",
-        "O motivo completo está no lasrecomp.log, ao lado do programa."};
+        "O motivo completo está em logs/launcher.log, na pasta de dados."};
     return k >= 1 && k <= 8 ? (pt ? ptb : en)[k] : "";
 }
 static void set_failure(int k, const std::string &detail = "") {
     if (k < 1 || k > 8) return;
     g_fail = k, g_fail_detail = detail;
+    rt_launcher_log("[launcher] failure shown: %s%s%s\n", fail_head(k, false), detail.empty() ? "" : ": ", detail.c_str());
     set_job(fail_head(k, false), true, detail.empty() ? fail_hint(k, false) : detail + "\n" + fail_hint(k, false));
 }
 
@@ -650,7 +652,7 @@ static bool import_packages(const std::vector<std::string> &pkgs, const std::str
         if (r >= 0) break;
         SDL_Delay(100);
     }
-    fprintf(stderr, "[launcher] zaimport: exit %d, %s\n", r, last);
+    rt_launcher_log("[launcher] zaimport: exit %d, %s\n", r, last);
     if (r != 0) {
         err = !strncmp(last, "error: ", 7) ? last + 7 : last;
         return false;
@@ -754,13 +756,13 @@ static bool make_prompts(bool wait) {
                           "--install", stamp.c_str(), NULL};
     PlatProc p = plat_spawn(argv, "textures/prompts.log", false);
     if (!wait || !p) {
-        fprintf(stderr, "[launcher] button icons: %s\n", p ? "being made (zaprompts, textures/prompts.log)" : "zaprompts didn't start");
+        rt_launcher_log("[launcher] button icons: %s\n", p ? "being made (zaprompts, textures/prompts.log)" : "zaprompts didn't start");
         g_prompts_proc = p;
         g_prompts_busy = false;
         return p != 0;
     }
     int r = plat_proc_wait(p, true);
-    fprintf(stderr, "[launcher] button icons: %s (zaprompts exit %d; textures/prompts.log)\n", r == 0 ? "made" : "not made", r);
+    rt_launcher_log("[launcher] button icons: %s (zaprompts exit %d; textures/prompts.log)\n", r == 0 ? "made" : "not made", r);
     g_prompts_busy = false;
     return r == 0;
 }
@@ -778,7 +780,7 @@ static void xbox_layout_before_play(void) {
                           "--xbox-attack-layout-only", NULL};
     PlatProc p = plat_spawn(argv, "textures/xbox-layout.log", false);
     int r = p ? plat_proc_wait(p, true) : -1;
-    fprintf(stderr, "[launcher] Xbox battle layout: %s (zaprompts exit %d; textures/xbox-layout.log)\n",
+    rt_launcher_log("[launcher] Xbox battle layout: %s (zaprompts exit %d; textures/xbox-layout.log)\n",
             r == 0 ? "prepared" : "not prepared", r);
 }
 // runtime/main.c, a set-up copy booting straight into the game: the icons made in the background if they never were,
@@ -822,7 +824,7 @@ static bool build_game_code(void) {
     g_build_frac = 0;
     bool ok = gamebuild_run(g_root.c_str(), &o, why, sizeof why);
     if (!ok) {
-        fprintf(stderr, "[launcher] game code: %s\n", why);
+        rt_launcher_log("[launcher] game code: %s\n", why);
         if (g_cancel_build) set_job("Compilation cancelled. Completed files are kept.");
         else set_failure(FAIL_BUILD, gamebuild_killed() ? why : "");
     }
@@ -863,7 +865,7 @@ static void *extract_thread(void *) {
             goto done;
         }
         std::string title_keys = find_title_keys(src, keys);
-        fprintf(stderr, "[launcher] %zu package(s), keys %s, title keys %s\n", pkgs.size(), keys.c_str(),
+        rt_launcher_log("[launcher] %zu package(s), keys %s, title keys %s\n", pkgs.size(), keys.c_str(),
                 title_keys.empty() ? "-" : title_keys.c_str());
         rt_remove_game_files(g_root.c_str());
         mkdir(g_root.c_str(), 0755);
@@ -1043,7 +1045,7 @@ static void import_save() {
                      (backup.empty() ? "" : std::string(TR(" Your previous save is in ", " O seu save anterior está em ")) + backup + ".");
         return;
     }
-    fprintf(stderr, "[launcher] save imported from %s%s%s\n", pick.c_str(), backup.empty() ? "" : ", previous one in ", backup.c_str());
+    rt_launcher_log("[launcher] save imported from %s%s%s\n", pick.c_str(), backup.empty() ? "" : ", previous one in ", backup.c_str());
     g_save_failed = false;
     g_save_msg = std::string(TR("Save imported.", "Save importado.")) +
                  (backup.empty() ? "" : std::string(TR(" Your previous save was kept as a backup.", " O seu save anterior virou um backup.")));
@@ -1315,11 +1317,11 @@ static void *mod_install_thread(void *) {
             goto done;
         }
         msg = std::string(TR("Installed: ", "Instalado: ")) + name;
-        fprintf(stderr, "[launcher] mod installed: %s -> %s\n", pick.c_str(), dst.c_str());
+        rt_launcher_log("[launcher] mod installed: %s -> %s\n", pick.c_str(), dst.c_str());
     }
 done:
     if (archive) plat_remove_tree(tmp.c_str());
-    if (!ok) fprintf(stderr, "[launcher] mod install from %s: %s\n", pick.c_str(), msg.c_str());
+    if (!ok) rt_launcher_log("[launcher] mod install from %s: %s\n", pick.c_str(), msg.c_str());
     pthread_mutex_lock(&g_mod_lock);
     g_mod_msg = msg, g_mod_failed = !ok;
     if (ok) g_mod_installed = name;
@@ -1391,7 +1393,7 @@ static void save_restore(const std::string &dir) {
         g_save_msg = TR("The backup couldn't be copied.", "Não deu para copiar o backup.");
         return;
     }
-    fprintf(stderr, "[launcher] save restored from %s%s%s\n", dir.c_str(), backup.empty() ? "" : ", previous one in ",
+    rt_launcher_log("[launcher] save restored from %s%s%s\n", dir.c_str(), backup.empty() ? "" : ", previous one in ",
             backup.c_str());
     g_save_failed = false;
     g_save_msg = TR("Backup restored. The save it replaced is now a backup too.",
@@ -1419,7 +1421,7 @@ static void save_export(void) {
     g_save_msg = ok ? std::string(TR("Save exported to ", "Save exportado para ")) + out
                     : TR("The save couldn't be exported (save/.export.log says why).",
                          "Não deu para exportar o save (o motivo está em save/.export.log).");
-    fprintf(stderr, "[launcher] save export to %s: %s\n", out.c_str(), ok ? "ok" : "failed");
+    rt_launcher_log("[launcher] save export to %s: %s\n", out.c_str(), ok ? "ok" : "failed");
 }
 
 // ------------------------------------------------------------------ screen
@@ -1732,7 +1734,7 @@ static bool video_prompt(float s) {
         if (ImGui::Button(TR("Keep mine", "Manter as minhas"), ImVec2(bw, 44 * s))) pick = 0;
         if (pick >= 0) {
             if (pick) settings_video_apply_recommended();
-            fprintf(stderr, "[launcher] recommended video settings %s\n", pick ? "applied" : "declined");
+            rt_launcher_log("[launcher] recommended video settings %s\n", pick ? "applied" : "declined");
             g_settings.video_rec = VREC_DONE;
             settings_save();
             ImGui::CloseCurrentPopup();
@@ -2050,7 +2052,7 @@ static void party_load(void) {
     }
     fclose(f);
     if (!party_block(p, blk)) {
-        if (!p.empty()) fprintf(stderr, "[launcher] team: no party in %s\n", main_path.c_str());
+        if (!p.empty()) rt_launcher_log("[launcher] team: no party in %s\n", main_path.c_str());
         return;
     }
     for (size_t i = 0; i + 0x158 <= blk.size() && i < 6 * 0x1E0; i += 0x1E0) {
@@ -2073,9 +2075,9 @@ static void party_load(void) {
         if (m.species <= 0 || m.species > 1025 || m.level > 100) continue;  // (not a Pokémon: a format this misreads)
         g_party.push_back(m);
     }
-    fprintf(stderr, "[launcher] team: %d in the party\n", (int)g_party.size());
+    rt_launcher_log("[launcher] team: %d in the party\n", (int)g_party.size());
     for (auto &m : g_party)  // (what each card's icon is looked up by: party_icon)
-        fprintf(stderr, "[launcher]   %s: species %d form %d model %d%s, level %d\n", m.egg ? "egg" : m.name.c_str(), m.species,
+        rt_launcher_log("[launcher]   %s: species %d form %d model %d%s, level %d\n", m.egg ? "egg" : m.name.c_str(), m.species,
                 m.form, party_model(m.species), m.shiny ? " shiny" : "", m.level);
 }
 
@@ -2122,7 +2124,7 @@ static void party_icons_kick(void) {  // made when missing (3 tries: cache/party
     if (FILE *f = fopen(PARTY_ICONS ".tried", "wb")) fprintf(f, "%d", tries + 1), fclose(f);
     const char *argv[] = {tool, "--romfs", romfs.c_str(), "--party-icons", PARTY_ICONS, NULL};
     g_party_icons_proc = plat_spawn(argv, PARTY_ICONS ".log", false);
-    fprintf(stderr, "[launcher] team icons: %s\n", g_party_icons_proc ? "being made (" PARTY_ICONS ".log)" : "zaprompts didn't start");
+    rt_launcher_log("[launcher] team icons: %s\n", g_party_icons_proc ? "being made (" PARTY_ICONS ".log)" : "zaprompts didn't start");
 }
 
 #ifdef __APPLE__
@@ -2335,7 +2337,7 @@ extern "C" void launcher_run(const char *root) {
         g_src = t;
         g_busy = true;
         extract_thread(NULL);
-        fprintf(stderr, "[launcher] setup: %s -> %s\n%s\n", g_job.c_str(),
+        rt_launcher_log("[launcher] setup: %s -> %s\n%s\n", g_job.c_str(),
                 check_game_files(g_root).empty() ? "READY" : "NOT READY", g_job_hint.c_str());
         exit(0);
     }
@@ -2349,19 +2351,19 @@ extern "C" void launcher_run(const char *root) {
     if (const char *t = getenv("LARECOMP_LAUNCHER_IMPORT_SAVE")) {  // (test) <folder>: Import save, logged
         g_save_pick = t;
         import_save();
-        fprintf(stderr, "[launcher] import save: %s\n", g_save_msg.c_str());
+        rt_launcher_log("[launcher] import save: %s\n", g_save_msg.c_str());
     }
     if (const char *t = getenv("LARECOMP_MOD_INSTALL")) {  // (test) <archive or folder>: install it, log, exit
         mod_install(t);
         while (g_mod_busy) SDL_Delay(50);
-        fprintf(stderr, "[launcher] mod install: %s (%s)\n", g_mod_msg.c_str(), g_mod_failed ? "failed" : "ok");
+        rt_launcher_log("[launcher] mod install: %s (%s)\n", g_mod_msg.c_str(), g_mod_failed ? "failed" : "ok");
         exit(g_mod_failed);
     }
     if (getenv("LARECOMP_LAUNCHER_DELETE")) {  // (test) what DELETE GAME FILES does, logged; then the start screen
         double gb = rt_game_files_size(g_root.c_str()) / 1e9;
         bool ok = rt_remove_game_files(g_root.c_str());
         status = check_game_files(g_root);
-        fprintf(stderr, "[launcher] delete %.1f GB: %s -> %s\n", gb, ok ? "ok" : "refused", status.c_str());
+        rt_launcher_log("[launcher] delete %.1f GB: %s -> %s\n", gb, ok ? "ok" : "refused", status.c_str());
     }
     static bool typed_before;
     while (!play) {
@@ -2807,7 +2809,7 @@ extern "C" void launcher_run(const char *root) {
                     ImGui::Dummy(ImVec2(0, 10 * s));
                     if (ImGui::Button(TR("Delete", "Apagar"), ImVec2(220 * s, 44 * s))) {
                         plat_remove_tree(("mods/" + confirm_name).c_str());
-                        fprintf(stderr, "[launcher] mod deleted: %s\n", confirm_name.c_str());
+                        rt_launcher_log("[launcher] mod deleted: %s\n", confirm_name.c_str());
                         g_mods_changed = true;
                         ImGui::CloseCurrentPopup();
                     }
@@ -3025,7 +3027,7 @@ extern "C" void launcher_run(const char *root) {
                 int ust = g_upd_state.load();
 #ifdef _WIN32
                 if (ust == UPD_DONE) {  // the new program, same command line; this one ends
-                    fprintf(stderr, "[update] starting the new version\n");
+                    rt_launcher_log("[update] starting the new version\n");
                     if (plat_relaunch()) exit(0);
                     rt_paths_restart();  // (could not start it detached: the old way, waited for)
                 }

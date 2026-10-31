@@ -16,6 +16,7 @@
 #include "../platform.h"
 
 void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
+void rt_launcher_log(const char *fmt, ...);  // runtime/launcher_log.c
 
 // ---- guest address space
 // The window is reserved up front and committed per region (plat_commit from the loader / kernel). Anything
@@ -1155,7 +1156,7 @@ PlatProc plat_spawn(const char *const argv[], const char *log_path, bool append_
     for (wchar_t *p = wprog; *p; p++) if (*p == L'/') *p = L'\\';
     const wchar_t *app = GetFullPathNameW(wprog, MAX_PATH, wfull, NULL) ? wfull : NULL;
     BOOL ok = CreateProcessW(app, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, NULL, NULL, &si, &pi);
-    if (!ok) fprintf(stderr, "[plat] could not start %s (error %lu)\n", argv[0], GetLastError());
+    if (!ok) rt_launcher_log("[plat] could not start %s (error %lu)\n", argv[0], GetLastError());
     CloseHandle(log);
     if (!ok) return 0;
     // A separate job per helper: cancelling one compiler also stops its children immediately,
@@ -1205,7 +1206,7 @@ int plat_proc_wait(PlatProc p, bool block) {
     // (a crash's NTSTATUS, e.g. 0xC0000409, is not "still running" (-1): the caller gets 255, the log keeps the real one -
     // a helper that dies before writing anything leaves only this: 0xC0000135 / 0xC0000142 can't load, 0xC0000005 crashed,
     // 0xC0000022 access denied, usually an antivirus; #99 had only "exit status 255" and an empty log)
-    if (code > 255) fprintf(stderr, "[plat] a helper process ended with status 0x%08lX\n", (unsigned long)code);
+    if (code > 255) rt_launcher_log("[plat] a helper process ended with status 0x%08lX\n", (unsigned long)code);
     return code > 255 ? 255 : (int)code;
 }
 

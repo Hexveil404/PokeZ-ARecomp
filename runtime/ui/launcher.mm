@@ -101,7 +101,7 @@ static const char *build_version(const uint8_t id[8]) {
 static bool build_is_za(const uint8_t id[8]) { return build_version(id) && memcmp(id, BUILD_ID, 8); }
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
 // it): ZA Recomp's v<major>.<minor>.<patch> (Hexveil404/PokeZ-ARecomp releases).
-#define LARECOMP_VERSION "v0.1.13"
+#define LARECOMP_VERSION "v0.1.14"
 extern "C" void rt_launcher_log(const char *fmt, ...);  // runtime/launcher_log.c: logs/launcher.log and stderr
 extern "C" const char *rt_version(void) { return LARECOMP_VERSION; }  // (runtime/main.c: the log's first line)
 extern "C" const char *larecomp_version(void) { return LARECOMP_VERSION; }  // (the shader caches' tag)

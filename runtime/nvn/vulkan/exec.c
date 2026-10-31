@@ -3097,6 +3097,8 @@ static void build_pipeline(void *arg) {
     int bs = build_begin("pipeline vs/fs", k->prog->code[0] ? k->prog->code[0] : k->prog->prep_vh,
                          k->prog->code[1] ? k->prog->code[1] : k->prog->prep_fh);
     SLOW_FEEDBACK(c.pi);
+    extern bool g_vk_no_opt;  // (device.c vk_bad_code_note: this driver's optimizer gave the GPU invalid instructions)
+    if (g_vk_no_opt) c.pi.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &c.pi, NULL, &pp->pipe);
     SLOW_FEEDBACK_HIT();
     build_end(bs);
@@ -6036,6 +6038,8 @@ static void build_compute(void *arg) {
                                                 .pSpecializationInfo = &spec},
                                       .layout = cp->p.layout};
     SLOW_FEEDBACK(ci);
+    extern bool g_vk_no_opt;
+    if (g_vk_no_opt) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
     VkResult r = vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &cp->pipe);
     SLOW_FEEDBACK_HIT();
     atomic_fetch_add(&stat_compiles, 1);

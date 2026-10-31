@@ -89,6 +89,7 @@ extern int rt_romfs_files;
 void launcher_log_open(void);
 void launcher_log_file(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void rt_launcher_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+extern int rt_gpu_bad_code;     // (invalid instructions on this driver: device.c vk_bad_code_note)
 extern bool rt_game_data_bad;  // (the game's decompressor reported damaged data: am.c)
 extern int rt_mods_on;         // (mods layered over the game's files: fs.c)
 void crash_handler_install(void);  // per thread (alternate signal stack)

@@ -481,6 +481,44 @@ uint32_t vk_checkpoints(uint64_t *mark, uint32_t *stage, uint32_t max) {
     return n;
 }
 // After VK_ERROR_DEVICE_LOST: what the driver says faulted (VK_EXT_device_fault), into the log.
+// The GPU met an invalid instruction ("ip invalid", #93: the same move on one PC, every time, with or without mods): the
+// code it runs comes from the driver, not from us - GLSL can't express one. Two things can give it, and neither needs the
+// player: code kept in the pipeline cache, which goes now (and isn't saved over: the next start builds it again), and
+// then, if it happens again with a new cache on the same driver, the driver's optimizer: cache/gpu_bad_code counts them
+// per driver, and from the second on pipelines are built without optimization (g_vk_no_opt) until the driver changes.
+// LARECOMP_VK_BAD_CODE_FIX=0: off. LARECOMP_TEST_BAD_CODE=<frame>: this path at that frame, then a stop.
+#define BAD_CODE_FILE "cache/gpu_bad_code"
+#define PCACHE_FILE "cache/vk_pipelines.bin"
+#define PCACHE_TAG "cache/vk_pipelines.bin.tag"
+#define PCACHE_MAX (512ull << 20)
+bool g_vk_no_opt;
+static bool pcache_off;
+static int bad_code_count(void) {  // this driver's
+    unsigned drv = 0;
+    int n = 0;
+    FILE *f = fopen(BAD_CODE_FILE, "r");
+    if (f) {
+        if (fscanf(f, "%u %d", &drv, &n) != 2) n = 0;
+        fclose(f);
+    }
+    return drv == g_vk.props.driverVersion ? n : 0;
+}
+void vk_bad_code_note(void) {
+    static bool done;
+    const char *e = getenv("LARECOMP_VK_BAD_CODE_FIX");
+    if (done || (e && !atoi(e))) return;
+    done = true;
+    pcache_off = true;
+    remove(PCACHE_FILE);
+    remove(PCACHE_TAG);
+    int n = bad_code_count() + 1;
+    FILE *f = fopen(BAD_CODE_FILE, "w");
+    if (f) { fprintf(f, "%u %d\n", g_vk.props.driverVersion, n); fclose(f); }
+    rt_gpu_bad_code = n;
+    LOG("[vk] the GPU met an invalid instruction (%d on this driver): pipeline cache deleted%s\n", n,
+        n >= 2 ? ", the next start builds pipelines without optimization" : "");
+}
+
 void vk_device_fault_report(void) {
     static int once;
     if (once++ || !g_fault_ext) return;
@@ -501,6 +539,7 @@ void vk_device_fault_report(void) {
     {
         LOG("[vk]   address %s %#llx (precision %#llx)\n", addr[i].addressType < 7 ? kind[addr[i].addressType] : "?",
             (unsigned long long)addr[i].reportedAddress, (unsigned long long)addr[i].addressPrecision);
+        if (addr[i].addressType == VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_INVALID_EXT) vk_bad_code_note();
         gmem_fault_explain(addr[i].reportedAddress);
         if (addr[i].addressType >= VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT &&
             addr[i].addressType <= VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT)
@@ -536,8 +575,6 @@ void vk_log_memory(const char *why) {
 }
 
 // ---- pipeline cache file
-#define PCACHE_FILE "cache/vk_pipelines.bin"
-#define PCACHE_TAG "cache/vk_pipelines.bin.tag"
 static size_t pcache_saved;  // bytes of the last save (or load)
 void vk_pipeline_cache_save(void);
 
@@ -926,10 +963,20 @@ static void create_device(void) {
         fseek(fp, 0, SEEK_END);
         sz = (size_t)ftell(fp);
         fseek(fp, 0, SEEK_SET);
-        data = malloc(sz);
-        if (fread(data, 1, sz, fp) != sz) sz = 0;
+        // (it only ever grows - 703 MB on #93's PC, ours about 200 after long sessions: past this, a new one)
+        if (sz > PCACHE_MAX) {
+            LOG("[vk] pipeline cache: %zu MB is too much: starting a new one\n", sz >> 20);
+            sz = 0;
+        }
+        if (sz) {
+            data = malloc(sz);
+            if (fread(data, 1, sz, fp) != sz) sz = 0;
+        }
         fclose(fp);
     }
+    const char *bad_e = getenv("LARECOMP_VK_BAD_CODE_FIX");
+    g_vk_no_opt = !(bad_e && !atoi(bad_e)) && bad_code_count() >= 2;
+    if (g_vk_no_opt) LOG("[vk] pipelines without optimization: the GPU met invalid instructions twice on this driver\n");
     VkPipelineCacheCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = sz,
                                     .pInitialData = data};
     if (vkCreatePipelineCache(g_vk.dev, &pc, NULL, &g_vk.pcache) != VK_SUCCESS) {
@@ -946,6 +993,7 @@ static void create_device(void) {
 
 // Saved atomically (temp file + rename: a crash mid-write leaves the previous one), with its tag; one save at a time
 void vk_pipeline_cache_save(void) {
+    if (pcache_off) return;  // (vk_bad_code_note: what it holds is what went wrong)
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&lock);
     size_t sz = 0;
@@ -2010,6 +2058,11 @@ static void present_hooks(void) {
     extern void warp_frame(uint64_t frame);
     warp_frame(total_frames);
     { extern void pw_check(const char *when); pw_check("at present"); }  // (debug: LARECOMP_POOL_WATCH, exec.c)
+    {   // (test) LARECOMP_TEST_BAD_CODE=<frame>: as a device fault with an invalid instruction
+        static long at = -1;
+        if (at < 0) at = ENV("LARECOMP_TEST_BAD_CODE") ? atol(ENV("LARECOMP_TEST_BAD_CODE")) : 0;
+        if (at && (long)total_frames >= at) { vk_bad_code_note(); FATAL("[vk] test: device lost\n"); }
+    }
     extern void reboot_test_frame(uint64_t frame);  // runtime/main.c (LARECOMP_REBOOT_AT)
     reboot_test_frame(total_frames);
     extern void save_editor_frame(uint64_t frame);

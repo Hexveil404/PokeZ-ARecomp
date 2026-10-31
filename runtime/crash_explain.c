@@ -14,6 +14,7 @@ static char g_line[512];   // the first fatal line (FATAL message / "signal 11 a
 static uint64_t g_pc;      // a crash's host pc (0: a FATAL)
 bool rt_game_data_bad;
 int rt_mods_on;
+int rt_gpu_bad_code;
 int rt_romfs_files = -1;   // the game's own RomFS files (runtime/services/fs.c; -1: not read yet)
 enum { ROMFS_FILES = 3836 };  // (every supported version: runtime/ui/launcher.mm counts the same)
 
@@ -91,6 +92,13 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
                                                                          // unwind; runtime/hle/warp.c rt_cxa_throw)
         snprintf(head, sizeof head, "The game ran into an error it couldn't recover from");
         snprintf(what, sizeof what, "This is a bug in %s, not a problem with your game files or PC. %s", app, report);
+    } else if (rt_gpu_bad_code) {  // (before the Vulkan messages: the device loss that follows says nothing useful)
+        snprintf(head, sizeof head, "The graphics driver produced bad code for the GPU");
+        snprintf(what, sizeof what, rt_gpu_bad_code == 1
+                 ? "%s has deleted the driver's shader cache, which may be why. Start the game again: it stutters for a while "
+                   "as shaders are built again, nothing else changes. If it comes back, updating your graphics driver can help."
+                 : "%s will now build shaders without the driver's optimizer, which avoids this kind of driver bug. Start the "
+                   "game again: it may run slower until you update your graphics driver.", app);
     } else if (has("svcBreak") && rt_game_data_bad) {  // (the same spot every time: nothing another start would change, #89)
         snprintf(head, sizeof head, "Damaged game data");
         snprintf(what, sizeof what, "The game read data from its files that can't be unpacked, so it stopped. %s"

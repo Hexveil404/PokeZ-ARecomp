@@ -22,6 +22,7 @@
 #define R_INVALID_ENUM 0xF001
 #define R_OUT_OF_RESOURCE 0xD001
 #define R_LIMIT_REACHED 0x10801
+#define R_INVALID_CURRENT_MEMORY 0xD401
 
 #define PSEUDO_THREAD 0xFFFF8000u
 #define PSEUDO_PROCESS 0xFFFF8001u
@@ -149,6 +150,22 @@ static void region_add(uint64_t addr, uint64_t size, uint32_t type, uint32_t per
     int i = nregions++;
     while (i > 0 && regions[i - 1].addr > addr) { regions[i] = regions[i - 1]; i--; }
     regions[i] = (Region){addr, size, type, perm};
+}
+
+// The SDK picks a random free address, then maps there: another thread can take it in between. The console refuses the
+// second one (InvalidCurrentMemory) and the SDK picks again; taken as it came, two stacks, or a stack and hid's shared
+// memory, shared their pages: the odd start that stopped in nn::hid::GetNpadJoyAssignment over a value only a stack
+// could have put there. (g_mlock held)
+static bool region_taken(uint64_t addr, uint64_t size, const char *what) {
+    for (int i = 0; i < nregions; i++)
+        if (regions[i].addr < addr + size && addr < regions[i].addr + regions[i].size) {
+            static int nlog;
+            if (nlog++ < 20)
+                LOG("[kernel] %s %llx+%llx refused: taken by %llx+%llx (type %x)\n", what, (unsigned long long)addr,
+                    (unsigned long long)size, (unsigned long long)regions[i].addr, (unsigned long long)regions[i].size, regions[i].type);
+            return true;
+        }
+    return false;
 }
 
 static void region_remove(uint64_t addr) {
@@ -772,10 +789,15 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     }
     case 0x02: case 0x03: x[0] = R_OK; break;  // SetMemoryPermission / SetMemoryAttribute
     case 0x04:  // MapMemory(dst, src, size): src is inaccessible while mapped, so copying is equivalent
-        memcpy((void *)x[0], (void *)x[1], x[2]);
         pthread_mutex_lock(&g_mlock);
+        if (region_taken(x[0], x[2], "MapMemory")) {
+            pthread_mutex_unlock(&g_mlock);
+            x[0] = R_INVALID_CURRENT_MEMORY;
+            break;
+        }
         region_add(x[0], x[2], 0xB, 3);
         pthread_mutex_unlock(&g_mlock);
+        memcpy((void *)x[0], (void *)x[1], x[2]);
         x[0] = R_OK;
         break;
     case 0x05:  // UnmapMemory(dst, src, size): copy back
@@ -862,11 +884,16 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         KObject *o = handle_get((uint32_t)x[0]);
         if (!o || o->type != KOBJ_SHMEM) { x[0] = R_INVALID_HANDLE; break; }
         KSharedMem *s = (KSharedMem *)o;
-        memset((void *)x[1], 0, x[2]);
-        s->guest_addr = x[1];  // HLE services write straight into the guest's mapping
         pthread_mutex_lock(&g_mlock);
+        if (region_taken(x[1], x[2], "MapSharedMemory")) {
+            pthread_mutex_unlock(&g_mlock);
+            x[0] = R_INVALID_CURRENT_MEMORY;
+            break;
+        }
         region_add(x[1], x[2], 6, 3);
         pthread_mutex_unlock(&g_mlock);
+        memset((void *)x[1], 0, x[2]);
+        s->guest_addr = x[1];  // HLE services write straight into the guest's mapping
         if (s->on_map) s->on_map(s);
         x[0] = R_OK;
         break;

@@ -465,7 +465,7 @@ static void tab_display(bool in_game) {
                 g_settings.fps60 = fr == 1;
             bool fall = !g_settings.fps60_lock;
             ImGui::BeginDisabled(!g_settings.fps60);
-            if (opt_toggle(TR("Drop to 30 fps when needed", "Cair para 30 fps quando preciso"), &fall, true,
+            if (opt_toggle(TR("Drop to 30 fps when needed", "Cair para 30 fps quando preciso"), &fall, false,
                            TR("With 60 fps: when this PC doesn't keep 60 for a few seconds, the game goes back to 30 fps by "
                               "itself instead of running in slow motion (choose 60 fps again to retry). Off: it stays at "
                               "60 - smoother when the PC keeps up, slow motion whenever it doesn't.",

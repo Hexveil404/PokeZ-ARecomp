@@ -48,6 +48,7 @@ Settings g_settings = {
     .controller_light = true,
     .menu_confirm = MENU_CONFIRM_CONTROLLER,
     .show_fps = false,
+    .fps60_lock = true,  // ("Drop to 30 fps when needed" off unless the player turns it on)
     .tex_hd = true,
     .shadow_res = 1,
     .shadow_sharp = 1,

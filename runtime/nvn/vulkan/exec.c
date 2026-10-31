@@ -5795,7 +5795,10 @@ static bool guest_direct(int kind, uint64_t addr, uint64_t size, VkBuffer *buf, 
         return true;
     }
     if (addr + size > gwin_base + gmem_lo + gmem_size && gwin_want() != gmem_tried) { gmem_tried = gwin_want(); gmem_info(); }
-    if (gmem_lo && xm_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }  // (the mirror needs no import)
+    // (the mirror needs no import) Vertex streams only, as below: a windowed import (gmem_lo: LARECOMP_VK_GMEM_WINDOW,
+    // a Steam Deck) reached this first and served index buffers from stale mirror bytes - with the mirror forced on
+    // there (LARECOMP_VK_XFB_MIRROR=1, off by default on AMD), characters' triangles stretched into spikes (2026-10-30)
+    if (gmem_lo && kind == 0 && xm_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }
     if (!GM_IN(addr, size)) return false;
     if (vcache_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }
     if (kind == 0 && xm_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }

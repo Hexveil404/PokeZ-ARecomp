@@ -2339,6 +2339,12 @@ static uint64_t prog_content_key(uint64_t vh, uint64_t fh, const ShaderKey *vkey
     b = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    // (the fragment stage's sampler kinds too: without them a draw sampling a stencil or integer texture found the prepared
+    // program, always built with float samplers - invalid in Vulkan, and what the battle effects' GPU faults came from: the
+    // prepared ones have none of these bits, so it now builds its own at first use, #63 #92 #93)
+    const uint32_t sl[2] = {fkey->stencil_slots, fkey->sint_slots};
+    b = (const uint8_t *)sl;
+    for (size_t i = 0; i < sizeof sl; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
     return h;
 }
 
@@ -2436,6 +2442,14 @@ static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
         uint64_t vh = shader_stage_hash(&np->stages[0]), fh = shader_stage_hash(&np->stages[1]);
         uint64_t ck = prog_content_key(vh, fh, vkey, fkey);
         Prog *pp = vh && fh && prep_progs_n ? PREP_GET(prep_progs, ck) : NULL;
+        if (!pp && vh && fh && prep_progs_n && (fkey->stencil_slots || fkey->sint_slots)) {
+            ShaderKey f0 = *fkey;
+            f0.stencil_slots = f0.sint_slots = 0;
+            static int nlog;
+            if (PREP_GET(prep_progs, prog_content_key(vh, fh, vkey, &f0)) && nlog++ < 20)
+                LOG("[shader] prepared program %016llx %016llx not used: this draw samples stencil / integer textures (%#x, %#x)\n",
+                    (unsigned long long)vh, (unsigned long long)fh, fkey->stencil_slots, fkey->sint_slots);
+        }
         if (pp) {
             kv_set(&prog_kv, slot, h, pp);
             prog_fp_check(pp, np);
@@ -6010,6 +6024,7 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
     vkey.flip_x = fkey.flip_x = (r->flags & SR_FLIP_X) != 0;
     for (int i = 0; i < r->nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(r->attrib[i] & 0xFF);
     for (int i = 0; i < r->ncolor && i < 8; i++) if (r->color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(r->color[i]);
+    fkey.stencil_slots = r->fstencil, fkey.sint_slots = r->fsint;
     uint64_t ck = prog_content_key(r->vs, r->fs, &vkey, &fkey);
     Prog *p = PREP_GET(prep_progs, ck);
     if (!p) {
@@ -6317,6 +6332,7 @@ static void rec_from_state(ShaderRec *r, bool flip_x, uint32_t mode) {
     r->kind = 'G';
     r->vs = shader_stage_hash(&st.program->stages[0]);
     r->fs = shader_stage_hash(&st.program->stages[1]);
+    r->fstencil = stencil_slots(1, &r->fsint);
     r->flags = (nvn_window_origin() == 0 ? SR_FLIP_Y : 0) | (nvn_depth_mode() == 0 ? SR_DEPTH_MINUS_ONE : 0) | (flip_x ? SR_FLIP_X : 0);
     r->nattrib = (uint8_t)(st.nattrib < 16 ? st.nattrib : 16);
     memcpy(r->attrib, st.attrib, sizeof r->attrib[0] * r->nattrib);

@@ -89,6 +89,7 @@ void shader_rec_format(const ShaderRec *r, char *out, size_t n) {
         for (int k = 0; k < 8; k++) PUT("%02x", r->blend[i][k]);
     }
     PUT(" k=%u t=%u p=%u", r->a2c, r->topo, r->poly_fill);
+    if (r->fstencil || r->fsint) PUT(" x=%x/%x", r->fstencil, r->fsint);  // (only then: other records' lines stay as they were)
 #undef PUT
 }
 
@@ -133,6 +134,11 @@ bool shader_rec_parse(const char *line, ShaderRec *r) {
     if (!(v = field(line, "fs"))) return false;
     r->fs = strtoull(v, NULL, 16);
     if ((v = field(line, "f"))) r->flags = (uint8_t)strtoul(v, NULL, 16);
+    if ((v = field(line, "x"))) {
+        char *e;
+        r->fstencil = (uint32_t)strtoul(v, &e, 16);
+        if (*e == '/') r->fsint = (uint32_t)strtoul(e + 1, NULL, 16);
+    }
     int n = (v = field(line, "a")) ? hex_list(v, r->attrib, 16) : 0;
     if (n < 0) return false;
     r->nattrib = (uint8_t)n;

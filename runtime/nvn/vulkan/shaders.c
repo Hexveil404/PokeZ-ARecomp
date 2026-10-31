@@ -146,9 +146,19 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
 }
 
 VkShaderModule vk_module(const uint32_t *spv, size_t nwords) {
-    VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nwords * 4, .pCode = spv};
+    extern uint32_t g_vk_spirv_salt;  // (device.c vk_bad_code_note: a shader the driver's own disk cache doesn't know)
+    uint32_t *salted = NULL;
+    if (g_vk_spirv_salt && nwords > 5) {
+        salted = malloc(nwords * 4);
+        memcpy(salted, spv, nwords * 4);
+        salted[2] ^= g_vk_spirv_salt << 16;  // (the generator's tool id: read by no one)
+    }
+    VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nwords * 4,
+                                   .pCode = salted ? salted : spv};
     VkShaderModule m;
-    return vkCreateShaderModule(g_vk.dev, &ci, NULL, &m) == VK_SUCCESS ? m : VK_NULL_HANDLE;
+    VkResult r = vkCreateShaderModule(g_vk.dev, &ci, NULL, &m);
+    free(salted);
+    return r == VK_SUCCESS ? m : VK_NULL_HANDLE;
 }
 
 VkShaderModule vk_compile_glsl(const char *src, int stage, const char *name) {

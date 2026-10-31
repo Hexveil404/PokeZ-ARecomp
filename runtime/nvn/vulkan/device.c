@@ -486,12 +486,16 @@ uint32_t vk_checkpoints(uint64_t *mark, uint32_t *stage, uint32_t max) {
 // player: code kept in the pipeline cache, which goes now (and isn't saved over: the next start builds it again), and
 // then, if it happens again with a new cache on the same driver, the driver's optimizer: cache/gpu_bad_code counts them
 // per driver, and from the second on pipelines are built without optimization (g_vk_no_opt) until the driver changes.
+// The driver keeps a disk cache of its own, out of our reach, and Vulkan device losses on 617.42 / 621.01 have been tied to
+// pipelines coming from it (NVIDIA forum, RTX 5070 Ti): the count also goes in each shader's SPIR-V header (g_vk_spirv_salt:
+// the generator word, which changes nothing but the shader's hash), so after a fault the driver builds everything anew.
 // LARECOMP_VK_BAD_CODE_FIX=0: off. LARECOMP_TEST_BAD_CODE=<frame>: this path at that frame, then a stop.
 #define BAD_CODE_FILE "cache/gpu_bad_code"
 #define PCACHE_FILE "cache/vk_pipelines.bin"
 #define PCACHE_TAG "cache/vk_pipelines.bin.tag"
 #define PCACHE_MAX (512ull << 20)
 bool g_vk_no_opt;
+uint32_t g_vk_spirv_salt;
 static bool pcache_off;
 static int bad_code_count(void) {  // this driver's
     unsigned drv = 0;
@@ -976,6 +980,8 @@ static void create_device(void) {
     }
     const char *bad_e = getenv("LARECOMP_VK_BAD_CODE_FIX");
     g_vk_no_opt = !(bad_e && !atoi(bad_e)) && bad_code_count() >= 2;
+    g_vk_spirv_salt = bad_e && !atoi(bad_e) ? 0 : (uint32_t)bad_code_count();
+    if (g_vk_spirv_salt) LOG("[vk] shaders salted (%u): the driver's own cache isn't used for them\n", g_vk_spirv_salt);
     if (g_vk_no_opt) LOG("[vk] pipelines without optimization: the GPU met invalid instructions twice on this driver\n");
     VkPipelineCacheCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = sz,
                                     .pInitialData = data};

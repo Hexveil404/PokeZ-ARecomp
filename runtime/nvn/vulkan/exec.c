@@ -3102,6 +3102,13 @@ static void build_pipeline(void *arg) {
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &c.pi, NULL, &pp->pipe);
     SLOW_FEEDBACK_HIT();
     build_end(bs);
+    {   // (how much of the session's pipeline time is the driver's: every 200, with the driver's cache hits)
+        static _Atomic uint64_t ns, count, hits;
+        uint64_t c_ = atomic_fetch_add(&count, 1) + 1, n_ = atomic_fetch_add(&ns, SDL_GetTicksNS() - t0) + (SDL_GetTicksNS() - t0);
+        if (fb_.flags & VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT) atomic_fetch_add(&hits, 1);
+        if (!(c_ % 200)) LOG("[vk] pipelines built: %llu in %llu ms, %llu from a cache\n", (unsigned long long)c_,
+                             (unsigned long long)(n_ / 1000000), (unsigned long long)atomic_load(&hits));
+    }
     if (r != VK_SUCCESS) {
         static int n;
         if (n++ < 10) LOG("[vk] pipeline creation failed: %d\n", r);

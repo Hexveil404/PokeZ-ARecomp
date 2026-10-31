@@ -1403,13 +1403,19 @@ static void st_defaults(void) {
 static VkPipeline pipe_resolve(void *obj, bool wait);
 void vk_exec_init(void) {
     maxwell_disk_cache = true;  // (translate.c: the game's translations kept in cache/maxwell)
-    // The straight-line shader form (translate.c glsl_flatten, v0.1.10) off on AMD GPUs: an RX 7600 and an RX 9070 XT
-    // (AMD 26.10.1) both lost the device on v0.1.10 at the first frames in the world, "read invalid 0xbeefdeadc000"
-    // (#54, #39), where v0.1.9 played; and RADV crashed in the driver with it on the whole-window import (#51).
+    // The straight-line shader form (translate.c glsl_flatten, v0.1.10) off on RADV only: it crashed in that driver with
+    // the whole-window import (#51). It was off on every AMD GPU for the "read invalid 0xbeefdeadc000" of #54 / #39, but
+    // that came from robust access 2 (the fault stayed with this form off), and AMD's Windows driver draws characters
+    // wrong without it: a dotted pattern over clothes and hair, turned off by this switch alone (5600G, #74).
     // LARECOMP_SHADER_FLAT=1: on, =0: off everywhere
     // (F1 > Compatibility: On / Off over the per-GPU default)
     int fcs = g_settings.gpu_compat[GPU_STRAIGHT];
-    maxwell_flat_default = fcs != GPU_AUTO ? fcs == GPU_ON : g_vk.props.vendorID != 0x1002;
+#ifdef _WIN32
+    bool flat_auto = true;
+#else
+    bool flat_auto = g_vk.props.vendorID != 0x1002;
+#endif
+    maxwell_flat_default = fcs != GPU_AUTO ? fcs == GPU_ON : flat_auto;
     if (!getenv("LARECOMP_SHADER_FLAT") && !maxwell_flat_default)
         LOG("[vk] straight-line shader form off (%s; LARECOMP_SHADER_FLAT=1: on)\n",
             fcs == GPU_OFF ? "F1 > Compatibility" : "this AMD GPU, F1 > Compatibility to turn it on");

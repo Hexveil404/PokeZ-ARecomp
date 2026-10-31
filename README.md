@@ -37,6 +37,7 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 - [Mods](#mods)
 - [Troubleshooting](#troubleshooting)
 - [Building from source](#building-from-source)
+- [Developer tools](#developer-tools)
 - [Credits](#credits)
 - [Legal](#legal)
 
@@ -253,7 +254,17 @@ Where things are: the recompiler is in `tools/`, the runtime in `runtime/` (HLE 
 Contributions are welcome. Never commit or attach Nintendo files (game files, extracted data, generated code, fonts,
 saves).
 
-Working on ZA Recomp itself? See the [developer tools](docs/dev-tools.md): ZA DevTools, record and replay, frame captures.
+## Developer tools
+
+For anyone working on the port itself. Players don't need these, and they stay off in a normal run.
+
+- **ZA DevTools**: a separate program with the live log, performance graphs and a frame inspector. You can mark a bug
+  while playing, then replay up to that moment.
+- **Record and replay**: `tools/za/replay-record.sh` and `tools/za/replay-play.sh`.
+- **Frame captures**: every pass and draw of a frame, with analysis scripts in `tools/devtools/analysis/`.
+
+The [developer tools guide](docs/dev-tools.md) covers setup and how to use each one. To build ZA DevTools on Windows:
+`bash tools/devtools/build.sh`.
 
 ## Credits
 

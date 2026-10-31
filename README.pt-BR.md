@@ -37,6 +37,7 @@ para *The Legend of Zelda: Link's Awakening*.
 - [Mods](#mods)
 - [Solução de problemas](#solução-de-problemas)
 - [Compilando o código-fonte](#compilando-o-código-fonte)
+- [Ferramentas de desenvolvimento](#ferramentas-de-desenvolvimento)
 - [Créditos](#créditos)
 - [Aviso legal](#aviso-legal)
 
@@ -248,7 +249,17 @@ as ferramentas do Pokémon Z-A em `tools/za/`.
 Contribuições são bem-vindas. Nunca faça commit nem anexe arquivos da Nintendo (arquivos do jogo, dados extraídos,
 código gerado, fontes, saves).
 
-Vai trabalhar no próprio ZA Recomp? Veja as [ferramentas de desenvolvimento](docs/dev-tools.pt-BR.md): ZA DevTools, gravação e replay, captura de frame.
+## Ferramentas de desenvolvimento
+
+Para quem trabalha no próprio port. Quem só joga não precisa delas, e elas ficam desligadas numa execução normal.
+
+- **ZA DevTools**: um programa separado com log ao vivo, gráficos de desempenho e inspetor de frame. Dá para marcar um
+  bug enquanto joga e depois reproduzir até aquele momento.
+- **Gravar e reproduzir**: `tools/za/replay-record.sh` e `tools/za/replay-play.sh`.
+- **Captura de frame**: todos os passes e draws de um frame, com scripts de análise em `tools/devtools/analysis/`.
+
+O [guia das ferramentas de desenvolvimento](docs/dev-tools.pt-BR.md) explica a preparação e como usar cada uma. Para
+compilar o ZA DevTools no Windows: `bash tools/devtools/build.sh`.
 
 ## Créditos
 

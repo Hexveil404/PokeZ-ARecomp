@@ -20,6 +20,10 @@ using Path = System.IO.Path;
 
 const ulong ZaBase = 0x0100F43008C44000;  // Pokémon Legends Z-A (update: +0x800, DLC: +0x1000 + n)
 
+// (the error line is read by the start screen as UTF-8: without this "Pokémon ...nsp" came out as "Pok?mon ...nsp", #96)
+// (a writer of its own: Console.OutputEncoding needs a console, and the start screen starts this without a usable one)
+Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true });
+
 try
 {
     return Run(args);
@@ -42,6 +46,20 @@ static int Fail(string why)
 {
     Console.WriteLine($"error: {why}");
     return 1;
+}
+
+// What a file that opened but has no NSP / XCI layout really is: the size and first bytes say a failed download or
+// copy (empty, or zeros) from another format at once, and it's what a report needs (#96)
+static string NotAPackage(string pkg)
+{
+    var name = Path.GetFileName(pkg);
+    using var f = File.OpenRead(pkg);
+    var head = new byte[4];
+    int got = f.Read(head, 0, 4);
+    string size = $"{f.Length / (1024.0 * 1024.0):0.0} MB", magic = Convert.ToHexString(head, 0, got);
+    if (got < 4 || head.All(b => b == 0))
+        return $"{name}: this file is empty or wasn't downloaded / copied completely ({size}). Get it again";
+    return $"{name}: not an NSP or XCI ({size}, starts with {magic}). Dump this package again from your Switch";
 }
 
 static int Run(string[] args)
@@ -71,7 +89,7 @@ static int Run(string[] args)
         else
         {
             var pfs = new PartitionFileSystem();
-            if (pfs.Initialize(st).IsFailure()) return Fail($"{Path.GetFileName(pkg)}: not an NSP or XCI");
+            if (pfs.Initialize(st).IsFailure()) return Fail(NotAPackage(pkg));
             fs = pfs;
         }
         foreach (var e in fs.EnumerateEntries("/", "*.tik"))

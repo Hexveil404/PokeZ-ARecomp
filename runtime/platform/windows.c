@@ -1202,7 +1202,11 @@ int plat_proc_wait(PlatProc p, bool block) {
     CloseHandle(child->process);
     if (child->job) CloseHandle(child->job);
     free(child);
-    return code > 255 ? 255 : (int)code;  // (a crash's NTSTATUS, e.g. 0xC0000409, is not "still running" (-1))
+    // (a crash's NTSTATUS, e.g. 0xC0000409, is not "still running" (-1): the caller gets 255, the log keeps the real one -
+    // a helper that dies before writing anything leaves only this: 0xC0000135 / 0xC0000142 can't load, 0xC0000005 crashed,
+    // 0xC0000022 access denied, usually an antivirus; #99 had only "exit status 255" and an empty log)
+    if (code > 255) fprintf(stderr, "[plat] a helper process ended with status 0x%08lX\n", (unsigned long)code);
+    return code > 255 ? 255 : (int)code;
 }
 
 // rm -rf that never goes through a link: a junction or symlink inside is removed itself (RemoveDirectory /

@@ -31,6 +31,7 @@ uint64_t maxwell_gmem_base, maxwell_gmem_size;
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 bool maxwell_gmem_lazy;
 bool maxwell_flat_default = true;
+bool maxwell_quad_ops;  // (vk_exec_init: the device has quad subgroup operations in fragment shaders)
 bool maxwell_gmem_fs_miss;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
@@ -393,6 +394,17 @@ static uint32_t himm(uint64_t w) {
 }
 
 // LARECOMP_WARP_EMU=0: plain subgroup calls instead of the prelude's per-32-lane-warp w* functions
+// The game's fragment shaders work out their own derivatives: a neighbour through SHFL xor 1 / xor 2, then FSWZADD picks
+// each lane's sign (86 shaders: eyes, hair, ...). That takes the lane for the pixel's place in its 2x2 quad, as on the
+// Switch. Vulkan's subgroup ids promise no such thing and AMD's are counted over the lanes in use, so a quad with few
+// pixels covered, or a branch, shifts them: wrong derivatives per pixel, dots that go at a higher resolution (#74, #92,
+// #95). Those shaders use the real quad operations and the pixel's own position (LARECOMP_SHADER_QUAD=0: subgroup ids).
+static bool quad_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("LARECOMP_SHADER_QUAD"); on = e ? atoi(e) != 0 : maxwell_quad_ops; }
+    return on;
+}
+
 static bool warp_emu(void) {
     static int on = -1;
     if (on < 0) on = !getenv("LARECOMP_WARP_EMU") || atoi(getenv("LARECOMP_WARP_EMU")) != 0;
@@ -1960,8 +1972,9 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (c->stage != STAGE_FRAGMENT) {
             sprintf(t, "as_type<uint>(%s + %s)", F(R(a)), F(R((int)bits(w, 20, 8))));
         } else {
-            c->uses_lane = true;
-            sprintf(t, "as_type<uint>(fswzadd(%s, %s, 0x%02xu, lane))", F(R(a)), F(R((int)bits(w, 20, 8))), swz);
+            bool ql = c->glsl && quad_on();
+            if (!ql) c->uses_lane = true;
+            sprintf(t, "as_type<uint>(fswzadd(%s, %s, 0x%02xu, %s))", F(R(a)), F(R((int)bits(w, 20, 8))), swz, ql ? "qlane" : "lane");
         }
         set_reg(c, d, t);
     } else if (OPM(0x5b40000000000000ull, 0xfff0000000000000ull) || OPM(0x4b40000000000000ull, 0xfff0000000000000ull) ||
@@ -2020,7 +2033,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             static const char *const fn_w[] = {"wshfl", "wup", "wdown", "wxor"},
                               *const fn_s[] = {"subgroupShuffle", "subgroupShuffleUp", "subgroupShuffleDown", "subgroupShuffleXor"};
             const char *const *fn = warp_emu() ? fn_w : fn_s;  // (per 32-lane warp: the prelude's w* functions)
-            sprintf(t, "%s(%s, uint(%s))", fn[mode], R(a), bv);
+            static const char *const quad[] = {NULL, "subgroupQuadSwapHorizontal", "subgroupQuadSwapVertical", "subgroupQuadSwapDiagonal"};
+            unsigned m = (unsigned)bits(w, 20, 5);
+            if (c->stage == STAGE_FRAGMENT && mode == 3 && bits(w, 28, 1) && m >= 1 && m <= 3 && quad_on())
+                sprintf(t, "%s(%s)", quad[m], R(a));
+            else sprintf(t, "%s(%s, uint(%s))", fn[mode], R(a), bv);
             set_reg(c, d, t);
         } else if (mode == 3) {
             bool quad = bits(w, 28, 1) && bits(w, 20, 5) < 4;
@@ -2190,6 +2207,7 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
         for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
             if (!strcmp(id, map[i][0])) { rep = map[i][1]; break; }
         if (!strcmp(id, "lane") && !warp_emu()) rep = "gl_SubgroupInvocationID";
+        if (!strcmp(id, "qlane")) rep = "((uint(gl_FragCoord.x) & 1u) | ((uint(gl_FragCoord.y) & 1u) << 1))";
         sp(o, "%s", rep);
     }
 }
@@ -2202,6 +2220,7 @@ static const char glsl_prelude[] =
     "#extension GL_KHR_shader_subgroup_shuffle_relative : require\n"
     "#extension GL_KHR_shader_subgroup_vote : require\n"
     "#extension GL_KHR_shader_subgroup_ballot : require\n"
+    "#extension GL_KHR_shader_subgroup_quad : require\n"
     "#extension GL_EXT_texture_shadow_lod : require\n"
     "#extension GL_ARB_shader_viewport_layer_array : enable\n"
     "#define cbr(cb, off) cb[min((off) >> 4, uint(cb.length() - 1))][((off) >> 2) & 3u]\n"
@@ -3205,7 +3224,7 @@ static uint64_t cache_key(const uint8_t *blob, size_t max_size, int stage, const
         if ((((const uint64_t *)code)[i] & 0xfff0000000000000ull) == 0xe250000000000000ull) return 0;  // BRX
     // (the straight-line switch is in the key: on and off translations of one shader differ, and a GPU that changes
     // the default - AMD - or a player's LARECOMP_SHADER_FLAT must not load the other form)
-    uint64_t v[5] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size, (uint64_t)maxwell_flat_on()};
+    uint64_t v[6] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size, (uint64_t)maxwell_flat_on(), (uint64_t)quad_on() + 2};
     uint64_t h = fnv(fnv(fnv(0xcbf29ce484222325ull, cache_build, sizeof cache_build), v, sizeof v), key, sizeof *key);
     h = fnv(h, blob, (size_t)(code - blob) + end * 8);
     return h ? h : 1;

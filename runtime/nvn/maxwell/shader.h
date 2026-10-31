@@ -124,6 +124,7 @@ extern bool maxwell_gmem_lazy;
 // The straight-line form of forward-only branches (glsl_flatten) unless LARECOMP_SHADER_FLAT says otherwise: the
 // runtime sets it before the first translation (Vulkan: off on AMD GPUs, exec.c vk_exec_init).
 extern bool maxwell_flat_default;
+extern bool maxwell_quad_ops;
 // Lazy mode, fragment: a shader without discard / depth output / stores declares early fragment tests (its GMiss
 // atomics would turn them off); one with discard / depth output (no stores) counts no misses - the
 // runtime imports the bound storage buffers' chunks before the draw. true (LARECOMP_VK_GMEM_FS_MISS=1): every shader

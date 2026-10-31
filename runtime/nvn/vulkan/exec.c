@@ -1416,6 +1416,11 @@ void vk_exec_init(void) {
     bool flat_auto = g_vk.props.vendorID != 0x1002;
 #endif
     maxwell_flat_default = fcs != GPU_AUTO ? fcs == GPU_ON : flat_auto;
+    VkPhysicalDeviceSubgroupProperties sg = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+    VkPhysicalDeviceProperties2 pr2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &sg};
+    vkGetPhysicalDeviceProperties2(g_vk.phys, &pr2);
+    maxwell_quad_ops = (sg.supportedOperations & VK_SUBGROUP_FEATURE_QUAD_BIT) && (sg.supportedStages & VK_SHADER_STAGE_FRAGMENT_BIT);
+    LOG("[vk] subgroups: %u lanes, quad operations in fragment shaders: %s\n", sg.subgroupSize, maxwell_quad_ops ? "yes" : "no");
     if (!getenv("LARECOMP_SHADER_FLAT") && !maxwell_flat_default)
         LOG("[vk] straight-line shader form off (%s; LARECOMP_SHADER_FLAT=1: on)\n",
             fcs == GPU_OFF ? "F1 > Compatibility" : "this AMD GPU, F1 > Compatibility to turn it on");

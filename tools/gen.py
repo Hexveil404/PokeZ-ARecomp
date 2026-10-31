@@ -564,6 +564,7 @@ class Module:
 # game version is known from the NSO's build ID (tools/game_addresses.py). Pokémon Legends Z-A: tools/za_patches.py.
 HOOKS, PATCHES = {}, {}
 from za_patches import ZA_BUILDS, za_patches
+from pla_patches import PLA_BUILDS, pla_patches
 
 import json as _json
 import os as _os
@@ -610,6 +611,12 @@ def main():
         if args.name == 'main':
             PATCHES.update(za_patches(main_build))
             print(f'{args.name}: Pokémon Legends Z-A (build {main_build}): {len(PATCHES)} game patch(es)')
+    elif main_build in PLA_BUILDS:  # Pokémon Legends Arceus: likewise none of Link's Awakening's
+        RANDO_CODE.clear()
+        if args.name == 'main':
+            PATCHES.update(pla_patches(main_build))
+            print(f'{args.name}: Pokémon Legends Arceus {PLA_BUILDS[main_build]} (build {main_build}): '
+                  f'{len(PATCHES)} game patch(es)')
     elif args.name == 'main':
         import game_addresses
         try:

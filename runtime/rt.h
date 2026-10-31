@@ -36,6 +36,8 @@ static inline void __attribute__((format(printf, 1, 2))) rt_log(const char *fmt,
 #endif
 #define MAIN_BASE    0x7000000000ull
 #define SDK_BASE     0x7008000000ull   // (128 MB for main: Pokémon Legends Z-A's image is 0x5f7a000)
+#define SUBSDK_BASE  0x700a000000ull   // subsdk0, then one every SUBSDK_STEP (Pokémon Legends Arceus: 5.5 and 9.8 MB)
+#define SUBSDK_STEP  0x0001000000ull
 #define HLE_BASE     0x7080000000ull   // fake addresses for host-implemented functions
 #define HLE_SIZE     0x0000100000ull
 #define TLS_BASE     0x7090000000ull

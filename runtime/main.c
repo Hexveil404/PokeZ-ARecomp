@@ -89,7 +89,10 @@ static void module_init(Cpu *c, Module *m) {
 }
 
 static void rtld_init_sdk(Cpu *c) { module_init(c, &g_modules[1]); }
-static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
+static void rtld_init_main(Cpu *c) {  // (the subsdkN first: main depends on them)
+    for (int i = 2; i < g_nmodules; i++) module_init(c, &g_modules[i]);
+    module_init(c, &g_modules[0]);
+}
 static void rtld_fini(Cpu *c) { (void)c; LOG("nnMain returned\n"); }
 
 // Claim the guest address range before anything else can map there. The host allocator places

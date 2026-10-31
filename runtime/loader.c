@@ -189,7 +189,10 @@ static void relocate(Module *m) {
     LOG("relocated %-5s (%d imports bound to host stubs)\n", m->name, unresolved);
 }
 
+// g_modules: main and sdk (always; main.c's rtld callbacks use [0] and [1]), then the subsdkN the game has (Pokémon
+// Legends Arceus: subsdk0, subsdk1), as tools/gen.py generated them (the same bases: runtime/gamebuild.c)
 void loader_load(const char *exefs) {
+    static const char *const subs[] = {"subsdk0", "subsdk1"};
     char path[1024];
     static const struct { const char *name; uint64_t base; } mods[] = {{"main", MAIN_BASE}, {"sdk", SDK_BASE}};
     for (unsigned i = 0; i < 2; i++) {
@@ -197,6 +200,15 @@ void loader_load(const char *exefs) {
         m->name = mods[i].name;
         snprintf(path, sizeof path, "%s/%s", exefs, m->name);
         load_nso(m, path, mods[i].base);
+    }
+    for (unsigned i = 0; i < sizeof subs / sizeof *subs && g_nmodules < (int)(sizeof g_modules / sizeof *g_modules); i++) {
+        snprintf(path, sizeof path, "%s/%s", exefs, subs[i]);
+        FILE *f = fopen(path, "rb");
+        if (!f) break;  // (numbered from 0 without gaps, as on the Switch)
+        fclose(f);
+        Module *m = &g_modules[g_nmodules++];
+        m->name = subs[i];
+        load_nso(m, path, SUBSDK_BASE + i * SUBSDK_STEP);
     }
     for (int i = 0; i < g_nmodules; i++) relocate(&g_modules[i]);
 }

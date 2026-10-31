@@ -253,6 +253,8 @@ Where things are: the recompiler is in `tools/`, the runtime in `runtime/` (HLE 
 Contributions are welcome. Never commit or attach Nintendo files (game files, extracted data, generated code, fonts,
 saves).
 
+Working on ZA Recomp itself? See the [developer tools](docs/dev-tools.md): ZA DevTools, record and replay, frame captures.
+
 ## Credits
 
 - **[Peiikai](https://github.com/peiikai)**: creator of [LAS Recomp](https://github.com/peiikai/LASRecomp), the static

@@ -248,6 +248,8 @@ as ferramentas do Pokémon Z-A em `tools/za/`.
 Contribuições são bem-vindas. Nunca faça commit nem anexe arquivos da Nintendo (arquivos do jogo, dados extraídos,
 código gerado, fontes, saves).
 
+Vai trabalhar no próprio ZA Recomp? Veja as [ferramentas de desenvolvimento](docs/dev-tools.pt-BR.md): ZA DevTools, gravação e replay, captura de frame.
+
 ## Créditos
 
 - **[Peiikai](https://github.com/peiikai)**: criador do [LAS Recomp](https://github.com/peiikai/LASRecomp), o

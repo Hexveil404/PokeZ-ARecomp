@@ -827,6 +827,13 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         ssize_t n = romfs_read((uint8_t *)(uintptr_t)b->addr, size, off);
         uint64_t t1 = plat_now_ns();
         if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", off, strerror(errno));
+        {   // (test) LARECOMP_FS_MBPS=<MB/s>: each read takes as long as at that speed (the console's storage: tens of MB/s;
+            // ours is instant, which may expose races in the game's streaming)
+            static double mbps = -1;
+            if (mbps < 0) mbps = getenv("LARECOMP_FS_MBPS") ? atof(getenv("LARECOMP_FS_MBPS")) : 0;
+            if (mbps > 0 && n > 0)
+                for (double us = (double)n / (mbps * 1048576.0) * 1e6; us > 0; us -= 500000) usleep(us > 500000 ? 500000 : (useconds_t)us);
+        }
         {   // (debug) LARECOMP_LOG_READS=<file>: every read as "<RomFS path> <offset in the file> <size> <ms since the
             // first read> <us it took>"
             static FILE *rf;

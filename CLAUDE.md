@@ -52,6 +52,8 @@ Machine-specific paths (game files, install folder) are in `CLAUDE.local.md` whe
 - `runtime/ui/launcher.mm` is ZA Recomp's own start screen (not upstream's): upstream launcher changes are ported by
   hand. Never delete `romfs.bin` there - for Pokémon Z-A it is the game's only data (zaimport writes no romfs/).
 - `tools/za/`: Z-A scripts (perf runs, log watcher, stack symbolizer, texture and font tools).
+- `tools/devtools/`, `tools/za/replay-*.sh`, `runtime/ui/devtools.mm`: ZA DevTools, record and replay, frame capture
+  analysis (`docs/dev-tools.md`). Off unless `LARECOMP_DEVTOOLS=1` or their own variables are set.
 
 ## Building (Windows, Git Bash)
 

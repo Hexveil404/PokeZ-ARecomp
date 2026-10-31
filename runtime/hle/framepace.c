@@ -100,5 +100,16 @@ int32_t rt_za_frame_cfg(int32_t cfg) {
     bool on = e ? atoi(e) >= 60 : fps60_holds();
     static int logged = -1;
     if (logged != (int)on) { logged = on; LOG("[pace] game frame mode %d -> %d (%s)\n", cfg, on ? 0 : cfg, on ? "60 fps" : "as is"); }
+    {   // the game's own time, in vsyncs: each frame it steps max(mode + 1, the vsyncs that really passed) - a replay
+        // keyed by this lands its inputs on the same moment of the game on a faster or slower PC (runtime/hle/input.c)
+        extern uint64_t g_game_vsyncs;
+        static uint64_t last;
+        uint64_t now = __atomic_load_n(&g_vsync_count, __ATOMIC_RELAXED), passed = last ? now - last : 0;
+        uint64_t step = (uint64_t)(on ? 0 : cfg) + 1;
+        if (passed > step) step = passed > 8 ? 8 : passed;  // (a long stall: the game caps its step too)
+        last = now;
+        g_game_vsyncs += step;
+    }
     return on ? 0 : cfg;
 }
+uint64_t g_game_vsyncs;  // (see rt_za_frame_cfg)

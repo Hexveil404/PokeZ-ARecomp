@@ -1,0 +1,15 @@
+# Copy to devtools.ini next to zadevtools.exe (it stays out of git) and fill in your paths.
+
+# Sessions, repros and captures are written here. The game runs with this as its working folder.
+work = C:\za-dev\work
+# The game build to run, in its own folder with its DLLs. The file must be named lasrecomp.exe.
+exe = C:\za-dev\bin\lasrecomp.exe
+# Your game files: the folder with exefs\ and romfs.bin. Never commit these.
+game = C:\za-dev\game
+# The compiled game code used by default ("DLL: dev").
+lib = C:\za-dev\game\lasgame.dll
+# Optional: a library built by the start screen, as a player's ("DLL: release").
+release_lib =
+
+# One line per save: name | folder holding save_0 | settings file. The save is copied at each start.
+profile = Test save | C:\za-dev\saves\test\save | C:\za-dev\saves\test\larecomp.ini

@@ -291,10 +291,11 @@ static bool input_user_blocked_any(void) {
     if (on < 0) {
         const char *v = getenv("LARECOMP_NO_USER_INPUT");
         on = v ? atoi(v) != 0 : (getenv("LARECOMP_INPUT") || getenv("LARECOMP_DOORJUMP_TEST") || getenv("LARECOMP_PLACE") ||
-                                 getenv("LARECOMP_HOST_INPUT") || getenv("LARECOMP_BIND_TEST"));
+                                 getenv("LARECOMP_HOST_INPUT") || getenv("LARECOMP_BIND_TEST") || getenv("LARECOMP_REPLAY"));
         if (on) LOG("[input] scripted run: keyboard, mouse and controllers ignored\n");
     }
-    return on;
+    extern bool g_replay_handed;
+    return on && !g_replay_handed;
 }
 bool input_user_blocked(const SDL_Event *e) {
     if (!input_user_blocked_any()) return false;
@@ -439,10 +440,11 @@ static void recompute_mouse(void) {
 }
 
 extern bool menu_input_captured(void);  // runtime/ui/menu.mm
+extern bool menu_cursor_needed(void);   // (the cursor wanted on screen: the menu, or a tool beside the game)
 // Main thread, after each batch of events (runtime/nvn/vulkan/device.c ui_run): the cursor held while the game has
 // the window and the controls - not with the menu or the name entry up (they take the mouse), nor without focus.
 void input_mouse_update(SDL_Window *w) {
-    bool want = g_settings.mouse_camera == MOUSE_CAM_CAPTURED && !menu_input_captured() && !input_user_blocked_any() &&
+    bool want = g_settings.mouse_camera == MOUSE_CAM_CAPTURED && !menu_cursor_needed() && !input_user_blocked_any() &&
                 (SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS);
     if (want == mouse_held) return;
     SDL_SetWindowRelativeMouseMode(w, want);
@@ -542,7 +544,8 @@ void input_handle_event(const SDL_Event *e) {
         break;
     }
     case SDL_EVENT_MOUSE_MOTION:  // the mouse turns the camera (right stick): cursor held, or the right button held
-        if (mouse_held || (g_settings.mouse_camera == MOUSE_CAM_HOLD && (e->motion.state & SDL_BUTTON_RMASK))) {
+        // (the cursor free while the game plays - hold, or a tool's panels beside the game: the right button held turns it)
+        if (mouse_held || (g_settings.mouse_camera != MOUSE_CAM_OFF && !menu_input_captured() && (e->motion.state & SDL_BUTTON_RMASK))) {
             atomic_fetch_add(&mouse_acc_x, (int32_t)lroundf(e->motion.xrel * 16));  // (mouse_stick turns it into speed)
             atomic_fetch_add(&mouse_acc_y, (int32_t)lroundf(e->motion.yrel * 16));
         }
@@ -857,6 +860,117 @@ extern bool menu_input_captured(void);  // runtime/ui/menu.mm: overlay menu or n
 // Buttons held right now (keyboard, gamepad, test script), independent of whether the game polls (movies).
 uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_buttons | pad_buttons) | script_buttons; }
 
+// Recorded play (tools/za/replay-record.sh / replay-play.sh, docs/dev-tools.md): LARECOMP_RECORD=<file> writes player 1's state as
+// the game reads it - "<read> <buttons hex> <lx> <ly> <rx> <ry>" each time it changes, <read> counting the game's
+// reads - and LARECOMP_REPLAY=<file> gives the game those states at the same reads instead of the player's (the
+// keyboard / controllers are ignored). By read, not by time: the same press lands on the same game frame on a faster
+// or slower PC. Not exact over long runs (the game's own timing and threads differ a little run to run).
+// The settings go along ("S <read> <hex of g_settings>": at the start and each change made in the F1 menu - 60 fps,
+// resolution...: the game runs differently with them), applied at the same read.
+// LARECOMP_REPLAY_UNTIL=<read>: the replay stops there and the controls are the player's again (ZA DevTools'
+// "replay to the bug": its mark is a read number, g_input_reads at that moment).
+typedef struct { uint64_t read, b; int32_t lx, ly, rx, ry; } RecState;
+uint64_t g_input_reads;    // (the game's reads of player 1 so far)
+// Keyed by the game's own time when it has one (Pokemon Z-A: g_game_vsyncs, runtime/hle/framepace.c - its frames step
+// by the vsyncs that really passed, so a read count drifts on a faster / slower PC or with LARECOMP_SYNC_SUBMIT):
+// a recording that starts with "K time" has times where the read numbers were. g_replay_key: the clock now.
+uint64_t g_replay_key;
+bool g_replay_handed;      // (the replay reached LARECOMP_REPLAY_UNTIL: live input again)
+typedef struct { uint64_t read; Settings s; } RecSettings;
+static int hexval(int ch) { return ch <= '9' ? ch - '0' : (ch | 32) - 'a' + 10; }
+static void record_state(uint64_t read, uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
+    static int mode = -1;  // 0 off, 1 record, 2 replay
+    static FILE *rec;
+    static RecState *tab, last = {.read = ~0ull};
+    static size_t n, at;
+    static RecSettings *stab, slast;
+    static size_t sn, sat;
+    static int key_time = -1;  // (1: the clock is the game's time, g_game_vsyncs; 0: the read count)
+    extern uint64_t g_game_vsyncs;
+    if (mode < 0) {
+        mode = 0;
+        const char *r = getenv("LARECOMP_RECORD"), *p = getenv("LARECOMP_REPLAY");
+        if (p && *p) {
+            FILE *f = fopen(p, "rb");
+            size_t cap = 0, scap = 0;
+            RecState e;
+            unsigned long long rd, bb;
+            static char line[2 * sizeof(Settings) + 64];
+            while (f && fgets(line, sizeof line, f)) {
+                int off = 0;
+                if (!strncmp(line, "K time", 6)) { key_time = 1; continue; }
+                if (line[0] == 'S' && sscanf(line, "S %llu %n", &rd, &off) == 1 && off > 0) {
+                    const char *h = line + off;
+                    if (strlen(h) < 2 * sizeof(Settings)) continue;
+                    if (sn == scap) stab = realloc(stab, (scap = scap ? scap * 2 : 16) * sizeof *stab);
+                    stab[sn].read = rd;
+                    for (size_t i = 0; i < sizeof(Settings); i++)
+                        ((uint8_t *)&stab[sn].s)[i] = (uint8_t)(hexval(h[2 * i]) << 4 | hexval(h[2 * i + 1]));
+                    sn++;
+                } else if (sscanf(line, "%llu %llx %d %d %d %d", &rd, &bb, &e.lx, &e.ly, &e.rx, &e.ry) == 6) {
+                    if (n == cap) tab = realloc(tab, (cap = cap ? cap * 2 : 4096) * sizeof *tab);
+                    e.read = rd, e.b = bb;
+                    tab[n++] = e;
+                }
+            }
+            if (f) fclose(f);
+            LOG("[replay] %s: %zu changes, %zu settings, up to %s %llu\n", p, n, sn, key_time == 1 ? "game time" : "read",
+                n ? (unsigned long long)tab[n - 1].read : 0ull);
+            if (key_time < 0) key_time = 0;
+            mode = 2;
+        } else if (r && *r) {
+            rec = fopen(r, "wb");
+            extern bool g_za_frame_hook;  // (runtime/hle/framepace.c: the game's time is known)
+            key_time = g_za_frame_hook;
+            if (rec && key_time) fputs("K time\n", rec);
+            if (rec) mode = 1, LOG("[replay] recording to %s (by %s)\n", r, key_time ? "game time" : "read");
+        }
+    }
+    g_input_reads = read;
+    uint64_t key = key_time == 1 ? g_game_vsyncs : read;
+    g_replay_key = key;
+    if (mode == 2) {
+        static long long until = -2;
+        if (until == -2) until = getenv("LARECOMP_REPLAY_UNTIL") ? atoll(getenv("LARECOMP_REPLAY_UNTIL")) : -1;
+        if (until >= 0 && (long long)key >= until) {
+            mode = 0, g_replay_handed = true;
+            extern uint64_t renderer_present_count(void);
+            LOG("[replay] reached the mark (%s %llu, read %llu, frame %llu): the controls are yours\n",
+                key_time == 1 ? "game time" : "read", (unsigned long long)key, (unsigned long long)read,
+                (unsigned long long)renderer_present_count());
+            return;
+        }
+    }
+    if (mode == 1) {
+        static bool first_s = true;
+        if (first_s || memcmp(&g_settings, &slast.s, sizeof g_settings)) {
+            first_s = false;
+            slast.s = g_settings;
+            fprintf(rec, "S %llu ", (unsigned long long)key);
+            for (size_t i = 0; i < sizeof g_settings; i++) fprintf(rec, "%02x", ((const uint8_t *)&g_settings)[i]);
+            fputc('\n', rec);
+            if (read) LOG("[replay] settings changed at read %llu\n", (unsigned long long)read);
+        }
+        if (*b != last.b || *lx != last.lx || *ly != last.ly || *rx != last.rx || *ry != last.ry || last.read == ~0ull) {
+            last = (RecState){key, *b, *lx, *ly, *rx, *ry};
+            fprintf(rec, "%llu %llx %d %d %d %d\n", (unsigned long long)key, (unsigned long long)*b, *lx, *ly, *rx, *ry);
+            fflush(rec);  // (the game may be closed any way: every change is on disk)
+        }
+    } else if (mode == 2) {
+        for (; sat < sn && stab[sat].read <= key; sat++) {
+            if (getenv("LARECOMP_REPLAY_ONLY_FPS")) g_settings.fps60 = stab[sat].s.fps60;  // (the rest: this run's own)
+            else g_settings = stab[sat].s;
+            LOG("[replay] settings of read %llu applied (fps60 %d, resolution %d)\n", (unsigned long long)stab[sat].read,
+                g_settings.fps60, g_settings.res_mode);
+        }
+        while (at < n && tab[at].read <= key) last = tab[at++];
+        if (last.read == ~0ull) last = (RecState){0};
+        *b = last.b, *lx = last.lx, *ly = last.ly, *rx = last.rx, *ry = last.ry;
+        static bool said;
+        if (at == n && !said) said = true, LOG("[replay] end of the recording (read %llu)\n", (unsigned long long)read);
+    }
+}
+
 static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -32767 : v; }
 
 // NpadFullKeyState / NpadHandheldState / NpadJoy*State share this layout (0x28 bytes):
@@ -970,6 +1084,10 @@ static void fill_state(Cpu *c) {
         extern uint64_t tracker_map_input(uint64_t b, int32_t st[4]);
         b = tracker_map_input(b, st);
         lx = st[0], ly = st[1], rx = st[2], ry = st[3];
+    }
+    {
+        static uint64_t reads;
+        record_state(reads++, &b, &lx, &ly, &rx, &ry);
     }
     *(uint64_t *)(s + 8) = b;
     static uint64_t last_b;

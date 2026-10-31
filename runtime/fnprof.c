@@ -4,6 +4,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "hle.h"
 #include "platform.h"
@@ -60,7 +61,54 @@ static int cmp(const void *x, const void *y) {
     return a < b ? 1 : a > b ? -1 : 0;
 }
 
+#ifdef _WIN32
+#include <windows.h>
+// (debug, uncommitted) LARECOMP_SCAN=<frame>:<hex bytes>: at that frame, log every guest address holding the bytes
+static void dbg_scan(uint64_t frame) {
+    static long at = -2;
+    static uint8_t pat[64];
+    static int np;
+    if (at == -2) {
+        at = -1;
+        const char *e = getenv("LARECOMP_SCAN");
+        const char *c = e ? strchr(e, ':') : NULL;
+        if (c) {
+            at = atol(e);
+            for (c++; c[0] && c[1] && np < 64; c += 2) { unsigned v; sscanf(c, "%2x", &v); pat[np++] = (uint8_t)v; }
+        }
+    }
+    if (at < 0 || (long)frame != at) return;
+    at = -1;
+    int hits = 0;
+    for (uint64_t a = 0x7000000000ull; a < 0x7800000000ull && hits < 50;) {
+        MEMORY_BASIC_INFORMATION mi;
+        if (!VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi)) break;
+        uint64_t end = (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize;
+        if (mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+            for (uint64_t p = a; p + np <= end && hits < 50; p += 8)
+                if (!memcmp((void *)(uintptr_t)p, pat, np)) {
+                    LOG("[scan] frame %llu: %llx\n", (unsigned long long)frame, (unsigned long long)p);
+                    if (!hits && getenv("LARECOMP_SCAN_WATCH")) {  // <hex delta>,<hex size>: watch [hit - delta, +size)
+                        unsigned long long d = 0, sz = 0x48;
+                        sscanf(getenv("LARECOMP_SCAN_WATCH"), "%llx,%llx", &d, &sz);
+                        extern uint64_t g_watch_lo, g_watch_hi;
+                        extern void watch_arm(void);
+                        g_watch_lo = p - d, g_watch_hi = p - d + sz;
+                        watch_arm();
+                        LOG("[scan] watching %llx-%llx\n", (unsigned long long)g_watch_lo, (unsigned long long)g_watch_hi);
+                    }
+                    hits++;
+                }
+        a = end;
+    }
+    LOG("[scan] frame %llu done, %d hits\n", (unsigned long long)frame, hits);
+}
+#else
+static void dbg_scan(uint64_t frame) { (void)frame; }
+#endif
+
 void fnprof_frame(uint64_t frame) {
+    dbg_scan(frame);
     static long from = -2, to;
     if (from == -2) {
         from = -1;

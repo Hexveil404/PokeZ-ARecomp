@@ -438,7 +438,12 @@ void output_scale_log(unsigned long long frame, double dw, double dh, const OutS
     psx = o->sx, psy = o->sy, pdw = dw, pdh = dh;
 }
 
+// (DevTools, runtime/ui/devtools.mm: while its IDE layout is up the game goes in a box of the window - weak)
+extern bool devtools_view(double dw, double dh, double *x, double *y, double *w, double *h) __attribute__((weak));
 void output_scale(double dw, double dh, bool reshape_allowed, double now, double game_ms, double win_ms, OutScale *o) {
+    double bx = 0, by = 0, bw = dw, bh = dh;
+    bool boxed = devtools_view && devtools_view(dw, dh, &bx, &by, &bw, &bh);
+    if (boxed) { dw = bw, dh = bh, reshape_allowed = false; }  // (16:9 in the box: a panel resize reallocates nothing)
     double fit = fmin(dw / 1920.0, dh / 1080.0);
     static double forced = -1, wide_test = -1;
     if (forced < 0) forced = getenv("LARECOMP_SCALE") ? atof(getenv("LARECOMP_SCALE")) : 0;
@@ -495,4 +500,5 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
     }
     o->vx = (dw - o->vw) / 2; o->vy = (dh - o->vh) / 2;
     o->lines = o->vh > 0 ? base_h * o->sy / o->vh : 1;
+    if (boxed) o->vx += bx, o->vy += by;
 }

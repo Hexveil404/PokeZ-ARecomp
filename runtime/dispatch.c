@@ -275,6 +275,7 @@ void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) {
 // function (f_<guest addr>) doing them, then the page is reopened until the next re-arm.
 uint64_t g_watch_lo, g_watch_hi;
 uint64_t g_fault_lr;  // (the platform's handler: the faulting thread's link register, for the watch log)
+int g_watch_write;  // (set by the platform's fault handler: 1 = a write)
 static uint64_t watch_page;
 static void *watch_thread(void *a) {
     (void)a;
@@ -325,12 +326,12 @@ bool rt_fault_watch(uint64_t fa, uint64_t pc) {
         const char *nm = host_sym(pc, NULL);
         if (!nm) nm = "?";
         char key[48];  // (each function + offset once)
-        snprintf(key, sizeof key, "%.36s+%llx", nm, (unsigned long long)(fa - g_watch_lo));
+        snprintf(key, sizeof key, "%.34s+%llx%c", nm, (unsigned long long)(fa - g_watch_lo), g_watch_write ? 'w' : 'r');
         bool found = false;
         for (int i = 0; i < nseen; i++) found |= !strcmp(seen[i], key);
         if (!found && nseen < 64) {
             snprintf(seen[nseen++], 48, "%s", key);
-            fprintf(stderr, "[watch] +%#llx by %s\n", fa - g_watch_lo, nm);
+            fprintf(stderr, "[watch] %s +%#llx by %s (host pc %llx)\n", g_watch_write ? "write" : "read ", fa - g_watch_lo, nm, (unsigned long long)pc);
         }
     }
     plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_RW);

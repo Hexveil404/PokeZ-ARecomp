@@ -149,7 +149,16 @@ static std::atomic<int> g_kbd{0};  // 1 open, 2 confirmed, 3 cancelled
 static std::atomic<bool> g_last_pad{false};
 static char g_kbd_text[96];
 static int g_kbd_max = 8;
-static bool capturing() { return g_open.load() || g_kbd.load() == 1; }
+// (DevTools, runtime/ui/devtools.mm - weak: absent from a build without it)
+extern "C" __attribute__((weak)) bool devtools_open(void);
+extern "C" __attribute__((weak)) void devtools_toggle(void);
+extern "C" __attribute__((weak)) void devtools_frame(void);
+extern "C" __attribute__((weak)) void devtools_draw(float w, float h, float scale);
+extern "C" __attribute__((weak)) bool devtools_typing(void);  // (a text field of it has the keyboard)
+static bool dt_open() { return devtools_open && devtools_open(); }
+// The game gets no keys / buttons: the menu, the name entry, or typing in DevTools (its IDE layout leaves the game
+// playable in its box otherwise)
+static bool capturing() { return g_open.load() || g_kbd.load() == 1 || (dt_open() && devtools_typing && devtools_typing()); }
 // The game's name limit counts characters as the console's keyboard does, in UTF-16 units (a character past U+FFFF
 // takes two); the text is UTF-8. Cuts s after max_units of them, only between characters (a character left incomplete
 // - a cut inside it, or bytes that are no character - goes too, with the rest), and returns how many units are left.
@@ -170,6 +179,8 @@ static int kbd_cut(char *s, int max_units) {
 }
 // The game gets no input while this is true (runtime/hle/input.c): menu or name entry up.
 extern "C" bool menu_input_captured(void) { return capturing(); }
+// The cursor is needed on screen (runtime/hle/input.c: the mouse camera lets it go): those, and DevTools' panels
+extern "C" bool menu_cursor_needed(void) { return capturing() || dt_open(); }
 
 bool menu_handle_event(const SDL_Event *e) {
     static bool back_down, start_down;
@@ -188,6 +199,7 @@ bool menu_handle_event(const SDL_Event *e) {
     bool typing = g_kbd.load() == 1 || (g_open.load() && g_text_busy.load());
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
+        if (!e->key.repeat && e->key.scancode == SDL_SCANCODE_F10 && devtools_toggle && getenv("LARECOMP_DEVTOOLS")) { devtools_toggle(); return true; }
         if (!e->key.repeat && (e->key.scancode == SDL_SCANCODE_F1 ||
                                (e->key.scancode == SDL_SCANCODE_ESCAPE && !g_open.load()))) {
             if (!typing) set_open(!g_open.load());  // (Esc with the menu open goes to ImGui below: it cancels a field)
@@ -253,11 +265,11 @@ bool menu_handle_event(const SDL_Event *e) {
         return true;
     }
     case SDL_EVENT_MOUSE_MOTION:
-        if (!capturing()) return false;
+        if (!capturing() && !dt_open()) return false;  // (DevTools: its panels, and the game below)
         { QEvent q = {}; q.kind = QEvent::MOUSE_POS; q.x = e->motion.x * g_pixel_density; q.y = e->motion.y * g_pixel_density; push(q); }
-        return true;
+        return capturing();  // (DevTools only: the game gets it too)
     case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP:
-        if (!capturing()) return false;
+        if (!capturing() && !dt_open()) return false;  // (DevTools: its panels, and the game below)
         {
             QEvent q = {};
             q.kind = QEvent::MOUSE_BUTTON;
@@ -265,11 +277,11 @@ bool menu_handle_event(const SDL_Event *e) {
             q.down = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
             push(q);
         }
-        return true;
+        return capturing();
     case SDL_EVENT_MOUSE_WHEEL:
-        if (!capturing()) return false;
+        if (!capturing() && !dt_open()) return false;  // (DevTools: its panels, and the game below)
         { QEvent q = {}; q.kind = QEvent::WHEEL; q.x = e->wheel.x; q.y = e->wheel.y; push(q); }
-        return true;
+        return capturing();
     default:
         return false;
     }
@@ -285,6 +297,13 @@ void menu_apply_window_requests(void *win) {
         if (want_text) SDL_StartTextInput(w);
         else SDL_StopTextInput(w);
         text_input = want_text;
+    }
+    static bool dt_was, dt_maxed;  // DevTools' IDE layout wants room: maximized while open, as it was after
+    if (dt_open() != dt_was) {
+        dt_was = dt_open();
+        bool full = SDL_GetWindowFlags(w) & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN);
+        if (dt_was && !full) { SDL_MaximizeWindow(w); dt_maxed = true; }
+        else if (!dt_was && dt_maxed) { SDL_RestoreWindow(w); dt_maxed = false; }
     }
     static bool first = true;
     if (first || g_want_fullscreen_apply.exchange(false)) {
@@ -1262,9 +1281,11 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool chaos = !open && chaos_overlay_wanted();
     bool kbd = g_kbd.load() == 1;
     bool notice = SDL_GetTicks() < g_notice_until.load();  // (menu_notice: a line at the bottom for a few seconds)
+    if (devtools_frame) devtools_frame();  // (every presented frame: its time)
+    bool dt = dt_open();
     bool race = race_overlay_wanted();  // (run timer, race seed hash: race_overlay.mm)
     bool flyin = pickup_flyin_wanted() && !open;  // (a silent pickup's card)
-    if (!render_needed(open, kbd, inv, trk, trkd, chaos, race, flyin) && !notice) {
+    if (!render_needed(open, kbd, inv, trk, trkd, chaos, race, flyin) && !notice && !dt) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         g_ov_same = 0;  // (shown again: built afresh first)
         return;
@@ -1355,6 +1376,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::End();
     }
 
+    if (dt && devtools_draw) devtools_draw(io.DisplaySize.x, io.DisplaySize.y, scale);
     if (notice) {  // menu_notice: a line at the bottom for a few seconds
         char text[sizeof g_notice_text];
         pthread_mutex_lock(&q_lock);

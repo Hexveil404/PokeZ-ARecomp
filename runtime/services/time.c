@@ -1,4 +1,5 @@
 // time:u / time:a / time:s
+#include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
@@ -9,7 +10,13 @@
 static const uint8_t clock_uuid[16] = {0x4c, 0x41, 0x52, 0x65, 0x63, 0x6f, 0x6d, 0x70, 1, 2, 3, 4, 5, 6, 7, 8};
 
 static int64_t steady_seconds(void) { return (int64_t)(rt_ticks() / 19200000ull); }
-static int64_t unix_now(void) { return (int64_t)time(NULL); }
+// LARECOMP_CLOCK_START=<unix seconds>: the game's clock starts there (and runs) instead of now - a recorded play
+// replays at the time of day it was recorded (tools/za/replay-record.sh)
+static int64_t unix_now(void) {
+    static int64_t start = -1;
+    if (start < 0) start = getenv("LARECOMP_CLOCK_START") ? atoll(getenv("LARECOMP_CLOCK_START")) : 0;
+    return start > 0 ? start + steady_seconds() : (int64_t)time(NULL);
+}
 
 static void write_system_context(uint8_t *p) {  // SystemClockContext (0x20)
     int64_t steady = steady_seconds();
@@ -138,11 +145,11 @@ HLE_FUNC("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE"
     c->x[0] = 0;  // ResultSuccess
 }
 
-// std::chrono::system_clock::now() (the SDK's libc++: microseconds since 1970): the host clock (unix_now() and the
-// host's sub-second part). The SDK's own path read the realtime clock as ~0 here, and Pokémon Z-A stamps each donut
-// with it in milliseconds (game fn 0x7002d564d8): a donut stamped 0 reads as an empty slot (the pocket adds into the
-// first slot whose stamp is 0, fn 0x7002ad5874), so Ansha's donuts never showed up and each new one overwrote the
-// last (#66, #73).
+// std::chrono::system_clock::now() (the SDK's libc++: microseconds since 1970): the host clock, at unix_now()'s
+// second (it follows a replay's clock) with the host's sub-second part. The SDK's own path read the realtime clock
+// as ~0 here, and Pokémon Z-A stamps each donut with it in milliseconds (game fn 0x7002d564d8): a donut stamped 0
+// reads as an empty slot (the pocket adds into the first slot whose stamp is 0, fn 0x7002ad5874), so Ansha's donuts
+// never showed up and each new one overwrote the last (#66, #73).
 HLE_FUNC("_ZNSt3__16chrono12system_clock3nowEv", time_chrono_system_now) {
     struct timespec ts;
     timespec_get(&ts, TIME_UTC);

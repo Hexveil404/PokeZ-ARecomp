@@ -152,6 +152,23 @@ static CmdRec *record(Cpu *c, uint32_t op, uint32_t extra, Snap *s) {
     CmdRec *r = rec(c, cb_of(s->x[0]), op, extra);
     memcpy(r->x, s->x + 1, sizeof r->x);
     memcpy(r->f, s->f, sizeof r->f);
+    {   // (debug: LARECOMP_POOL_WATCH, vulkan/exec.c) an indexed draw into the watched range, as recorded
+        extern void pw_draw_note(const void *rec, uint32_t op, uint64_t ibuf, const char *what);
+        if (op == CMD_DRAW_ELEMENTS) pw_draw_note(r, op, r->x[3], "record");
+        else if (op == CMD_DRAW_ELEMENTS_INDIRECT || op == CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT) pw_draw_note(r, op, r->x[2], "record");
+    }
+    if (op == CMD_DRAW_ELEMENTS || op == CMD_DRAW_ARRAYS || op == CMD_DRAW_ELEMENTS_INDIRECT || op == CMD_DRAW_ARRAYS_INDIRECT ||
+        op == CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT || op == CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT) {
+        // (debug: vulkan/exec.c draw_age) the frame this draw was recorded in, in f[0..1] (draws take no float
+        // arguments; LARECOMP_IB_CHECK reuses f), tagged so an old list can be told when it runs
+        extern uint64_t renderer_present_count(void);
+        uint64_t tag = renderer_present_count() | (1ull << 63);
+        memcpy(r->f, &tag, 8);
+    }
+    if (op == CMD_DRAW_ELEMENTS || op == CMD_DRAW_ELEMENTS_INDIRECT) {  // (debug: LARECOMP_IB_CHECK, vulkan/exec.c ib_note)
+        extern void ib_note(CmdRec *r, bool at_record);
+        ib_note(r, true);
+    }
     return r;
 }
 // record with a copy of `len` bytes from the guest pointer in argument `arg`
@@ -317,7 +334,7 @@ PLAIN(nvnCommandBufferSetLineWidth, CMD_SET_LINE_WIDTH)
 PLAIN(nvnCommandBufferSetPointSize, CMD_SET_POINT_SIZE)
 PLAIN(nvnCommandBufferSetSampleMask, CMD_SET_SAMPLE_MASK)
 PLAIN(nvnCommandBufferSetRenderEnable, CMD_SET_RENDER_ENABLE)
-NVN(nvnCommandBufferSetRenderEnableConditional) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetRenderEnableConditional\n"); }
+PLAIN(nvnCommandBufferSetRenderEnableConditional, CMD_SET_RENDER_ENABLE_CONDITIONAL)  // (mode, counter pair address)
 PLAIN(nvnCommandBufferSetDepthClamp, CMD_SET_DEPTH_CLAMP)  // (the game's clamp: geometry past the clip planes is clamped, not clipped)
 PLAIN(nvnCommandBufferSetRasterizerDiscard, CMD_SET_RASTERIZER_DISCARD)
 NVN(nvnCommandBufferSetConservativeRasterEnable) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetConservativeRasterEnable\n"); }
@@ -505,7 +522,35 @@ PLAIN(nvnCommandBufferReportCounter, CMD_REPORT_COUNTER)
 NVN(nvnCommandBufferReportValue) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferReportValue\n"); }
 NVN(nvnCommandBufferResetCounter) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferResetCounter\n"); }
 NVN(nvnCommandBufferCallCommands) { record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
-NVN(nvnCommandBufferCopyCommands) { record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
+// CopyCommands COPIES the lists into this command buffer: the game may record new commands into their memory right
+// after (Z-A does). Recorded as a call, the submission later ran whatever had been written there since - draws with
+// another list's index buffers, the stretched sheets and beams. The records are copied here (following the lists'
+// jumps to their end); calls inside them stay calls, as CallCommands made them. LARECOMP_COPYCMDS_AS_CALL=1: the old way.
+NVN(nvnCommandBufferCopyCommands) {
+    static int as_call = -1;
+    if (as_call < 0) as_call = ENV("LARECOMP_COPYCMDS_AS_CALL") ? 1 : 0;
+    if (as_call) { record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); return; }
+    Snap s = snap(c);
+    NvnCmdBuf *cb = cb_of(s.x[0]);
+    uint64_t n = s.x[1];
+    const uint64_t *hs = (const uint64_t *)(uintptr_t)s.x[2];
+    static uint64_t ncopied;
+    if (!ncopied++) LOG("[nvn] CopyCommands: %llu list(s), copied into the command buffer\n", (unsigned long long)n);
+    for (uint64_t i = 0; i < n && hs; i++) {
+        uint64_t p = hs[i];
+        for (int guard = 0; p && guard < 1000000; guard++) {
+            const CmdRec *src = (const CmdRec *)(uintptr_t)p;
+            if (src->op == CMD_END) break;
+            if (src->op == CMD_JUMP) { p = src->x[0]; continue; }
+            uint32_t size = src->size;
+            if (size < sizeof(CmdRec)) break;  // (not a record: the list is gone)
+            CmdRec *dst = rec(c, cb, src->op, size - (uint32_t)sizeof(CmdRec));
+            memcpy(dst, src, size);
+            dst->size = size;
+            p += size;
+        }
+    }
+}
 NVN(nvnCommandBufferInsertDebugMarker) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferInsertDebugMarker\n"); }
 NVN(nvnCommandBufferInsertDebugMarkerDynamic) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferInsertDebugMarkerDynamic\n"); }
 NVN(nvnCommandBufferInsertDebugMarkerStatic) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferInsertDebugMarkerStatic\n"); }

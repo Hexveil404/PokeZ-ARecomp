@@ -1470,6 +1470,28 @@ static uint32_t tex_wh[2][64][2];
 // ================================================================== render passes
 static VkFormat pass_color[8], pass_depth, pass_stencil;
 static uint32_t pass_ncolor, pass_samples = 1, pass_w, pass_h, pass_layers = 1;
+// The probe (debug frames: F9): a spot of the screen, in thousandths of its width / height (ZA DevTools' "probe here";
+// LARECOMP_PROBE=<x>,<y> at start). After each draw of the frame, the 64x64 pixels there of every full-size colour
+// target are read back; a draw that changes them is logged ("[probe] ... draw N ...", the image saved as
+// build/probe_<frame>_NN.png): which draws paint that spot - the one that shouldn't is the culprit.
+int g_probe_x = -1, g_probe_y = -1;
+static bool probe_busy;  // (the probe ends a pass to read: that end isn't one of the frame's own pass dumps)
+// The full capture (ZA DevTools' "Full capture", or LARECOMP_FULLCAP=1 with F9): the debug frame records, per draw, into
+// build/fullcap_<frame>.bin - everything a later look needs, so nothing has to be chosen before: the raw bytes of a
+// 48x27 grid of its colour target 0 and depth target after it (any format: the tool diffs them - "which draws touched
+// this spot"), and its constant buffers, storage buffers and vertex streams as they were. Format (little endian):
+//   "ZAFC2\0\0\0" u64 frame, then per draw: u32 'DRAW' u32 bytes-after-this u32 draw u32 pass u64 vs u64 fs u32 indexed
+//   u32 mode u64 count u32 inst u32 gpu_params u32 color_vkformat u32 depth_vkformat u32 grid_w u32 grid_h,
+//   color grid (grid_w*grid_h*16 bytes, a texel at the start of each 16), depth grid (same), u32 nblobs, then per blob
+//   u32 kind (1 vertex cbuf, 2 fragment cbuf, 3 vertex storage, 4 fragment storage, 5 vertex stream, 6 vertex textures,
+//   7 fragment textures, 8 index data, 9 vertex shader GLSL, 10 fragment shader GLSL, 11 vertex shader binary (the
+//   game's Maxwell code), 12 fragment shader binary) u32 slot u64 addr u64 size u32 len + len bytes (the first len of
+//   size: cbufs 64 KB, storage / streams / indices 1 MB). Each block is written once per capture: a later draw with the
+//   same address, size and bytes writes len 0xFFFFFFFF (the bytes: the earlier block at that address), and a shader
+//   once per program. Textures: one FcTex per texture the stage's shader samples (which pool entry it read, and
+//   what that entry held: a vertex shader sampling the wrong texture throws its mesh about).
+int g_fullcap;  // (runtime/ui/devtools.mm: the next debug frame is a full capture)
+enum { FC_GW = 48, FC_GH = 27 };
 static int debug_pass_no;
 // (draw_indirect) the draw being made reads its parameters on the GPU: offset in the guest memory window's buffer
 static bool g_ind_gpu;
@@ -1477,6 +1499,177 @@ static VkDeviceSize g_ind_off;
 static uint32_t g_ind_stride;
 // Transform feedback state (Begin/EndTransformFeedback, the bound buffers) and rasterizer discard
 static bool xfb_on, raster_discard;
+// SetRenderEnable / SetRenderEnableConditional: while off, the game's draws and clears do nothing (the game turns
+// rendering off around work it doesn't want drawn yet; drawn anyway, it was garbage). LARECOMP_RENDER_ENABLE=0 ignores it.
+static bool render_off;
+// (debug) LARECOMP_POOL_WATCH=<hex addr>:<hex len>: watch a range of guest memory (the stretched-geometry hunt: an index
+// pool found holding instance matrices). Its hash is checked at every submission and every presented frame; a change
+// is logged with the bytes and whether the CPU wrote its pages (Windows write watch, peeked: the vertex cache keeps
+// its own resets); runtime operations writing into it (copies, uniform updates, transform feedback, compute storage)
+// are logged as they run. "[poolwatch]" in the log.
+static uint64_t pw_lo, pw_len, pw_hash;
+static int pw_on = -1;
+static bool pw_init(void) {
+    if (pw_on < 0) {
+        pw_on = 0;
+        const char *e = ENV("LARECOMP_POOL_WATCH");
+        unsigned long long a, l;
+        if (e && sscanf(e, "%llx:%llx", &a, &l) == 2 && l) pw_lo = a, pw_len = l, pw_on = 1;
+    }
+    return pw_on;
+}
+static void pw_op(const char *what, uint64_t addr, uint64_t len) {
+    if (!pw_init() || !addr || addr >= pw_lo + pw_len || addr + (len ? len : 1) <= pw_lo) return;
+    static int n;
+    if (n++ < 400) LOG("[poolwatch] frame %llu: %s writes %llx+%llx\n", (unsigned long long)renderer_present_count(), what,
+                       (unsigned long long)addr, (unsigned long long)len);
+}
+// An indexed draw whose index buffer lies in the watched range: when it was recorded and when it runs (the same
+// record address both times), to tell a list replayed after its memory changed hands from a fresh one.
+void pw_draw_note(const void *rec, uint32_t op, uint64_t ibuf, const char *what) {
+    if (!pw_init() || !ibuf || ibuf >= pw_lo + pw_len || ibuf < pw_lo) return;
+    static int n;
+    if (n++ < 600) LOG("[poolwatch] frame %llu: %s draw op %u record %p index buffer %llx\n", (unsigned long long)renderer_present_count(),
+                       what, op, rec, (unsigned long long)ibuf);
+}
+static uint64_t rec_tag(const CmdRec *r) { uint64_t t; memcpy(&t, r->f, 8); return t; }
+// (debug) A draw run frames after it was recorded (cmdbuf.c record() tags f[0..1]): a command list kept and replayed -
+// its buffers may have changed hands since. LARECOMP_DRAW_AGE=<frames>: log those older than that ("[drawage]").
+static void draw_age(CmdRec *r) {
+    static int lim = -1;
+    if (lim < 0) lim = ENV("LARECOMP_DRAW_AGE") ? atoi(ENV("LARECOMP_DRAW_AGE")) : 0;
+    uint64_t tag = rec_tag(r);
+    if (!lim || !(tag >> 63)) return;
+    uint64_t now = renderer_present_count(), at = tag & ~(1ull << 63);
+    if (now < at || now - at <= (uint64_t)lim || at < 200) return;  // (lists made at boot: fixed full-screen passes)
+    static int n;
+    static const void *seen[512];
+    static int nseen;
+    for (int i = 0; i < nseen; i++) if (seen[i] == r) return;
+    if (nseen < 512) seen[nseen++] = r;
+    if (n++ < 300)
+        LOG("[drawage] frame %llu: draw op %u recorded at frame %llu (%llu frames ago), record %p | x %llx %llx %llx %llx %llx\n",
+            (unsigned long long)now, r->op, (unsigned long long)at, (unsigned long long)(now - at), (void *)r,
+            (unsigned long long)r->x[0], (unsigned long long)r->x[1], (unsigned long long)r->x[2], (unsigned long long)r->x[3],
+            (unsigned long long)r->x[4]);
+}
+// (debug) LARECOMP_IB_CHECK=1: the index data an indexed draw will read, hashed when the game records the draw (kept in
+// the record's float slots, unused by draws) and again when it runs; a difference means the indices changed hands
+// in between ("[ibcheck]", with the largest index then and now). Indirect draws: count / first from the parameters
+// as the CPU sees them at both times.
+static int ib_on = -1;
+static bool ib_range(CmdRec *r, uint64_t *addr, uint64_t *bytes, uint32_t *isz) {
+    uint32_t type = (uint32_t)r->x[1];
+    *isz = type == 0 ? 1 : type == 1 ? 2 : 4;
+    uint64_t count, first, ib;
+    if (r->op == CMD_DRAW_ELEMENTS) { ib = r->x[3]; count = r->x[2]; first = 0; }
+    else {
+        const uint32_t *p = (const uint32_t *)(uintptr_t)r->x[3];
+        if (!p || r->x[3] < GUEST_LO) return false;
+        ib = r->x[2]; count = p[0]; first = p[2];
+    }
+    if (!ib || ib < GUEST_LO || !count || count > (1u << 22)) return false;
+    *addr = ib + first * *isz;
+    *bytes = count * *isz;
+    return true;
+}
+static uint32_t ib_hash_max(uint64_t addr, uint64_t bytes, uint32_t isz, uint32_t *mx) {
+    const uint8_t *p = (const uint8_t *)(uintptr_t)addr;
+    uint32_t h = 2166136261u, m = 0;
+    for (uint64_t i = 0; i + isz <= bytes; i += isz) {
+        uint32_t v = isz == 1 ? p[i] : isz == 2 ? *(const uint16_t *)(p + i) : *(const uint32_t *)(p + i);
+        h = (h ^ v) * 16777619u;
+        if (v != (isz == 1 ? 0xFFu : isz == 2 ? 0xFFFFu : 0xFFFFFFFFu) && v > m) m = v;
+    }
+    *mx = m;
+    return h;
+}
+void ib_note(CmdRec *r, bool at_record) {
+    if (ib_on < 0) ib_on = ENV("LARECOMP_IB_CHECK") ? atoi(ENV("LARECOMP_IB_CHECK")) : 0;
+    if (!ib_on) return;
+    uint64_t addr, bytes;
+    uint32_t isz, mx;
+    if (!ib_range(r, &addr, &bytes, &isz)) return;
+    uint32_t h = ib_hash_max(addr, bytes, isz, &mx);
+    uint32_t tag = 0x1BC0FFEEu;
+    if (at_record) {  // (replaces draw_age's frame tag in f[0..1]: the frame goes to f[3])
+        uint32_t at = (uint32_t)renderer_present_count();
+        memcpy(&r->f[0], &tag, 4), memcpy(&r->f[1], &h, 4), memcpy(&r->f[2], &mx, 4), memcpy(&r->f[3], &at, 4);
+        return;
+    }
+    uint32_t t0, h0, mx0, at;
+    memcpy(&t0, &r->f[0], 4), memcpy(&h0, &r->f[1], 4), memcpy(&mx0, &r->f[2], 4), memcpy(&at, &r->f[3], 4);
+    if (t0 != tag || h0 == h) return;
+    if (at < 200) return;  // (lists made at boot run every frame over dynamic indices)
+    static int n;
+    if (n++ < 300)
+        LOG("[ibcheck] frame %llu: record %p draw op %u (recorded frame %u) index data at %llx+%llu CHANGED since recorded: max index %u -> %u\n",
+            (unsigned long long)renderer_present_count(), (void *)r, r->op, at, (unsigned long long)addr,
+            (unsigned long long)bytes, mx0, mx);
+}
+void pw_check(const char *when) {
+    if (!pw_init()) return;
+    const uint8_t *p = (const uint8_t *)(uintptr_t)pw_lo;
+    uint64_t h = 1469598103934665603ull;
+    for (uint64_t i = 0; i + 8 <= pw_len; i += 8) { uint64_t w; memcpy(&w, p + i, 8); h = (h ^ w) * 0x100000001B3ull; h ^= h >> 29; }
+    if (h == pw_hash) return;
+    pw_hash = h;
+    static int n;
+    if (n++ >= 300) return;
+    int cpu = plat_written_pages_peek(pw_lo, pw_len);
+    uint32_t mx = 0;
+    for (uint64_t i = 0; i + 2 <= pw_len && i < 0x400; i += 2) { uint16_t v; memcpy(&v, p + i, 2); if (v > mx) mx = v; }
+    float f[8];
+    memcpy(f, p + (pw_len > 0x240 ? 0x220 : 0), sizeof f);
+    const uint16_t *u = (const uint16_t *)(p + (pw_len > 0x240 ? 0x200 : 0));
+    LOG("[poolwatch] frame %llu %s: CHANGED (CPU-written pages since the last reset: %d) max u16 in the first 1K %u | @0x200 u16 %u %u %u %u %u %u %u %u | @0x220 f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
+        (unsigned long long)renderer_present_count(), when, cpu, mx, u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
+        f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
+}
+// Vertex state history (stretched-geometry hunt): the last vertex layout / buffer binds, logged when a draw's vertex
+// shader reads attributes the bound layout doesn't have ("[vtxstate]", LARECOMP_VTXSTATE_LOG=0 turns it off).
+typedef struct { uint32_t op, n; uint64_t a, b; uint32_t w[4]; int depth; } VsHist;
+static VsHist vs_hist[32];
+static unsigned vs_hist_n;
+static void vs_hist_add(CmdRec *r, int depth) {
+    VsHist *h = &vs_hist[vs_hist_n++ & 31];
+    memset(h, 0, sizeof *h);
+    h->op = r->op; h->n = (uint32_t)r->x[0]; h->a = r->x[1]; h->depth = depth;
+    if (r->op == CMD_BIND_VERTEX_BUFFERS) h->b = *(const uint64_t *)r->extra, h->n = (uint32_t)r->x[1], h->a = r->x[0];
+    else if (r->op == CMD_BIND_PROGRAM) h->b = r->x[0] ? ((NvnProgram *)(uintptr_t)r->x[0])->stages[0].code_addr : 0;
+    else memcpy(h->w, r->extra, (r->x[0] < 4 ? r->x[0] : 4) * (r->op == CMD_BIND_VERTEX_ATTRIB ? 4 : 8) > 16 ? 16 : (r->x[0] < 4 ? r->x[0] : 4) * (r->op == CMD_BIND_VERTEX_ATTRIB ? 4 : 8));
+}
+static void vs_hist_check(uint32_t attr_mask, uint64_t vs) {
+    static int on = -1, nlog;
+    if (on < 0) on = !ENV("LARECOMP_VTXSTATE_LOG") || atoi(ENV("LARECOMP_VTXSTATE_LOG")) != 0;
+    if (!on || nlog >= 200) return;
+    uint32_t have = st.nattrib >= 32 ? ~0u : (1u << st.nattrib) - 1;  // (attributes past the bound count; format 0 within it is the game's own choice)
+    if (!(attr_mask & ~have)) return;
+    static uint64_t seen[64];
+    uint64_t key = vs ^ ((uint64_t)(st.nstream ? st.stream[0][0] : 0) << 40) ^ ((uint64_t)st.nattrib << 56);
+    for (int i = 0; i < 64; i++) { if (seen[i] == key) return; if (!seen[i]) { seen[i] = key; break; } }
+    nlog++;
+    LOG("[vtxstate] vs %llx reads attribs %#x, bound %d attribs (%#x) a0 %#x stream0 stride %u, vb0 %llx+%llu; recent binds:\n",
+        (unsigned long long)vs, attr_mask, st.nattrib, have, st.nattrib ? st.attrib[0] : 0, st.nstream ? st.stream[0][0] : 0,
+        (unsigned long long)st.vbuf[0].addr, (unsigned long long)st.vbuf[0].size);
+    for (unsigned k = vs_hist_n > 32 ? vs_hist_n - 32 : 0; k < vs_hist_n; k++) {
+        VsHist *h = &vs_hist[k & 31];
+        LOG("[vtxstate]   %s n %u %llx %llx | %08x %08x %08x %08x (list depth %d)\n",
+            h->op == CMD_BIND_VERTEX_ATTRIB ? "attrib" : h->op == CMD_BIND_VERTEX_STREAM ? "stream" : h->op == CMD_BIND_VERTEX_BUFFERS ? "vbufs " : h->op == CMD_CALL ? "call  " : "prog  ",
+            h->n, (unsigned long long)h->a, (unsigned long long)h->b, h->w[0], h->w[1], h->w[2], h->w[3], h->depth);
+    }
+}
+static uint64_t render_skipped;
+static bool render_enable_on(void) {
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_RENDER_ENABLE") || atoi(ENV("LARECOMP_RENDER_ENABLE")) != 0;
+    return on;
+}
+static bool render_skip(CmdRec *r) {
+    if (!render_off) return false;
+    if (render_skipped++ < 16) LOG("[render-enable] skipped op %u (render off)\n", r->op);
+    return true;
+}
 static uint64_t xfb_addr[4], xfb_size[4];
 static uint32_t raw_layer;  // (debug frame: the layer of a layered pass that renderer_save_texture_tex saves)
 
@@ -1537,7 +1730,7 @@ static void vk_end_pass_at(int line) {
     if (prof && line < 4096) prof_end_line[line]++;
     rec_CmdEndRendering(vk_cmd());
     in_pass = false;
-    if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
+    if (g_debug_frame && !probe_busy && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
         static int multi = -1;
@@ -1546,6 +1739,9 @@ static void vk_end_pass_at(int line) {
         if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d.png", (unsigned long long)debug_pass_frame, debug_pass_no++);
         else snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
         renderer_save_texture_tex(st.rt.color[0]->backend, path);
+        // (the pass ends here: the [draw] lines above are its draws - read back by tools that browse a capture)
+        LOG("[pass] %s %ux%u fmt %#x targets %d layers %u\n", path, st.rt.color[0]->width, st.rt.color[0]->height,
+            st.rt.color[0]->format, st.rt.ncolor, pass_layers);
         for (int ci = 1; ci < st.rt.ncolor; ci++) {  // (multiple render targets: the others as _c<i>)
             if (!st.rt.color[ci] || !st.rt.color[ci]->backend) continue;
             char cpath[300];
@@ -2047,6 +2243,9 @@ typedef struct {
     bool reuse;                 // set reuse (stage_set): some uniform buffers are dynamic, sets are kept while their contents repeat
     struct SetCache *scache[2]; // (render thread) stage_set's last set per set index
 } Prog;
+static void fullcap_draw(Prog *pr, CmdRec *r, bool indexed, uint32_t inst, int ndraw, bool gpu_params);  // (full capture)
+static void fullcap_before(void);  // (full capture: the targets just before a draw)
+static void fullcap_dispatch(bool after, uint32_t gx, uint32_t gy, uint32_t gz);  // (full capture: a dispatch)
 
 // ---- descriptor set reuse (graphics programs; port of vk-draw-cpu-2 d50bbce)
 // Every draw allocated and wrote two descriptor sets (~20 descriptors) although most repeat the previous draw's of
@@ -6165,8 +6364,53 @@ static void gpl_probe_note(Pipe *pp) { (void)pp; }
 static void gpl_probe(void) {}
 #endif
 
+// (debug) LARECOMP_ARGS_TRACE=<frame>:<hex lo>:<hex len>: from that presented frame on, after every operation that can
+// write guest memory on the GPU's side (dispatches, buffer copies) and before every submission (the CPU's writes in
+// between), the range is compared with its last copy, and 32-byte slots whose first or third word (an indirect draw's
+// index count / first index) changed are logged with the operation ("[argstrace]"). Waits for the GPU each time.
+static void args_trace(const char *what, uint64_t code) {
+    static int init;
+    static long from;
+    static uint64_t lo, len;
+    static uint8_t *copy;
+    if (!init) {
+        init = 1;
+        const char *e = ENV("LARECOMP_ARGS_TRACE");
+        unsigned long long l = 0, n = 0;
+        if (e && sscanf(e, "%ld:%llx:%llx", &from, &l, &n) == 3 && n && n <= (64u << 20)) { lo = l; len = n & ~31ull; }
+    }
+    if (!len || (long)renderer_present_count() < from) return;
+    static int nowait = -1;  // LARECOMP_ARGS_TRACE_NOWAIT=1: only at submissions, without waiting (keeps the timing)
+    if (nowait < 0) nowait = ENV("LARECOMP_ARGS_TRACE_NOWAIT") ? 1 : 0;
+    if (nowait && strncmp(what, "cpu", 3)) return;
+    if (!nowait) renderer_flush();
+    const uint8_t *now = (const uint8_t *)(uintptr_t)lo;
+    if (!copy) { copy = malloc(len); memcpy(copy, now, len); LOG("[argstrace] watching %llx+%llx\n", (unsigned long long)lo, (unsigned long long)len); return; }
+    static int nlog;
+    for (uint64_t o = 0; o < len; o += 32) {
+        if (!memcmp(copy + o, now + o, 32)) continue;
+        uint32_t a[8], b[8];
+        memcpy(a, copy + o, 32), memcpy(b, now + o, 32);
+        if ((a[0] != b[0] || a[2] != b[2]) && b[0] < (1u << 22) && !a[3] && !b[3] && nlog++ < 20000)
+            LOG("[argstrace] frame %llu %s %llx: %llx %u %u %u %d %u -> %u %u %u %d %u\n", (unsigned long long)renderer_present_count(),
+                what, (unsigned long long)code, (unsigned long long)(lo + o), a[0], a[1], a[2], (int)a[3], a[4], b[0], b[1], b[2], (int)b[3], b[4]);
+        memcpy(copy + o, now + o, 32);
+    }
+}
+
+static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz);
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
+    dispatch_compute_(gx, gy, gz);
+    args_trace("dispatch", st.program ? st.program->stages[5].code_addr : 0);
+}
+static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz) {
     snap_reason = "compute"; snapshots_invalidate(NULL);
+    if (pw_init() && st.program)
+        for (int i = 0; i < 16; i++) {
+            char w[96];
+            snprintf(w, sizeof w, "compute %llx storage %d", (unsigned long long)st.program->stages[5].code_addr, i);
+            pw_op(w, st.sbuf[5][i].addr, st.sbuf[5][i].size);
+        }
     if (!st.program || !gx || !gy || !gz) return;
     CsProg *cp = compute_program(st.program);
     if (!cp || atomic_load(&cp->p.state) != 1) { SKIP_CS(!cp ? SK_NO_STAGES : atomic_load(&cp->p.state) == 2 ? SK_CS_FAILED : SK_CS_BUILDING); return; }
@@ -6175,6 +6419,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         if (skip == ~0ull) { const char *e = getenv("LARECOMP_SKIP_CS"); skip = e ? strtoull(e, NULL, 16) : 0; }
         if (skip && st.program->stages[5].code_addr == skip) { SKIP_CS(SK_DEBUG_SKIP); return; }
     }
+    if (g_debug_frame && g_fullcap) fullcap_dispatch(false, gx, gy, gz);
     if (cp->si->uses_gmem && ENV("LARECOMP_LOG_CS_SBUF")) {  // (debug) the storage buffers bound to gmem dispatches
         static uint64_t seen_cs[16];
         static int seen_n[16];
@@ -6231,6 +6476,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     if (cp->si->uses_gmem_map && cp->si->uses_gmem_store) gfast_finish(cb);
     if (cp->si->uses_gmem_store) vc_mark_sbufs(5);
     stat_dispatches++;
+    if (g_debug_frame && g_fullcap) fullcap_dispatch(true, gx, gy, gz);  // (after: gfast's copy back included)
 }
 
 // ================================================================== draws
@@ -6563,6 +6809,25 @@ static bool wait_built(_Atomic int *state, const CmdRec *r, bool indexed, bool p
 }
 static void draw(CmdRec *r, bool indexed) {
     PROF_T0();
+    if (g_debug_frame && g_fullcap) fullcap_before();
+    {   // LARECOMP_WATCH_ADDR=<frame>:<hex lo>:<hex hi> for Z-A (runtime/hle/warp.c arms it for LA only): from that
+        // presented frame on, the host functions touching [lo, hi) are logged ("[watch]", runtime/dispatch.c)
+        static long wat = -2;
+        static unsigned long long wlo, whi;
+        if (wat == -2) {
+            wat = -1;
+            const char *e = ENV("LARECOMP_WATCH_ADDR");
+            if (e && sscanf(e, "%ld:%llx:%llx", &wat, &wlo, &whi) != 3) wat = -1;
+        }
+        if (wat >= 0 && (long)renderer_present_count() >= wat) {
+            extern uint64_t g_watch_lo, g_watch_hi;
+            extern void watch_arm(void);
+            g_watch_lo = wlo, g_watch_hi = whi;
+            watch_arm();
+            LOG("[watch] armed %llx-%llx\n", wlo, whi);
+            wat = -1;
+        }
+    }
     if (xfb_on) {
         xfb_note();
         // the transform feedback buffers are GPU-written: never served from the vertex cache's CPU-side copies (later
@@ -6626,6 +6891,39 @@ static void draw_(CmdRec *r, bool indexed) {
             (st.attrib[0] & 0xFF) == 0x22 && (st.attrib[0] >> 8 & 0x1F) == 0 && ++nfault % (uint64_t)fault == 0) {
             st.nattrib = 1;
             st.stream[0][0] = 12;
+        }
+        vs_hist_check(pr->vi->attr_mask, st.program->stages[0].code_addr);
+        static int vcheck = -1;  // (debug) LARECOMP_VTXCHECK=1: an indexed draw whose layout reads past its vertex buffers
+        if (vcheck < 0) vcheck = ENV("LARECOMP_VTXCHECK") ? atoi(ENV("LARECOMP_VTXCHECK")) : 0;
+        if (vcheck && indexed && !g_ind_gpu && r->x[3] && r->x[2] && r->x[2] < (1u << 22)) {
+            uint32_t it = (uint32_t)r->x[1], mx = 0;
+            const void *ip = (const void *)(uintptr_t)r->x[3];
+            for (uint64_t i = 0; i < r->x[2]; i++) {
+                uint32_t v = it == 0 ? ((const uint8_t *)ip)[i] : it == 1 ? ((const uint16_t *)ip)[i] : ((const uint32_t *)ip)[i];
+                if (v != (it == 0 ? 0xFFu : it == 1 ? 0xFFFFu : 0xFFFFFFFFu) && v > mx) mx = v;
+            }
+            int64_t verts = (int64_t)mx + 1 + (int64_t)(int32_t)r->x[4];
+            for (int i = 0; i < st.nattrib && i < 16; i++) {
+                if (!(pr->vi->attr_mask >> i & 1) || !(st.attrib[i] & 0xFF)) continue;
+                uint32_t s = st.attrib[i] >> 8 & 0x1F, off = st.attrib[i] >> 13;
+                if (s >= (uint32_t)st.nstream || !st.vbuf[s].size || st.stream[s][1]) continue;
+                uint64_t stride = st.stream[s][0];
+                if (stride && (uint64_t)(verts - 1) * stride + off + 4 > st.vbuf[s].size) {
+                    static int nl;
+                    if (nl++ < 40) {
+                        LOG("[vtxcheck] vs %llx attrib %d: stream %u stride %llu offset %u x %lld vertices > buffer %llx+%llu (%.2f bytes per vertex there)\n",
+                            (unsigned long long)st.program->stages[0].code_addr, i, s, (unsigned long long)stride, off, (long long)verts,
+                            (unsigned long long)st.vbuf[s].addr, (unsigned long long)st.vbuf[s].size, (double)st.vbuf[s].size / (double)verts);
+                        for (unsigned k = vs_hist_n > 24 ? vs_hist_n - 24 : 0; k < vs_hist_n; k++) {
+                            VsHist *h = &vs_hist[k & 31];
+                            LOG("[vtxcheck]   %s n %u %llx %llx | %08x %08x %08x %08x (list depth %d)\n",
+                                h->op == CMD_BIND_VERTEX_ATTRIB ? "attrib" : h->op == CMD_BIND_VERTEX_STREAM ? "stream" : h->op == CMD_BIND_VERTEX_BUFFERS ? "vbufs " : h->op == CMD_CALL ? "call  " : "prog  ",
+                                h->n, (unsigned long long)h->a, (unsigned long long)h->b, h->w[0], h->w[1], h->w[2], h->w[3], h->depth);
+                        }
+                    }
+                    break;
+                }
+            }
         }
         if (on && st.nattrib <= 1 && (pr->vi->attr_mask & ~1u)) {
             static uint64_t nskip;
@@ -7187,6 +7485,56 @@ static void draw_(CmdRec *r, bool indexed) {
         memcpy(dl_snap[(dl_n - 1) & (DL_N - 1)], (const void *)(uintptr_t)(gwin_base + gmem_lo + g_ind_off), 20);
     }
     if (dl_on > 0) vk_checkpoint(cb, dl_n);
+    if (g_debug_frame) {  // the probe (above)
+        static int init;
+        if (!init++ && ENV("LARECOMP_PROBE")) sscanf(ENV("LARECOMP_PROBE"), "%d,%d", &g_probe_x, &g_probe_y);
+        static uint64_t last_frame = ~0ull;
+        static void *seen_tb[32];
+        static uint64_t seen_hash[32];
+        static int nseen, ndraw, nshot;
+        if (renderer_present_count() != last_frame) last_frame = renderer_present_count(), nseen = 0, ndraw = 0, nshot = 0;
+        ndraw++;
+        bool any = false;
+        for (int ci = 0; g_probe_x >= 0 && ci < st.rt.ncolor; ci++) {
+            TexBackend *tb = st.rt.color[ci] ? (TexBackend *)st.rt.color[ci]->backend : NULL;
+            if (!tb || !tb->image || tb->width < 1280 || (tb->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) continue;
+            int px = (int)((uint64_t)tb->width * g_probe_x / 1000) - 32, py = (int)((uint64_t)tb->height * g_probe_y / 1000) - 32;
+            if (px < 0) px = 0;
+            if (py < 0) py = 0;
+            if (px + 64 > (int)tb->width) px = (int)tb->width - 64;
+            if (py + 64 > (int)tb->height) py = (int)tb->height - 64;
+            if (!any) { probe_busy = true; vk_end_pass(); any = true; }
+            VkSpan out = vk_readback(64 * 64 * 16);
+            memset(out.ptr, 0, 64 * 64 * 16);
+            VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                   .imageOffset = {px, py, 0}, .imageExtent = {64, 64, 1}};
+            VkCommandBuffer pcb = vk_cmd();
+            vk_full_barrier(pcb);
+            vkCmdCopyImageToBuffer(pcb, tb->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
+            renderer_flush();
+            uint64_t h = 1469598103934665603ull;
+            const uint8_t *q = out.ptr;
+            for (int i = 0; i < 64 * 64 * 16; i++) h = (h ^ q[i]) * 1099511628211ull;
+            int sk = 0;
+            while (sk < nseen && seen_tb[sk] != tb) sk++;
+            if (sk == nseen && nseen < 32) seen_tb[nseen] = tb, seen_hash[nseen] = 0, nseen++;
+            if (sk < 32 && seen_hash[sk] != h) {
+                char path[128];
+                snprintf(path, sizeof path, "build/probe_%llu_%02d.png", (unsigned long long)last_frame, nshot);
+                LOG("[probe] %s: draw %d target %d %ux%u fmt %d: vs %llx fs %llx %s count %llu inst %u%s | vbuf0 %llx size %llu "
+                    "stride %u\n", path, ndraw, ci, tb->width, tb->height, tb->format,
+                    (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)st.program->stages[1].code_addr,
+                    indexed ? "indexed" : "arrays", (unsigned long long)r->x[2], inst, g_ind_gpu && ind_ok ? " (GPU parameters)" : "",
+                    (unsigned long long)st.vbuf[0].addr, (unsigned long long)st.vbuf[0].size, k.stride[0]);
+                if (nshot < 80) { renderer_save_texture_tex(tb, path); nshot++; }
+                seen_hash[sk] = h;
+            }
+        }
+        if (any) { probe_busy = false; begin_pass(); }  // (the pass goes on)
+        static int fc_init;
+        if (!fc_init++ && ENV("LARECOMP_FULLCAP")) g_fullcap = 1;
+        if (g_fullcap) fullcap_draw(pr, r, indexed, inst, ndraw, g_ind_gpu && ind_ok);
+    }
     stat_draws++;
     cum_draws++;
     if (g_gpuprof_frame && gp_n) {
@@ -7196,6 +7544,237 @@ static void draw_(CmdRec *r, bool indexed) {
         }
         gp_draws[gp_n - 1]++;
     }
+}
+
+static void fc_grid(TexBackend *tb, VkImageAspectFlags aspect, uint8_t *out);
+static uint8_t fc_bc[FC_GW * FC_GH * 16], fc_bd[FC_GW * FC_GH * 16];  // (the grids just before the draw: ZAFC3)
+static void fullcap_before(void) {
+    TexBackend *ct = st.rt.ncolor && st.rt.color[0] ? (TexBackend *)st.rt.color[0]->backend : NULL;
+    TexBackend *dt = st.rt.depth ? (TexBackend *)st.rt.depth->backend : NULL;
+    probe_busy = true;
+    vk_end_pass();
+    fc_grid(ct, VK_IMAGE_ASPECT_COLOR_BIT, fc_bc);
+    fc_grid(dt, VK_IMAGE_ASPECT_DEPTH_BIT, fc_bd);
+    probe_busy = false;
+    begin_pass();
+}
+static void fc_grid(TexBackend *tb, VkImageAspectFlags aspect, uint8_t *out) {  // the raw texels of the grid
+    memset(out, 0, FC_GW * FC_GH * 16);
+    if (!tb || !tb->image || tb->samples > 1 || !(tb->aspect & aspect)) return;
+    VkSpan rb = vk_readback(FC_GW * FC_GH * 16);
+    VkBufferImageCopy c[FC_GW * FC_GH];
+    for (int y = 0; y < FC_GH; y++)
+        for (int x = 0; x < FC_GW; x++) {
+            int i = y * FC_GW + x;
+            c[i] = (VkBufferImageCopy){.bufferOffset = rb.off + (VkDeviceSize)i * 16,
+                                       .imageSubresource = {aspect, 0, 0, 1},
+                                       .imageOffset = {(int32_t)((2 * x + 1) * tb->width / (2 * FC_GW)), (int32_t)((2 * y + 1) * tb->height / (2 * FC_GH)), 0},
+                                       .imageExtent = {1, 1, 1}};
+        }
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    vkCmdCopyImageToBuffer(cb, tb->image, VK_IMAGE_LAYOUT_GENERAL, rb.buf, FC_GW * FC_GH, c);
+    renderer_flush();
+    memcpy(out, rb.ptr, FC_GW * FC_GH * 16);
+}
+static uint64_t fc_seen[16384][3];  // (addr, len, hash) of the blocks written in this capture (open addressing)
+static void fc_reset(void) { memset(fc_seen, 0, sizeof fc_seen); }
+static bool fc_once(uint64_t addr, uint64_t len, uint64_t h) {  // true the first time
+    uint64_t i = (addr ^ (h * 0x9E3779B97F4A7C15ull)) & 16383;
+    for (int k = 0; k < 64; k++, i = (i + 1) & 16383) {
+        if (!fc_seen[i][0]) { fc_seen[i][0] = addr, fc_seen[i][1] = len, fc_seen[i][2] = h; return true; }
+        if (fc_seen[i][0] == addr && fc_seen[i][1] == len && fc_seen[i][2] == h) return false;
+    }
+    return true;
+}
+static void fc_blob_mem(FILE *f, uint32_t kind, uint32_t slot, uint64_t addr, uint64_t size, const void *data, uint64_t cap, uint32_t *n) {
+    if (!addr || !size || !data) return;
+    uint32_t len = (uint32_t)(size < cap ? size : cap);
+    uint64_t h = 1469598103934665603ull ^ len;  // (every byte: a sampled hash took different vertex layouts for one)
+    const uint8_t *p = data;
+    uint32_t i = 0;
+    for (; i + 8 <= len; i += 8) { uint64_t w; memcpy(&w, p + i, 8); h = (h ^ w) * 0x100000001B3ull; h ^= h >> 29; }
+    for (; i < len; i++) h = (h ^ p[i]) * 0x100000001B3ull;
+    h ^= (uint64_t)kind << 56;
+    uint32_t wl = fc_once(addr, len, h) ? len : 0xFFFFFFFFu;
+    fwrite(&kind, 4, 1, f), fwrite(&slot, 4, 1, f), fwrite(&addr, 8, 1, f), fwrite(&size, 8, 1, f), fwrite(&wl, 4, 1, f);
+    fwrite(&h, 8, 1, f);  // (ZAFC2: a repeat names its block by kind, address and this)
+    if (wl != 0xFFFFFFFFu) fwrite(data, 1, len, f);
+    (*n)++;
+}
+static void fc_blob(FILE *f, uint32_t kind, uint32_t slot, uint64_t addr, uint64_t size, uint64_t cap, uint32_t *n) {
+    fc_blob_mem(f, kind, slot, addr, size, (const void *)(uintptr_t)addr, cap, n);
+}
+typedef struct { uint32_t index, slot, tic, format; uint64_t handle, object, addr; uint32_t width, height, levels, pad; } FcTex;
+static void fc_textures(FILE *f, uint32_t kind, int stage, ShaderInfo *si, uint32_t *n) {
+    if (!si || !si->ntex) return;
+    FcTex t[64];
+    int k = 0;
+    for (int i = 0; i < si->ntex && i < 64; i++) {
+        int slot = ((int)si->tex[i].handle_offset - 0x20) / 8;
+        uint64_t h = (slot >= 0 && slot < 32) ? st.tex[stage][slot] : 0;
+        NvnTexture *o = shader_texture_object(stage, &si->tex[i]);
+        t[k++] = (FcTex){(uint32_t)i, (uint32_t)slot, (uint32_t)(h & 0xFFFFF), o ? o->format : 0, h, (uint64_t)(uintptr_t)o,
+                         o ? o->addr : 0, o ? o->width : 0, o ? o->height : 0, o ? o->levels : 0, 0};
+    }
+    uint32_t slot = 0, len = (uint32_t)(k * sizeof *t);
+    uint64_t addr = 0, size = len;
+    fwrite(&kind, 4, 1, f), fwrite(&slot, 4, 1, f), fwrite(&addr, 8, 1, f), fwrite(&size, 8, 1, f), fwrite(&len, 4, 1, f);
+    fwrite(t, 1, len, f);
+    (*n)++;
+}
+static FILE *fc_open(void) {  // this frame's capture file (draws and dispatches)
+    static FILE *f;
+    static uint64_t frame = ~0ull;
+    if (renderer_present_count() != frame) {
+        if (f) fclose(f);
+        frame = renderer_present_count();
+        char path[64];
+        snprintf(path, sizeof path, "build/fullcap_%llu.bin", (unsigned long long)frame);
+        f = fopen(path, "wb");
+        if (!f) return NULL;
+        fwrite("ZAFC3\0\0\0", 1, 8, f);
+        fc_reset();
+        fwrite(&frame, 8, 1, f);
+        LOG("[fullcap] frame %llu: recording every draw and dispatch to %s\n", (unsigned long long)frame, path);
+    }
+    return f;
+}
+// A dispatch, as two records around it: 'DISB' (before: its constant buffers, kind 22 per slot, and storage buffers,
+// kind 20) and 'DISA' (after, once it ran: the storage buffers again, kind 21). Header: u32 magic, u32 bytes after,
+// u64 shader code address, u32 groups x y z, u32 block count, then blocks as in a draw record.
+static void fullcap_dispatch(bool after, uint32_t gx, uint32_t gy, uint32_t gz) {
+    FILE *f = fc_open();
+    if (!f || !st.program) return;
+    probe_busy = true;
+    vk_end_pass();
+    renderer_flush();  // (the GPU work so far, this dispatch included when after: done, its writes in memory)
+    probe_busy = false;
+    long at = ftell(f);
+    uint32_t head[2] = {after ? 0x41534944u /* 'DISA' */ : 0x42534944u /* 'DISB' */, 0};
+    fwrite(head, 4, 2, f);
+    uint64_t code = st.program->stages[5].code_addr;
+    uint32_t g[3] = {gx, gy, gz};
+    fwrite(&code, 8, 1, f), fwrite(g, 4, 3, f);
+    long nat = ftell(f);
+    uint32_t nb = 0;
+    fwrite(&nb, 4, 1, f);
+    if (!after)
+        for (int i = 0; i < 18; i++) fc_blob(f, 22, i, st.ubuf[5][i].addr, st.ubuf[5][i].size, 65536, &nb);
+    for (int i = 0; i < 16; i++) fc_blob(f, after ? 21 : 20, i, st.sbuf[5][i].addr, st.sbuf[5][i].size, 8u << 20, &nb);
+    long end = ftell(f);
+    fseek(f, nat, SEEK_SET), fwrite(&nb, 4, 1, f);
+    head[1] = (uint32_t)(end - at - 8);
+    fseek(f, at, SEEK_SET), fwrite(head, 4, 2, f);
+    fseek(f, end, SEEK_SET);
+    fflush(f);
+}
+static void fullcap_draw(Prog *pr, CmdRec *r, bool indexed, uint32_t inst, int ndraw, bool gpu_params) {
+    FILE *f = fc_open();
+    if (!f) return;
+    TexBackend *ct = st.rt.ncolor && st.rt.color[0] ? (TexBackend *)st.rt.color[0]->backend : NULL;
+    TexBackend *dt = st.rt.depth ? (TexBackend *)st.rt.depth->backend : NULL;
+    static uint8_t cg[FC_GW * FC_GH * 16], dg[FC_GW * FC_GH * 16];
+    probe_busy = true;
+    vk_end_pass();
+    fc_grid(ct, VK_IMAGE_ASPECT_COLOR_BIT, cg);
+    fc_grid(dt, VK_IMAGE_ASPECT_DEPTH_BIT, dg);
+    probe_busy = false;
+    begin_pass();
+    long at = ftell(f);
+    uint32_t head[2] = {0x57415244u /* 'DRAW' */, 0};
+    fwrite(head, 4, 2, f);
+    uint32_t u32[2] = {(uint32_t)ndraw, (uint32_t)debug_pass_no};
+    fwrite(u32, 4, 2, f);
+    uint64_t vs = st.program->stages[0].code_addr, fs = st.program->stages[1].code_addr;
+    fwrite(&vs, 8, 1, f), fwrite(&fs, 8, 1, f);
+    uint32_t ix = indexed, mode = (uint32_t)r->x[0];
+    uint64_t count = r->x[2];
+    fwrite(&ix, 4, 1, f), fwrite(&mode, 4, 1, f), fwrite(&count, 8, 1, f);
+    uint32_t more[6] = {inst, gpu_params, ct ? (uint32_t)ct->format : 0, dt ? (uint32_t)dt->format : 0, FC_GW, FC_GH};
+    fwrite(more, 4, 6, f);
+    fwrite(cg, 1, sizeof cg, f), fwrite(dg, 1, sizeof dg, f);
+    fwrite(fc_bc, 1, sizeof fc_bc, f), fwrite(fc_bd, 1, sizeof fc_bd, f);  // (ZAFC3: before the draw)
+    long nat = ftell(f);
+    uint32_t nb = 0;
+    fwrite(&nb, 4, 1, f);
+    for (int c = 3; c < 18; c++) {
+        if ((pr->vi->cbuf_mask >> c) & 1) fc_blob(f, 1, c, st.ubuf[0][c - 3].addr, st.ubuf[0][c - 3].size, 65536, &nb);
+        if ((pr->fi->cbuf_mask >> c) & 1) fc_blob(f, 2, c, st.ubuf[1][c - 3].addr, st.ubuf[1][c - 3].size, 65536, &nb);
+    }
+    for (int i = 0; i < 16; i++) {
+        fc_blob(f, 3, i, st.sbuf[0][i].addr, st.sbuf[0][i].size, 1 << 20, &nb);
+        fc_blob(f, 4, i, st.sbuf[1][i].addr, st.sbuf[1][i].size, 1 << 20, &nb);
+    }
+    for (int i = 0; i < st.nstream && i < 16; i++) fc_blob(f, 5, i, st.vbuf[i].addr, st.vbuf[i].size, 1 << 20, &nb);
+    if (indexed && r->x[3]) {  // the indices it drew (count of them, the type's size)
+        uint32_t itype = (uint32_t)r->x[1], isz = itype == 0 ? 1 : itype == 1 ? 2 : 4;
+        fc_blob(f, 8, itype, r->x[3], r->x[2] * isz, 1 << 20, &nb);
+    }
+    for (int sg = 0; sg < 2; sg++) {  // the program: GLSL as translated, and the game's own code (offline retranslation)
+        ShaderInfo *si = sg ? pr->fi : pr->vi;
+        uint64_t code = pr->code[sg];
+        if (si && si->msl) fc_blob_mem(f, 9 + sg, sg, code ? code : 1, strlen(si->msl), si->msl, 1 << 20, &nb);
+        if (code && pr->cmax[sg]) fc_blob(f, 11 + sg, sg, code, pr->cmax[sg] < (1 << 20) ? pr->cmax[sg] : (1 << 20), 1 << 20, &nb);
+    }
+    fc_textures(f, 6, 0, pr->vi, &nb);
+    fc_textures(f, 7, 1, pr->fi, &nb);
+    {   // the vertex layout: attributes (format, stream, offset), streams (stride, divisor)
+        uint32_t lay[1 + 16 + 1 + 32] = {(uint32_t)st.nattrib};
+        memcpy(&lay[1], st.attrib, 64);
+        lay[17] = (uint32_t)st.nstream;
+        memcpy(&lay[18], st.stream, 128);
+        fc_blob_mem(f, 14, 0, 2, sizeof lay, lay, sizeof lay, &nb);
+    }
+    for (int sg = 0; sg < 2; sg++) {  // c1: the compiler's constants (branch tables), after the shader code
+        NvnShaderStage *ss = &st.program->stages[sg];
+        if (ss->code_addr && ss->const_size) fc_blob(f, 15 + sg, sg, ss->code_addr + ss->const_offset, ss->const_size, 65536, &nb);
+    }
+    if (gpu_params) {  // the parameters as the GPU left them (the GPU work before this draw is done: fc_grid waited)
+        const uint32_t *p = (const uint32_t *)(uintptr_t)(gwin_base + gmem_lo + g_ind_off);
+        fc_blob_mem(f, 13, 0, gwin_base + gmem_lo + g_ind_off, 20, p, 20, &nb);
+        if (indexed && r->x[3]) {  // and the indices those say (count p[0] from first p[2])
+            uint32_t itype = (uint32_t)r->x[1], isz = itype == 0 ? 1 : itype == 1 ? 2 : 4;
+            fc_blob(f, 8, 100 + itype, r->x[3] + (uint64_t)p[2] * isz, (uint64_t)p[0] * isz, 1 << 20, &nb);
+        }
+    }
+    long end = ftell(f);
+    fseek(f, nat, SEEK_SET), fwrite(&nb, 4, 1, f);
+    head[1] = (uint32_t)(end - at - 8);
+    fseek(f, at, SEEK_SET), fwrite(head, 4, 2, f);
+    fseek(f, end, SEEK_SET);
+    fflush(f);
+}
+
+// A debug frame's draw: its position stream (vertex attribute 0, 32-bit float) as the game left it in memory - how
+// far it spreads and how many values are NaN / infinite / beyond 1e6. Stretched "exploding" geometry with sane data
+// here comes from the transform (a matrix, a bone, the vertex shader); wild data here, from whatever wrote the buffer.
+// "[vscan] verts N extent E bad B min (x y z) max (x y z) stream S addr A" after the [draw] line (tools sort by it).
+static void debug_vscan(void) {
+    if (st.nattrib < 1) return;
+    uint32_t a = st.attrib[0], fmt = a & 0xFF, stream = (a >> 8) & 0x1F, off = a >> 13;
+    VkFormat vf = fmt ? vertex_format(fmt) : VK_FORMAT_UNDEFINED;
+    if ((vf != VK_FORMAT_R32G32B32_SFLOAT && vf != VK_FORMAT_R32G32B32A32_SFLOAT) || stream >= 16 || (int)stream >= st.nstream)
+        return;
+    uint64_t addr = st.vbuf[stream].addr, size = st.vbuf[stream].size, stride = st.stream[stream][0];
+    if (!addr || !stride || size <= off) return;
+    uint64_t n = (size - off) / stride;
+    if (n > 500000) n = 500000;
+    float mn[3] = {INFINITY, INFINITY, INFINITY}, mx[3] = {-INFINITY, -INFINITY, -INFINITY};
+    uint64_t bad = 0;
+    for (uint64_t i = 0; i < n; i++) {
+        const float *p = (const float *)(uintptr_t)(addr + off + i * stride);
+        for (int k = 0; k < 3; k++) {
+            float v = p[k];
+            if (!isfinite(v) || fabsf(v) > 1e6f) { bad++; continue; }
+            if (v < mn[k]) mn[k] = v;
+            if (v > mx[k]) mx[k] = v;
+        }
+    }
+    float ext = 0;
+    for (int k = 0; k < 3; k++) if (mx[k] >= mn[k] && mx[k] - mn[k] > ext) ext = mx[k] - mn[k];
+    LOG("[vscan] verts %llu extent %.1f bad %llu min (%g %g %g) max (%g %g %g) stream %u addr %llx\n", (unsigned long long)n, ext,
+        (unsigned long long)bad, mn[0], mn[1], mn[2], mx[0], mx[1], mx[2], stream, (unsigned long long)addr);
 }
 
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
@@ -7218,6 +7797,7 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
     for (int s = 0; s < st.nstream && s < 16; s++)
         if (st.vbuf[s].addr) LOG(" %d:%llx+%llx/%u", s, (unsigned long long)st.vbuf[s].addr, (unsigned long long)st.vbuf[s].size, st.stream[s][0]);
     LOG("\n");
+    debug_vscan();
     if (ENV("LARECOMP_DEBUG_DATA")) {  // vertex streams 0-1 and fragment cbufs: the first floats
         for (int s = 0; s < 2; s++) {
             if (!st.vbuf[s].addr) continue;
@@ -7286,6 +7866,12 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
     }
 }
 
+// Indirect draws: the parameters (GL / Vulkan layout: arrays {count, instances, first, base instance}, elements
+// {count, instances, first index, base vertex, base instance}) read from guest memory when the list runs, each made a
+// direct draw. Arguments: DrawArraysIndirect (mode, indirect), DrawElementsIndirect (mode, index type, index buffer,
+// indirect), MultiDrawArraysIndirectCount (mode, indirect, count buffer, max draws, stride), MultiDrawElementsIndirect-
+// Count (mode, index type, index buffer, indirect, count buffer, max draws, stride). (Parameters a compute pass of the
+// same submission writes are not ready yet here: they come from the previous one.)
 // An indexed draw with parameters in GPU memory whose indices run past its vertex buffer (Z-A: the index count is
 // another mesh's, so the draw reads on into the next allocation - matrices, material floats - and its triangles
 // stretch across the screen as sheets and beams). Checked on the parameters as the CPU sees them (the culling
@@ -7310,9 +7896,11 @@ static bool ib_overrun(CmdRec *r, const uint32_t *p, uint64_t pa) {
     if (last < 0 || (uint64_t)last * stride + off + 4 <= st.vbuf[s].size) return false;
     static int nlog;
     if (nlog++ < 60) {
-        LOG("[ibguard] frame %llu: skipped draw: args %llx = count %u inst %u first %u base %d binst %u | "
+        uint64_t tag = rec_tag(r);
+        LOG("[ibguard] frame %llu: skipped draw (recorded frame %lld) args %llx = count %u inst %u first %u base %d binst %u | "
             "ib %llx max index %u -> vertex %lld x stride %llu > vbuf %llx+%llu (%llu vertices)\n",
-            (unsigned long long)renderer_present_count(), (unsigned long long)pa, p[0], p[1], p[2], (int)p[3], p[4], (unsigned long long)ib, mx, (long long)last,
+            (unsigned long long)renderer_present_count(), tag >> 63 ? (long long)(tag & ~(1ull << 63)) : -1LL,
+            (unsigned long long)pa, p[0], p[1], p[2], (int)p[3], p[4], (unsigned long long)ib, mx, (long long)last,
             (unsigned long long)stride, (unsigned long long)st.vbuf[s].addr, (unsigned long long)st.vbuf[s].size,
             (unsigned long long)(st.vbuf[s].size / stride));
     }
@@ -7347,12 +7935,6 @@ static bool ind_args_bad(const uint32_t *p, uint64_t pa, bool elements) {
     stat_skipped_here();
     return true;
 }
-// Indirect draws: the parameters (GL / Vulkan layout: arrays {count, instances, first, base instance}, elements
-// {count, instances, first index, base vertex, base instance}) read from guest memory when the list runs, each made a
-// direct draw. Arguments: DrawArraysIndirect (mode, indirect), DrawElementsIndirect (mode, index type, index buffer,
-// indirect), MultiDrawArraysIndirectCount (mode, indirect, count buffer, max draws, stride), MultiDrawElementsIndirect-
-// Count (mode, index type, index buffer, indirect, count buffer, max draws, stride). (Parameters a compute pass of the
-// same submission writes are not ready yet here: they come from the previous one.)
 static void draw_indirect(CmdRec *r) {
     bool elements = r->op == CMD_DRAW_ELEMENTS_INDIRECT || r->op == CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT;
     bool multi = r->op == CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT || r->op == CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT;
@@ -9060,11 +9642,13 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_END: return;
         case CMD_JUMP: p = r->x[0]; continue;
         case CMD_CALL: {
+            vs_hist_add(r, depth);
             const uint64_t *h = x;
             for (uint64_t i = 0; i < r->x[0] && depth < 8; i++) exec_list(h[i], depth + 1);
             break;
         }
         case CMD_BIND_PROGRAM: {  // (program, NVNshaderStageBits): a game may bind its stages from several programs
+            vs_hist_add(r, depth);
             NvnProgram *p = (NvnProgram *)(uintptr_t)r->x[0];
             uint32_t m = (uint32_t)r->x[1] & 0x3F;
             if (!m) m = 0x3F;
@@ -9092,14 +9676,17 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_BIND_MULTISAMPLE: memcpy(st.ms, x, 0x18); break;
         case CMD_BIND_POLYGON: memcpy(st.poly, x, 4); break;
         case CMD_BIND_VERTEX_ATTRIB:
+            vs_hist_add(r, depth);
             st.nattrib = (int)r->x[0] > 16 ? 16 : (int)r->x[0];
             memcpy(st.attrib, x, st.nattrib * 4);
             break;
         case CMD_BIND_VERTEX_STREAM:
+            vs_hist_add(r, depth);
             st.nstream = (int)r->x[0] > 16 ? 16 : (int)r->x[0];
             memcpy(st.stream, x, st.nstream * 8);
             break;
         case CMD_BIND_VERTEX_BUFFERS:
+            vs_hist_add(r, depth);
             for (uint64_t i = 0; i < r->x[1] && r->x[0] + i < 16; i++) memcpy(&st.vbuf[r->x[0] + i], (uint8_t *)x + i * 16, 16);
             break;
         case CMD_BIND_UNIFORM_BUFFERS:
@@ -9164,6 +9751,7 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_SET_PRIMITIVE_RESTART: st.prim_restart = r->x[0] != 0; st.restart_index = (uint32_t)r->x[1]; break;
         case CMD_SET_COPY_STRIDES: st.copy_row_stride = r->x[0]; st.copy_image_stride = r->x[1]; break;
         case CMD_CLEAR_COLOR: {
+            if (render_skip(r)) break;
             snap_reason = "clear-color"; snapshots_invalidate(NULL);
             int index = (int)r->x[0];
             if (ENV("LARECOMP_LOG_CLEARS") && index < st.rt.ncolor && st.rt.color[index])
@@ -9203,6 +9791,7 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         }
         case CMD_CLEAR_DEPTH_STENCIL:
+            if (render_skip(r)) break;
             snap_reason = "clear-depth"; snapshots_invalidate(NULL);
             if (ct_on() && st.rt.depth)
                 LOG("[ct] clear-depth %p d%d s%d sc %d %d %d %d\n", (void *)st.rt.depth, r->x[0] != 0, r->x[2] != 0, st.scissor[0][0],
@@ -9231,8 +9820,8 @@ static void exec_list(uint64_t handle, int depth) {
             }
             break;
         case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); break;
-        case CMD_DRAW_ARRAYS: draw(r, false); break;
-        case CMD_DRAW_ELEMENTS: draw(r, true); break;
+        case CMD_DRAW_ARRAYS: draw_age(r); if (!render_skip(r)) draw(r, false); break;
+        case CMD_DRAW_ELEMENTS: draw_age(r); ib_note(r, false); pw_draw_note(r, r->op, r->x[3], "execute"); if (!render_skip(r)) draw(r, true); break;
         case CMD_BEGIN_XFB: xfb_on = true; stat_xfb_sessions++; break;
         case CMD_END_XFB: {
             xfb_on = false;
@@ -9261,6 +9850,7 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         }
         case CMD_BIND_XFB_BUFFER:
+            pw_op("transform feedback buffer", r->x[1], r->x[2]);
             if (r->x[0] < 4) { xfb_addr[r->x[0]] = r->x[1]; xfb_size[r->x[0]] = r->x[2]; }
             break;
         case CMD_BIND_XFB_BUFFERS: {
@@ -9268,10 +9858,27 @@ static void exec_list(uint64_t handle, int depth) {
             for (uint64_t i = 0; i < r->x[1] && i < 4 && r->x[0] + i < 4; i++) {
                 xfb_addr[r->x[0] + i] = b[2 * i];
                 xfb_size[r->x[0] + i] = b[2 * i + 1];
+                pw_op("transform feedback buffer", b[2 * i], b[2 * i + 1]);
             }
             break;
         }
         case CMD_SET_RASTERIZER_DISCARD: raster_discard = r->x[0] & 1; break;
+        case CMD_SET_RENDER_ENABLE: {
+            static int nlog;
+            if (nlog++ < 16) LOG("[render-enable] SetRenderEnable %llu\n", (unsigned long long)r->x[0]);
+            render_off = render_enable_on() && !(r->x[0] & 1);
+            break;
+        }
+        case CMD_SET_RENDER_ENABLE_CONDITIONAL: {  // (mode: 0 render if equal, 1 if not equal; two 16-byte counter reports)
+            const uint64_t *v = (const uint64_t *)(uintptr_t)r->x[1];
+            bool eq = v && v[0] == v[2], on = r->x[0] == 0 ? eq : !eq;
+            static int nlog;
+            if (nlog++ < 32) LOG("[render-enable] Conditional mode %llu at %llx: %llx vs %llx -> %s\n", (unsigned long long)r->x[0],
+                                 (unsigned long long)r->x[1], v ? (unsigned long long)v[0] : 0ull, v ? (unsigned long long)v[2] : 0ull,
+                                 on ? "on" : "OFF");
+            render_off = render_enable_on() && v && !on;
+            break;
+        }
         case CMD_DRAW_XFB: {
             static int nlog;
             if (nlog++ < 4) LOG("[xfb] DrawTransformFeedback mode %llu control %llx\n", (unsigned long long)r->x[0], (unsigned long long)r->x[1]);
@@ -9279,9 +9886,19 @@ static void exec_list(uint64_t handle, int depth) {
         }
         case CMD_DRAW_ARRAYS_INDIRECT: case CMD_DRAW_ELEMENTS_INDIRECT:
         case CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT: case CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT:
-            draw_indirect(r);
+            draw_age(r);
+            if (r->op == CMD_DRAW_ELEMENTS_INDIRECT) ib_note(r, false);
+            if (r->op == CMD_DRAW_ELEMENTS_INDIRECT || r->op == CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT) pw_draw_note(r, r->op, r->x[2], "execute");
+            if (!render_skip(r)) draw_indirect(r);
             break;
         case CMD_UPDATE_UNIFORM_BUFFER:
+            pw_op("UpdateUniformBuffer", r->x[0] + r->x[2], r->x[3]);
+            {   // (test) LARECOMP_UBO_FLUSH=1: the GPU work recorded before runs first - on the console the update is
+                // in GPU order, here it lands in guest memory at once, under shaders that read it directly
+                static int fl = -1;
+                if (fl < 0) fl = ENV("LARECOMP_UBO_FLUSH") ? 1 : 0;
+                if (fl) { wait_why = "UpdateUniformBuffer (test)"; renderer_flush(); }
+            }
             memcpy((void *)(uintptr_t)(r->x[0] + r->x[2]), x, r->x[3]);
             guest_copy_flush();  // (cbuf copies shared within the submission are stale now)
             break;
@@ -9343,12 +9960,14 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_COPY_TEXTURE_TO_TEXTURE: { const TexRefRec *t = x; copy_texture(&t[0], &t[1], r->x[6]); break; }
         case CMD_DOWNSAMPLE: { const TexRefRec *t = x; copy_texture(&t[0], &t[1], 1); break; }
         case CMD_COPY_BUFFER_TO_TEXTURE: copy_buffer_to_texture(r->x[0], x); break;
-        case CMD_COPY_TEXTURE_TO_BUFFER: copy_texture_to_buffer(x, r->x[3]); break;
+        case CMD_COPY_TEXTURE_TO_BUFFER: pw_op("CopyTextureToBuffer", r->x[3], 0); copy_texture_to_buffer(x, r->x[3]); break;
         case CMD_COPY_BUFFER_TO_BUFFER:
+            pw_op("CopyBufferToBuffer", r->x[1], r->x[2]);
             wait_why = "buffer -> buffer copy";
             renderer_flush();
             gw_note("buffer copy (CPU, at translation)", r->x[1], r->x[2], r->x[0]);
             memmove((void *)(uintptr_t)r->x[1], (void *)(uintptr_t)r->x[0], r->x[2]);
+            args_trace("copy", r->x[0]);
             break;
         default: break;
         }
@@ -9362,6 +9981,8 @@ static void execute_one(uint64_t handle, bool submit) {
     plat_sample_focus();
     exec_gen++;
     uint64_t t0 = SDL_GetTicksNS();
+    pw_check("before a submission");
+    args_trace("cpu (before submission)", handle);
     exec_list(handle, 0);
     uint64_t dt = SDL_GetTicksNS() - t0;
     cum_exec += dt;

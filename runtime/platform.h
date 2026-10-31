@@ -36,6 +36,7 @@ void plat_sample_focus(void);
 #ifdef __linux__
 void plat_write_tracking_off(const char *why);  // tracking off from now on (unless LARECOMP_WRITE_TRACKING=1)
 #endif
+int plat_written_pages_peek(uint64_t addr, uint64_t size);  // (debug) pages the CPU wrote since the last reset, not resetting; -1: no tracking
 enum { PLAT_PROT_NONE = 0, PLAT_PROT_READ = 1, PLAT_PROT_RW = 3 };
 // A guest page's state on the host now (committed / resident...), for a GPU fault report; false where not known.
 bool plat_page_state(uint64_t addr, char *out, size_t n);

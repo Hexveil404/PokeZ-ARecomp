@@ -54,6 +54,8 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
     uint64_t fa = er->ExceptionInformation[1];
     // (not for an execute fault: on a read-write page, retrying it would fault again forever)
     if (er->ExceptionInformation[0] != EXCEPTION_EXECUTE_FAULT && lazy_commit(fa)) return EXCEPTION_CONTINUE_EXECUTION;
+    extern int g_watch_write;
+    g_watch_write = (int)er->ExceptionInformation[0];
     if (g_report_crashes && rt_fault_watch(fa, ep->ContextRecord->Rip)) return EXCEPTION_CONTINUE_EXECUTION;
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -141,6 +143,14 @@ bool plat_mem_usage(uint64_t *process, uint64_t *guest) {
             fprintf(stderr, "[mem] private allocation %llx: %llu MB\n", (unsigned long long)top[i].base, (unsigned long long)(top[i].size >> 20));
     }
     return true;
+}
+int plat_written_pages_peek(uint64_t addr, uint64_t size) {
+    if (!g_write_watch || addr < g_lo || addr + size > g_hi) return -1;
+    static PVOID pages[4096];
+    ULONG_PTR n = 4096;
+    DWORD gran = 4096;
+    if (GetWriteWatch(0, (void *)(uintptr_t)addr, (SIZE_T)size, pages, &n, &gran) != 0) return -1;
+    return (int)n;
 }
 
 // Decommit everything: the range stays reserved, and pages come back zeroed when committed again (lazily).
@@ -1079,9 +1089,10 @@ void plat_run_begin(void) {
 }
 
 // ---- POSIX shims (win_compat.h)
-// Guest pages are committed on the CPU's first touch (vectored_handler), but ReadFile / WriteFile never fault:
-// into a page that is only reserved the call fails (ERROR_NOACCESS) instead of committing it. So the range is
-// committed first, and a failure is logged rather than handed back as a silent short read.
+// Guest pages are committed on the CPU's first touch (vectored_handler), but ReadFile / WriteFile on a guest buffer
+// never fault: on a page only reserved they stop part way. A file read into fresh guest memory then came back short,
+// the rest of the buffer keeping old bytes (Z-A: meshes loaded only in part - indices running into stale data, the
+// stretched sheets and beams). The range is committed first.
 static void commit_guest_range(uint64_t a, uint64_t n) {
     if (!n || a + n <= g_lo || a >= g_hi) return;
     uint64_t end = a + n < g_hi ? a + n : g_hi;
@@ -1105,7 +1116,9 @@ static void commit_guest_range(uint64_t a, uint64_t n) {
 static ssize_t prw(int fd, void *buf, size_t n, off_t off, bool write) {
     HANDLE h = (HANDLE)_get_osfhandle(fd);
     if (h == INVALID_HANDLE_VALUE) return -1;
-    commit_guest_range((uint64_t)(uintptr_t)buf, n);
+    static int no_commit = -1;  // (test) LARECOMP_NO_READ_COMMIT=1: the old behaviour
+    if (no_commit < 0) no_commit = getenv("LARECOMP_NO_READ_COMMIT") && atoi(getenv("LARECOMP_NO_READ_COMMIT"));
+    if (!no_commit) commit_guest_range((uint64_t)(uintptr_t)buf, n);
     size_t done = 0;
     while (done < n) {
         OVERLAPPED ov = {0};

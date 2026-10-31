@@ -290,6 +290,11 @@ NVN(nvnMemoryPoolInitialize) {
     p->storage = G(uint64_t, A(1), 0x10);
     p->size = G(uint64_t, A(1), 0x18);
     p->flags = G(uint32_t, A(1), 8);
+    {   static int n;  // (pool kinds: flags; virtual pools have no storage of their own)
+        if (n++ < 200 && ENV("LARECOMP_LOG_POOLS"))
+            LOG("[nvn] MemoryPool %llx flags %#x storage %llx size %#llx\n", (unsigned long long)A(0), p->flags,
+                (unsigned long long)p->storage, (unsigned long long)p->size);
+    }
     SET_HOST(A(0), p);
     if (getenv("LARECOMP_LOG_BINDS")) LOG("[pool] %llx + %llu KB flags %#x\n", (unsigned long long)p->storage, (unsigned long long)(p->size >> 10), p->flags);
     if (npools < 256) pools[npools++] = *p;  // (debug: nvn_pool_flags_at)
@@ -313,7 +318,12 @@ NVN(nvnMemoryPoolFlushMappedRange) {
     backend_pool_written(p->storage + A(1), A(2));
 }
 NVN(nvnMemoryPoolInvalidateMappedRange) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnMemoryPoolInvalidateMappedRange\n"); }
-NVN(nvnMemoryPoolMapVirtual) { RET(1); }
+NVN(nvnMemoryPoolMapVirtual) {
+    static int n;
+    if (n++ < 20) LOG("[nvn] MemoryPoolMapVirtual (not emulated): pool %llx count %llu requests %llx\n", (unsigned long long)A(0),
+                      (unsigned long long)A(1), (unsigned long long)A(2));
+    RET(1);
+}
 
 // ================================================================== buffers
 // Builder: device@0 pool@8 offset@0x10 size@0x18. Buffer: address@0 pool@8 offset@0x10 size@0x18 id@0x20
@@ -579,7 +589,25 @@ NVN(nvnTextureGetStorageClass) { RET(0); }
 NVN(nvnTextureGetRawStorageClass) { RET(0); }
 NVN(nvnTextureGetSparseTileLayout) { RET(0); }
 NVN(nvnTextureGetZCullStorageSize) { RET(0); }
-NVN(nvnTextureCompare) { RET(A(0) == A(1)); }
+// Whether two textures are the same texture for the hardware (shape, format, swizzle, storage): NVN compares the
+// objects' state, not their addresses. An engine that rebuilds a texture object keeps its texture pool slot when the
+// new one compares equal; comparing addresses gave every rebuild a new slot and freed the old one, which whatever
+// had taken the slot id went on sampling after the allocator handed it to another texture - in Savage Wind Recomp
+// (the same runtime, Breath of the Wild) trees thrown across the sky (its commit bc8a3746, #16 / #44). Pokemon Z-A's
+// stretched flags, banners and ground sheets look the same.
+NVN(nvnTextureCompare) {
+    const NvnTexture *a = A(0) ? HOST(NvnTexture, A(0)) : NULL, *b = A(1) ? HOST(NvnTexture, A(1)) : NULL;
+    static int nlog;
+    if (nlog++ < 3) LOG("[nvn] nvnTextureCompare %llx %llx\n", (unsigned long long)A(0), (unsigned long long)A(1));
+    if (a == b) { RET(a || A(0) == A(1)); return; }  // (copies of one texture; or two objects never initialized)
+    if (!a || !b) { RET(0); return; }
+    RET(a->target == b->target && a->format == b->format && a->flags == b->flags && a->width == b->width &&
+        a->height == b->height && a->depth == b->depth && a->levels == b->levels && a->samples == b->samples &&
+        a->ds_mode == b->ds_mode && !memcmp(a->swizzle, b->swizzle, sizeof a->swizzle) && a->stride == b->stride &&
+        a->addr == b->addr && a->pool == b->pool && a->pool_offset == b->pool_offset &&
+        a->layout.layers == b->layout.layers && a->layout.block_height_log2 == b->layout.block_height_log2 &&
+        a->layout.block_depth_log2 == b->layout.block_depth_log2);
+}
 NVN(nvnTextureFlushTexels) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnTextureFlushTexels\n"); }
 NVN(nvnTextureInvalidateTexels) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnTextureInvalidateTexels\n"); }
 

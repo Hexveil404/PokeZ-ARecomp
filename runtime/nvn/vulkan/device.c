@@ -2009,6 +2009,7 @@ static void present_hooks(void) {
     fnprof_frame(total_frames);
     extern void warp_frame(uint64_t frame);
     warp_frame(total_frames);
+    { extern void pw_check(const char *when); pw_check("at present"); }  // (debug: LARECOMP_POOL_WATCH, exec.c)
     extern void reboot_test_frame(uint64_t frame);  // runtime/main.c (LARECOMP_REBOOT_AT)
     reboot_test_frame(total_frames);
     extern void save_editor_frame(uint64_t frame);

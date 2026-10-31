@@ -175,6 +175,10 @@ problemas conhecidos: [docs/linux.md](docs/linux.md#za-recomp-on-linux-native-x8
 Aperte **F1** no jogo (ou abra **Configurações** na tela inicial) para o menu de configurações: fps, resolução,
 opções gráficas, controles, ícones dos botões e mais. As configurações são salvas na hora no `larecomp.ini`.
 
+Na primeira vez que abre, o ZA Recomp escolhe a resolução e o fps para o seu PC (pela placa de vídeo, CPU e RAM); quem
+vem de uma versão anterior recebe uma pergunta única na tela inicial. Com 60 fps, **Cair para 30 fps quando preciso**
+(desligado por padrão) volta para 30 fps quando o PC não segura 60, em vez de ficar em câmera lenta.
+
 | Teclado (padrão) | Switch |
 |---|---|
 | W A S D | Analógico esquerdo |
@@ -246,8 +250,9 @@ código gerado, fontes, saves).
   recompilador estático, o runtime, os renderizadores e o tradutor de shaders em que este port se baseia.
 - **[Hexveil404](https://github.com/Hexveil404)**: o port de Pokémon Legends: Z-A.
 - **Contribuidores do ZA Recomp**: [@Primus92](https://github.com/Primus92), [@Atterax](https://github.com/Atterax),
-  [@wimw85](https://github.com/wimw85), [@lucabravi](https://github.com/lucabravi) e todos que relataram problemas e
-  testaram builds.
+  [@wimw85](https://github.com/wimw85), [@lucabravi](https://github.com/lucabravi),
+  [@gabrielsem16-bot](https://github.com/gabrielsem16-bot), [@gdsistemas-web](https://github.com/gdsistemas-web) e
+  todos que relataram problemas e testaram builds.
 - **Contribuidores do LAS Recomp**: veja [docs/LASRecomp-README.md](docs/LASRecomp-README.md#credits).
 - **[Ryujinx](https://github.com/Ryujinx/Ryujinx)**, usado como referência de comportamento (nenhum código copiado),
   **[envytools](https://github.com/envytools/envytools)** e **[Switchbrew](https://switchbrew.org)** pela documentação

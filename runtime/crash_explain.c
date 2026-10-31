@@ -12,6 +12,8 @@
 
 static char g_line[512];   // the first fatal line (FATAL message / "signal 11 accessing 0x10")
 static uint64_t g_pc;      // a crash's host pc (0: a FATAL)
+bool rt_game_data_bad;
+int rt_mods_on;
 int rt_romfs_files = -1;   // the game's own RomFS files (runtime/services/fs.c; -1: not read yet)
 enum { ROMFS_FILES = 3836 };  // (every supported version: runtime/ui/launcher.mm counts the same)
 
@@ -61,7 +63,7 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
     static const char *const report = "Please report it as a GitHub issue and attach the log file below. "
                                       "Your progress up to your last save or autosave is safe.";
     const char *app = g_game_is_la ? "LAS Recomp" : "ZA Recomp";
-    char head[160], what[400];
+    char head[160], what[600];
     // (the file count is Link's Awakening's: Pokémon Z-A's RomFS has its own, and every crash read as missing files)
     if (g_game_is_la && rt_romfs_files >= 0 && rt_romfs_files < ROMFS_FILES) {
         snprintf(head, sizeof head, "Your game files are incomplete");
@@ -89,6 +91,11 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
                                                                          // unwind; runtime/hle/warp.c rt_cxa_throw)
         snprintf(head, sizeof head, "The game ran into an error it couldn't recover from");
         snprintf(what, sizeof what, "This is a bug in %s, not a problem with your game files or PC. %s", app, report);
+    } else if (has("svcBreak") && rt_game_data_bad) {  // (the same spot every time: nothing another start would change, #89)
+        snprintf(head, sizeof head, "Damaged game data");
+        snprintf(what, sizeof what, "The game read data from its files that can't be unpacked, so it stopped. %s"
+                 "Dump the game again from your Switch and set it up on the start screen (Game Files).",
+                 rt_mods_on ? "Turn your mods off first: a mod made for another version of the game can do this. If it still happens: " : "");
     } else if (has("svcBreak")) {  // (the game's own check failed: Pokémon Z-A, rarely, while it starts - a timing race)
         snprintf(head, sizeof head, "The game stopped at one of its own checks");
         snprintf(what, sizeof what, "Start it again: this happens now and then while the game starts, and the next "
@@ -110,6 +117,11 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
     } else {
         snprintf(head, sizeof head, "%s stopped because of an error", app);
         snprintf(what, sizeof what, "%s", report);
+    }
+    // (mods replace the game's files, and #85 / #98 stopped with them on and not without them)
+    if (rt_mods_on && !rt_game_data_bad && (has("svcBreak") || (g_pc && rt_host_fn_name(g_pc, NULL)))) {
+        size_t l = strlen(what);
+        snprintf(what + l, sizeof what - l, " You have mods on: if this keeps happening, turn them off and see whether it stops.");
     }
     fprintf(stderr, "[crash] %s\n", head);
     if (log_path && *log_path) snprintf(out, n, "%s\n\n%s\n\nLog file:\n%s", head, what, log_path);

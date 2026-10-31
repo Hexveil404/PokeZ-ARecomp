@@ -241,6 +241,7 @@ static void lm_logger(Service *s, IpcReq *req, IpcResp *resp) {
         p += len;
     }
     if (n) LOG("[lm] %s\n", line);
+    if (n && strstr(line, "OODLE ERROR")) rt_game_data_bad = true;  // (the crash dialog: the abort that follows isn't a timing race, #89)
 }
 
 SERVICE("lm", lm) {

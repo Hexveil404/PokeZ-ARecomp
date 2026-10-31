@@ -85,6 +85,8 @@ void rt_fatal_msg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void rt_crash_fault(const char *what, uint64_t fa, uint64_t pc);
 void rt_crash_explain(char *out, size_t n, const char *log_path);
 extern int rt_romfs_files;
+extern bool rt_game_data_bad;  // (the game's decompressor reported damaged data: am.c)
+extern int rt_mods_on;         // (mods layered over the game's files: fs.c)
 void crash_handler_install(void);  // per thread (alternate signal stack)
 
 // ---- kernel.c

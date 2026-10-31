@@ -341,6 +341,7 @@ static void layer_init(void) {
     for (int i = 0; i < n; i++) {
         snprintf(layer_root[nlayers++], sizeof *layer_root, "mods/%s/romfs", names[i]);
         LOG("[fs] mod: %s\n", names[i]);
+        rt_mods_on++;
     }
 }
 

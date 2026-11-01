@@ -161,10 +161,11 @@ uint64_t vk_completed_seq(void) {
     return v;
 }
 
-// The indirect draws whose parameters the GPU reads in place (draw_indirect), the last IR_N of them - always on, a
-// few KB: a GPU that never finishes a submission (the 10 s stop, #70 #81 #82 #86) or loses the device shows the ones
-// still in flight with their parameters as translated and as they are now, which is what the GPU reads.
-#define IR_N 256  // (a power of two)
+// The indirect draws whose parameters the GPU reads in place (draw_indirect), the last IR_N of them - always on, some
+// 160 KB: a GPU that never finishes a submission (the 10 s stop, #70 #81 #82 #86 #106) or loses the device shows the
+// ones still in flight with their parameters as translated and as they are now, which is what the GPU reads. (256 of
+// them didn't reach back to the stuck submission in 3 of #106's 4 logs: 4096, about a frame's.)
+#define IR_N 4096  // (a power of two)
 static struct { uint64_t seq, pa, vs; uint32_t rec[5]; } ir_ring[IR_N];
 static unsigned ir_n;
 static void ir_note(uint64_t pa, const uint32_t *p, uint64_t vs) {
@@ -179,12 +180,19 @@ static void ir_dump(void) {
     unsigned lo = ir_n > IR_N ? ir_n - IR_N : 0, n = 0;
     for (unsigned k = lo; k < ir_n; k++) n += ir_ring[k & (IR_N - 1)].seq > done;
     LOG("[vk] indirect draws in flight (GPU done up to submission %llu): %u of the last %u\n", (unsigned long long)done, n, ir_n - lo);
-    unsigned skip = n > 48 ? n - 48 : 0;  // (the last 48 of them)
+    // Shown: the submission the GPU is on, then anything with a count or instances no draw has, or that changed since it
+    // was translated, then the last 16
+    unsigned shown = 0, seen = 0, oldest = 0;
     for (unsigned k = lo; k < ir_n; k++) {
         const typeof(ir_ring[0]) *e = &ir_ring[k & (IR_N - 1)];
         if (e->seq <= done) continue;
-        if (skip) { skip--; continue; }
+        seen++;
+        if (!oldest) oldest = (unsigned)e->seq;
         const uint32_t *q = (const uint32_t *)(uintptr_t)e->pa, *w = e->rec;
+        bool odd = q[0] > (1u << 22) || q[1] > (1u << 20) || w[0] > (1u << 22) || w[1] > (1u << 20) || q[0] != w[0] || q[2] != w[2] ||
+                   q[3] != w[3] || q[4] != w[4] || q[1] != w[1];
+        if (!((unsigned)e->seq == oldest && shown < 64) && !(odd && shown < 128) && seen + 16 <= n) continue;
+        shown++;
         LOG("[vk]   submission %llu vs %llx args %llx: recorded %u %u %u %d %u, now %u %u %u %d %u\n", (unsigned long long)e->seq,
             (unsigned long long)e->vs, (unsigned long long)e->pa, w[0], w[1], w[2], (int)w[3], w[4], q[0], q[1], q[2], (int)q[3], q[4]);
     }
@@ -725,6 +733,16 @@ uint64_t renderer_fence_seq(void) {
     return q;
 }
 
+// (overlap) The submission of the latest storing dispatch's copy back (gfast_finish). The game's next frame doesn't start
+// before it ran. The game resets a counter of the culling compute's list in the buffer that copy back writes (bdb60e5,
+// #82), and gfast_merge.comp can only tell a CPU write by its value: a reset to the value the dispatch started from
+// (0 over 0) looks untouched, the dispatch's count goes back in, and the list can grow over the indirect parameters in
+// the same buffer: a frame of bad draws, then the GPU stops (#106 #70 #81 #86). Not reproduced here, so that last step is
+// unproven; the race itself is real and goes with GPU load: a copy back was pending at 2130 of 5700 fence waits at 35
+// fps, 6 of 9000 at 60 (LARECOMP_LOG_STORE_WAIT=1), and those reports run mostly under 60. The Switch has no such
+// window: its fence isn't taken late. No cost measured at 38 fps. LARECOMP_GPU_STORE_WAIT=0: off.
+static _Atomic uint64_t store_seq;
+
 void renderer_wait_seq(uint64_t seq) {
     if (!seq) return;
     pthread_mutex_lock(&seq_lock);
@@ -737,6 +755,22 @@ void renderer_wait_seq(uint64_t seq) {
         pthread_mutex_lock(&seq_lock);
         uint64_t w = overlap_defer(seq, done, &deferred_seq);
         pthread_mutex_unlock(&seq_lock);
+        static int store_wait = -1;
+        if (store_wait < 0) store_wait = !ENV("LARECOMP_GPU_STORE_WAIT") || atoi(ENV("LARECOMP_GPU_STORE_WAIT")) != 0;
+        uint64_t sw = store_wait ? atomic_load(&store_seq) : 0;
+        if (sw > seq) sw = seq;  // (a dispatch of a frame after the one waited for)
+        {   // (debug) LARECOMP_LOG_STORE_WAIT=1: how often a frame would have started ahead of a copy back
+            static long calls, ahead, longer;
+            static int lg = -1;
+            if (lg < 0) lg = ENV("LARECOMP_LOG_STORE_WAIT") ? 1 : 0;
+            if (lg) {
+                calls++;
+                ahead += sw > done;
+                longer += sw > done && sw > w;
+                if (calls % 300 == 0) LOG("[storewait] %ld fence waits: copy back still pending at %ld, the wait made longer at %ld\n", calls, ahead, longer);
+            }
+        }
+        if (sw > done && sw > w) w = sw;
         if (!w) {
             __atomic_fetch_add(&stat_deferred, 1, __ATOMIC_RELAXED);  // (the game thread; stats read on the render thread)
             wait_why = NULL;
@@ -5358,6 +5392,7 @@ static void gfast_prepare(VkCommandBuffer cb) {
 // After a storing dispatch: its ranges back to the heap (before anything else reads them: draws, the CPU after the fence).
 static void gfast_finish(VkCommandBuffer cb) {
     if (!gfast_n) return;
+    if (gfast_back_n) atomic_store(&store_seq, submit_seq + 1);  // (the pending submission: renderer_wait_seq)
     for (int i = 0; i < gfast_back_n; i++)
         gw_note("compute copy back", gwin_base + gfast_back[i].dstOffset, gfast_back[i].size, st.program ? st.program->stages[5].code_addr : 0);
     vk_full_barrier(cb);
@@ -7999,15 +8034,16 @@ static bool ib_overrun(CmdRec *r, const uint32_t *p, uint64_t pa) {
 // Parameters no draw can have, in blocks the GPU reads in place (#70 #81 #82 #86: the GPU stopped for 10 s, or the
 // device was lost, where blocks held other data for frames on end - every field near one small number, a base
 // instance in the hundreds of thousands): a count over 4M (ib_overrun leaves those alone), or a base instance whose
-// first element already lies past a per-instance stream's buffer (the instance attributes read far beyond it).
-// Checked as the CPU sees them, as ib_overrun (the base instance is the CPU's; only the instance count is the GPU's),
-// and skipped; LARECOMP_IB_GUARD=0 draws them.
+// first element already lies past a per-instance stream's buffer (the instance attributes read far beyond it), or
+// instances over 16M (#106: 1056971248 in such a block; the GPU would be on that one draw for good).
+// Checked as the CPU sees them, as ib_overrun (the base instance is the CPU's; the instance count is the GPU's, and in
+// every log so far a few thousand at most), and skipped; LARECOMP_IB_GUARD=0 draws them.
 static bool ind_args_bad(const uint32_t *p, uint64_t pa, bool elements) {
     static int on = -1;
     if (on < 0) on = !ENV("LARECOMP_IB_GUARD") || atoi(ENV("LARECOMP_IB_GUARD")) != 0;
     if (!on) return false;
     uint32_t binst = elements ? p[4] : p[3];
-    const char *why = p[0] > (1u << 22) ? "count over 4M" : NULL;
+    const char *why = p[0] > (1u << 22) ? "count over 4M" : p[1] > (1u << 24) ? "instances over 16M" : NULL;
     for (int a = 0; a < st.nattrib && !why; a++) {
         if (!(st.attrib[a] & 0xFF)) continue;
         uint32_t s = st.attrib[a] >> 8 & 0x1F, off = st.attrib[a] >> 13;

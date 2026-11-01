@@ -395,9 +395,16 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     char work[1100], tmp[1100];
     snprintf(work, sizeof work, "%s" SEP ".gamebuild", game_dir);
     snprintf(tmp, sizeof tmp, "%s" SEP "%s.tmp", work, GAMELIB_NAME);
-    char input_paths[6][1100], spec[4096];
+    char input_paths[8][1100], spec[4096];
     snprintf(input_paths[0], sizeof input_paths[0], "%s" SEP "exefs" SEP "main", game_dir);
     snprintf(input_paths[1], sizeof input_paths[1], "%s" SEP "exefs" SEP "sdk", game_dir);
+    // subsdkN: only some games have them (Pokémon Legends Arceus: subsdk0, subsdk1), numbered from 0 without gaps as the
+    // loader reads them (runtime/loader.c), each generated at its load address (SUBSDK_BASE + N * SUBSDK_STEP)
+    int nsub = 0;
+    for (; nsub < 2; nsub++) {
+        snprintf(input_paths[6 + nsub], sizeof input_paths[6 + nsub], "%s" SEP "exefs" SEP "subsdk%d", game_dir, nsub);
+        if (!file_exists(input_paths[6 + nsub])) break;
+    }
     const char *headers[] = {"cpu.h", "simd.h", "simd_fp.h", "gamelib.h"};
     for (int i = 0; i < 4; ++i) snprintf(input_paths[i+2], sizeof input_paths[i+2], "%s" SEP "%s", t.inc, headers[i]);
     // Generator changes should rebuild only chunks whose C changed, as in the existing incremental builder.
@@ -419,9 +426,10 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         snprintf(rp, sizeof rp, "%s" SEP "gamelib_entry.receipt", work);
         update = stat(rp, &st) == 0;
     }
-    const char *gen_inputs[5] = {input_paths[0], input_paths[1], t.gen, t.hle};
+    const char *gen_inputs[7] = {input_paths[0], input_paths[1], t.gen, t.hle};
     int ngen = 4;
     if (t.gen_script[0]) gen_inputs[ngen++] = t.gen_script;
+    for (int i = 0; i < nsub; i++) gen_inputs[ngen++] = input_paths[6 + i];
     if (!build_cache_prepare_generation(cache, GAMELIB_ID, gen_inputs, ngen, why, why_size)) {
         build_cache_failed(cache);
         build_cache_close(cache);
@@ -450,11 +458,13 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         t.cc, t.zig ? " cc" : "", o->jobs);
     if (gamelib_old_cpu()) LOG("[gamebuild] CPU without AVX2 / FMA / BMI2: built for x86-64-v2\n");
 
-    // 1. the generator, both modules at once; their finished files are compiled while it goes on
-    Gen gens[2] = {{.name = "main"}, {.name = "sdk"}};
-    static const char *const base[2] = {"0x7000000000", "0x7008000000"};
+    // 1. the generator, every module at once; their finished files are compiled while it goes on
+    Gen gens[4] = {{.name = "main"}, {.name = "sdk"}, {.name = "subsdk0"}, {.name = "subsdk1"}};
+    static const char *const base[4] = {"0x7000000000", "0x7008000000", "0x700a000000", "0x700b000000"};
+    _Static_assert(SUBSDK_BASE == 0x700a000000ull && SUBSDK_STEP == 0x1000000ull, "base[] follows the loader");
+    const int nmods = 2 + nsub;
     bool ok = true;
-    for (int i = 0; i < 2 && ok; i++) {
+    for (int i = 0; i < nmods && ok; i++) {
         Gen *g = &gens[i];
         g->exit = -1;
         snprintf(g->log, sizeof g->log, "%s" SEP "gen_%s.log", work, g->name);
@@ -480,8 +490,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     }
 
     Units units = {0};
-    int queued[2] = {0, 0};  // chunk files of each module put in units so far
-    bool tables[2] = {false, false};
+    int queued[4] = {0};  // chunk files of each module put in units so far
+    bool tables[4] = {false};
     int next = 0, jobs = o->jobs < 1 ? 1 : o->jobs > 64 ? 64 : o->jobs;
     struct { PlatProc p; int unit; } run[64];
     int nrun = 0;
@@ -499,7 +509,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         bool gens_done = true;
         double gen_frac = 0;
         unsigned long long written = 0;
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < nmods; i++) {
             Gen *g = &gens[i];
             if (g->exit < 0) {
                 read_gen_log(g);
@@ -533,7 +543,9 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                 add_unit(&units, src, work, stem);
                 tables[i] = true;
             }
-            gen_frac += g->exit == 0 ? 0.5 : g->n ? 0.5 * (double)g->ci / (double)g->n : 0;
+            // (main half the generator's share, the rest split among the others: main is most of its time)
+            double w = i == 0 ? 0.5 : 0.5 / (nmods - 1);
+            gen_frac += g->exit == 0 ? w : g->n ? w * (double)g->ci / (double)g->n : 0;
         }
         if (!ok) break;
         for (int k = 0; k < units.n; k++) written += units.u[k].bytes;
@@ -585,7 +597,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         sleep_ms(50);
     }
     for (int k = 0; k < nrun; k++) stop(run[k].p);  // (a failure: the rest is of no use - the failure shows at once)
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < nmods; i++)
         if (gens[i].p && gens[i].exit < 0) stop(gens[i].p);
 
     // 2. link

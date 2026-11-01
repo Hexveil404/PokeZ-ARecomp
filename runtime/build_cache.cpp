@@ -249,7 +249,8 @@ extern "C" bool build_cache_prepare_generation(BuildCache *c, const char *spec, 
         std::string identity = "LASGENKEY1\n" + key.finish() + "\n";
         auto record = c->root / "generation-identity";
         if (!fs::exists(record) || read(record, 128) != identity) {
-            for (const char *name : {"main.generation", "sdk.generation", "main", "sdk"})
+            for (const char *name : {"main.generation", "sdk.generation", "subsdk0.generation", "subsdk1.generation",
+                                     "main", "sdk", "subsdk0", "subsdk1"})
                 fs::remove_all(c->root / name);
             write(record, identity);
         }

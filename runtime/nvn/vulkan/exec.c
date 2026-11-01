@@ -460,6 +460,7 @@ static void begin_cb(VkCommandBuffer *cb, bool *begun) {
 }
 
 static void gp_mark(VkCommandBuffer cb, const char *fmt, ...);
+static void ia_refresh(VkCommandBuffer cb);  // (the GPU-filled indirect parameters' private records, below)
 VkCommandBuffer vk_cmd(void) {
     Sub *s = sub();
     if (!s->main_begun) {
@@ -484,6 +485,7 @@ VkCommandBuffer vk_cmd(void) {
             rec_CmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_NONE, prof_qp, (uint32_t)cur_sub * 3);
             s->ts = true;
         }
+        ia_refresh(s->main);  // (the CPU's parameter writes before this submission; under the overlap only)
     }
     return s->main;
 }
@@ -1598,6 +1600,8 @@ static int debug_pass_no;
 static bool g_ind_gpu;
 static VkDeviceSize g_ind_off;
 static uint32_t g_ind_stride;
+static VkBuffer g_ind_buf;  // (VK_NULL_HANDLE: the window's buffer; else ia_claim's private record there)
+static uint64_t g_ind_pa;   // (the guest block's address, for the device-lost trace)
 // Transform feedback state (Begin/EndTransformFeedback, the bound buffers) and rasterizer discard
 static bool xfb_on, raster_discard;
 // SetRenderEnable / SetRenderEnableConditional: while off, the game's draws and clears do nothing (the game turns
@@ -6645,6 +6649,7 @@ static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz) {
     stat_dispatches++;
     subr_now.dispatches++, subr_now.cs = cp->code;
     if (g_debug_frame && g_fullcap) fullcap_dispatch(true, gx, gy, gz);  // (after: gfast's copy back included)
+    ia_refresh(cb);  // (the instance counts it may have written, into the private records; under the overlap only)
 }
 
 // ================================================================== draws
@@ -7678,7 +7683,7 @@ static void draw_(CmdRec *r, bool indexed) {
             ss.known &= ~SS_SC;
         }
         if (g_ind_gpu && ind_ok && nruns == 1) {  // (indirect: instance count etc. written by the GPU - culling)
-            rec_CmdDrawIndirect(cb, gmem_buf, g_ind_off, 1, g_ind_stride, indexed);
+            rec_CmdDrawIndirect(cb, g_ind_buf ? g_ind_buf : gmem_buf, g_ind_off, 1, g_ind_stride, indexed);
         } else if (!use_index) rec_CmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
         else rec_CmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);
     }
@@ -7687,8 +7692,8 @@ static void draw_(CmdRec *r, bool indexed) {
     dl_note("draw vs %llx fs %llx%s xfb %d", (unsigned long long)st.program->stages[0].code_addr,
             (unsigned long long)st.program->stages[1].code_addr, g_ind_gpu && ind_ok ? " indirect" : "", xfb_on);
     if (g_ind_gpu && ind_ok && dl_on > 0) {
-        dl_args[(dl_n - 1) & (DL_N - 1)] = gwin_base + gmem_lo + g_ind_off;
-        memcpy(dl_snap[(dl_n - 1) & (DL_N - 1)], (const void *)(uintptr_t)(gwin_base + gmem_lo + g_ind_off), 20);
+        dl_args[(dl_n - 1) & (DL_N - 1)] = g_ind_pa;  // (the guest block, also when a private record is drawn: ia_claim)
+        memcpy(dl_snap[(dl_n - 1) & (DL_N - 1)], (const void *)(uintptr_t)g_ind_pa, 20);
     }
     if (dl_on > 0) vk_checkpoint(cb, dl_n);
     if (g_debug_frame) {  // the probe (above)
@@ -8143,6 +8148,165 @@ static bool ind_args_bad(const uint32_t *p, uint64_t pa, bool elements) {
     stat_skipped_here();
     return true;
 }
+// ---- GPU-filled indirect parameters under the GPU overlap: private records. The draws whose instance count the GPU
+// writes (Pokémon Z-A's culling compute) read their parameters in the guest heap when they run - and with the overlap the
+// game builds the next frame meanwhile, in memory it reuses on the assumption that the GPU is done: the blocks held other
+// data by the time the GPU got there (Steam Deck, 2026-10-31: at frame 8800 sixty draws asked for counts in the hundreds,
+// one for 1069780133 instances - a float - and the gfx ring timed out after 5 s with no page fault: every app's GPU work
+// stopped, Steam's own included, and the GPU stayed unstable until a reboot). ind_args_bad / ib_overrun only see what
+// the CPU saw at translation. So under the overlap each such block the draws have used gets a slot in a private buffer
+// of ours, which a small dispatch (ind_private.comp) fills from the heap - the count, the instances (by the instance
+// streams' size) and count x instances bounded - at points already outside any pass: after each of the game's
+// dispatches (what writes the instance counts) and at each submission's start (the CPU's writes before it). A
+// rewritten block can make a draw wrong for a frame, not stop the GPU. Z-A's blocks stay at the same addresses (a few
+// hundred, 0x77394b8000 on), so a block is in place only on its first use. (A first version split the pass at each
+// such draw to fill its record just before: 500 splits a frame, 1.3 fps on the Deck.)
+// LARECOMP_VK_IND_PRIVATE=0: off (in place, as before); =1: on without the overlap too (tests). LARECOMP_VK_IND_WORK=
+// <vertices>: the count x instances bound (default 32M - the busiest Z-A frame draws a few million).
+#define IA_CAP 8192         // slots (blocks known)
+#define IA_HASH 16384       // (open addressing, a power of two)
+static uint64_t ia_key[IA_HASH];   // guest block address (0: empty)
+static uint32_t ia_val[IA_HASH];   // its slot
+static uint32_t ia_n, ia_ready;    // slots in use; the first ia_ready of them were filled by a refresh already recorded
+static VkBuffer ia_gm;             // the window's buffer (and gmem_lo) the source offsets were taken in: a new import resets
+static uint64_t ia_lo;
+static VkBuffer ia_buf;            // [IA_CAP records x 5 words][IA_CAP source offsets][IA_CAP caps x 2], host-visible
+static VmaAllocation ia_mem;
+static uint32_t *ia_ptr;
+static VkPipeline ia_pipe;
+static VkPipelineLayout ia_layout;
+static VkDescriptorSetLayout ia_set_layout;
+static uint64_t stat_ia_refresh, stat_ia_hits, stat_ia_place;  // (logged every ~10 s)
+
+static bool ia_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = ENV("LARECOMP_VK_IND_PRIVATE");
+        on = e ? atoi(e) : -1;
+        on = on >= 0 ? on != 0 : overlap_on();
+        LOG("[vk] GPU-filled indirect parameters: %s (LARECOMP_VK_IND_PRIVATE=%d: %s)\n",
+            on ? "private records, bounded, under the overlap" : "read in place", !on, on ? "in place" : "private");
+    }
+    return on && gmem_buf;
+}
+
+static bool ia_init(void) {
+    static int failed;
+    if (ia_pipe) return true;
+    if (failed) return false;
+    VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (uint64_t)IA_CAP * 32,
+                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT};
+    VmaAllocationCreateInfo aci = {.usage = VMA_MEMORY_USAGE_AUTO,
+                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+    VmaAllocationInfo info;
+    if (vmaCreateBuffer(g_vk.vma, &bci, &aci, &ia_buf, &ia_mem, &info) != VK_SUCCESS) { failed = 1; return false; }
+    ia_ptr = info.pMappedData;
+    memset(ia_ptr, 0, (size_t)IA_CAP * 32);
+    VkDescriptorSetLayoutBinding b[2];
+    for (int i = 0; i < 2; i++)
+        b[i] = (VkDescriptorSetLayoutBinding){.binding = (uint32_t)i, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
+    VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = b};
+    VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &ia_set_layout));
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+    VkPipelineLayoutCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                     .pSetLayouts = &ia_set_layout, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+    VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &pi, NULL, &ia_layout));
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = ia_layout,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                                                .module = vk_builtin_shader("ind_private.comp"), .pName = "main"}};
+    VK_CHECK(vkCreateComputePipelines(g_vk.dev, VK_NULL_HANDLE, 1, &ci, NULL, &ia_pipe));
+    return true;
+}
+
+// (a new import of the window: every source offset is stale) The slots are reused from 0: a refresh rewriting one comes
+// after a full barrier, so after every draw already recorded that read it
+static void ia_check_window(void) {
+    if (ia_gm == gmem_buf && ia_lo == gmem_lo) return;
+    memset(ia_key, 0, sizeof ia_key);
+    ia_n = ia_ready = 0;
+    ia_gm = gmem_buf;
+    ia_lo = gmem_lo;
+}
+
+// Fill every known slot from the heap now (outside a pass: after a dispatch, at a submission's start)
+static void ia_refresh(VkCommandBuffer cb) {
+    if (!ia_n || !ia_on() || in_pass) return;
+    ia_check_window();
+    if (!ia_n || !ia_init()) return;
+    static uint32_t work;
+    if (!work) { const char *e = ENV("LARECOMP_VK_IND_WORK"); work = e && atol(e) > 0 ? (uint32_t)atol(e) : 32u << 20; }
+    VkDescriptorSet set = vk_alloc_set(ia_set_layout);
+    VkDescriptorBufferInfo bi[2] = {{gmem_buf, 0, gmem_size}, {ia_buf, 0, (uint64_t)IA_CAP * 32}};
+    VkWriteDescriptorSet wr[2];  // (one descriptor a write: record.c)
+    for (uint32_t k = 0; k < 2; k++)
+        wr[k] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = k,
+                                       .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[k]};
+    rec_UpdateDescriptorSets(2, wr);
+    vk_full_barrier(cb);  // (after the dispatch's writes, and after every earlier draw that read these records)
+    rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, ia_pipe);
+    rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, ia_layout, 0, 1, &set, 0, NULL);
+    uint32_t pc[4] = {ia_n, work, IA_CAP, 0};
+    rec_CmdPushConstants(cb, ia_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+    rec_CmdDispatch(cb, (ia_n + 63) / 64, 1, 1);
+    vk_full_barrier(cb);  // (the records before the draws read them as indirect parameters)
+    ss_forget();          // (a compute pipeline and set bound: the next draw sets its own again)
+    ia_ready = ia_n;
+    stat_ia_refresh++;
+    static uint64_t next_log;
+    uint64_t now = SDL_GetTicksNS();
+    if (now >= next_log) {
+        if (next_log)
+            LOG("[vk] indirect private records: %u blocks, %llu refreshes, %llu draws from them, %llu in place (first use), frame %llu\n",
+                ia_n, (unsigned long long)stat_ia_refresh, (unsigned long long)stat_ia_hits, (unsigned long long)stat_ia_place,
+                (unsigned long long)renderer_present_count());
+        stat_ia_refresh = stat_ia_hits = stat_ia_place = 0;
+        next_log = now + 10000000000ull;
+    }
+}
+
+// The draw at block pa: its slot's caps written (the count as ind_args_bad allows, the instances by the per-instance
+// streams' elements: no instance reads past them) and g_ind_buf / g_ind_off pointed at its record - once a refresh
+// has filled it. false: in place this once (a block not seen before gets a slot for the next refresh).
+static bool ia_claim(uint64_t pa) {
+    if (!ia_init()) return false;
+    ia_check_window();
+    if (!GM_IN(pa, 20) || (pa & 3) || GM_OFF(pa) / 4 > 0xFFFFFFF0ull) return false;
+    uint32_t h = (uint32_t)((pa >> 2) * 0x9E3779B97F4A7C15ull >> 50) & (IA_HASH - 1);
+    while (ia_key[h] && ia_key[h] != pa) h = (h + 1) & (IA_HASH - 1);
+    uint32_t k;
+    if (ia_key[h]) k = ia_val[h];
+    else {
+        if (ia_n >= IA_CAP) { stat_ia_place++; return false; }
+        k = ia_n++;
+        ia_key[h] = pa;
+        ia_val[h] = k;
+        ia_ptr[IA_CAP * 5 + k] = (uint32_t)(GM_OFF(pa) / 4);
+    }
+    uint64_t icap = 1u << 20;
+    for (int a = 0; a < st.nattrib; a++) {
+        if (!(st.attrib[a] & 0xFF)) continue;
+        uint32_t s = st.attrib[a] >> 8 & 0x1F;
+        if (s >= (uint32_t)st.nstream || !st.stream[s][1] || !st.stream[s][0] || !st.vbuf[s].size) continue;
+        uint64_t e = st.vbuf[s].size / st.stream[s][0] * st.stream[s][1];  // (elements x divisor: instances it can feed)
+        if (e < icap) icap = e;
+    }
+    ia_ptr[IA_CAP * 6 + k * 2] = 1u << 22;
+    ia_ptr[IA_CAP * 6 + k * 2 + 1] = (uint32_t)(icap ? icap : 1);
+    if (k >= ia_ready) { stat_ia_place++; return false; }
+    g_ind_buf = ia_buf;
+    g_ind_off = (VkDeviceSize)k * 20;
+    stat_ia_hits++;
+    return true;
+}
+
+// Indirect draws: the parameters (GL / Vulkan layout: arrays {count, instances, first, base instance}, elements
+// {count, instances, first index, base vertex, base instance}) read from guest memory when the list runs, each made a
+// direct draw. Arguments: DrawArraysIndirect (mode, indirect), DrawElementsIndirect (mode, index type, index buffer,
+// indirect), MultiDrawArraysIndirectCount (mode, indirect, count buffer, max draws, stride), MultiDrawElementsIndirect-
+// Count (mode, index type, index buffer, indirect, count buffer, max draws, stride). (Parameters a compute pass of the
+// same submission writes are not ready yet here: they come from the previous one.)
 static void draw_indirect(CmdRec *r) {
     bool elements = r->op == CMD_DRAW_ELEMENTS_INDIRECT || r->op == CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT;
     bool multi = r->op == CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT || r->op == CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT;
@@ -8198,7 +8362,8 @@ static void draw_indirect(CmdRec *r) {
             }
             if (ind_args_bad(p, pa, elements) || (elements && ib_overrun(r, p, pa))) continue;
             ir_note(pa, p, st.program ? st.program->stages[0].code_addr : 0);
-            g_ind_gpu = true; g_ind_off = GM_OFF(pa); g_ind_stride = stride;
+            g_ind_gpu = true; g_ind_off = GM_OFF(pa); g_ind_stride = stride; g_ind_pa = pa;
+            if (ia_on()) ia_claim(pa);  // (under the overlap: its private record, bounded - else in place)
             d.x[0] = r->x[0];
             if (elements) {
                 d.x[1] = r->x[1]; d.x[2] = p[0] + p[2]; d.x[3] = r->x[2];
@@ -8208,6 +8373,7 @@ static void draw_indirect(CmdRec *r) {
             }
             if (d.x[2]) draw(&d, elements);
             g_ind_gpu = false;
+            g_ind_buf = VK_NULL_HANDLE;
             continue;
         }
         if (!p[0] || !p[1]) continue;  // (no vertices or no instances)

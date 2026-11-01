@@ -1168,6 +1168,28 @@ static const char *builtin_src(const char *name, int *stage) {
                "  if (v != w && (pc.cpu_wins == 0u || h[pc.dst + i] == w)) h[pc.dst + i] = v;\n"
                "}\n";
     }
+    // (exec.c ia_refresh) GPU-filled indirect draw parameters copied out of the guest heap (g) into private records, the
+    // draw size bounded. s holds pc.cap slots: pc.cap records of 5 words, then pc.cap source word offsets into the heap,
+    // then pc.cap caps {count, instances} the draws' translation writes; the first pc.n slots are in use. pc.work bounds
+    // count x instances - a block the game had already rewritten (GPU overlap) asked for a billion instances and the
+    // Steam Deck's ring timed out (5 s) with no page fault.
+    if (!strcmp(name, "ind_private.comp")) {
+        *stage = STAGE_COMPUTE;
+        return "#version 450\n"
+               "layout(local_size_x = 64) in;\n"
+               "layout(std430, set = 0, binding = 0) readonly buffer G { uint g[]; };\n"
+               "layout(std430, set = 0, binding = 1) buffer S { uint s[]; };\n"
+               "layout(push_constant) uniform P { uint n; uint work; uint cap; uint pad; } pc;\n"
+               "void main() {\n"
+               "  uint i = gl_GlobalInvocationID.x;\n"
+               "  if (i >= pc.n) return;\n"
+               "  uint src = s[pc.cap * 5u + i], d = i * 5u, c = pc.cap * 6u + i * 2u;\n"
+               "  uint count = min(g[src], s[c]), inst = min(g[src + 1u], s[c + 1u]);\n"
+               "  if (count > 0u && inst > pc.work / count) inst = pc.work / count;\n"
+               "  s[d] = count; s[d + 1u] = inst;\n"
+               "  s[d + 2u] = g[src + 2u]; s[d + 3u] = g[src + 3u]; s[d + 4u] = g[src + 4u];\n"
+               "}\n";
+    }
     return NULL;
 }
 

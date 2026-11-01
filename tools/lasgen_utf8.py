@@ -5,6 +5,10 @@ import sys
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
 
-# a native crash (unicorn, a Python extension) writes where it was: otherwise its log is empty (#99)
+# a native crash (a Python extension) writes where it was: otherwise its log is empty (#99)
 import faulthandler
 faulthandler.enable()
+
+# jump tables are worked out by plain Python here, not by unicorn's run-time code generator (tools/lasgen_uc.py, #99)
+import lasgen_uc
+lasgen_uc.install()

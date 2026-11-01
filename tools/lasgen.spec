@@ -3,34 +3,24 @@
 # `make gen-helper` -> build/helper/lasgen/ (lasgen[.exe] + _internal/). Same command line as gen.py. Inside the
 # bundle (sys._MEIPASS) tools/rando/patch_variants.json sits at rando/ (gen.py finds it via __file__).
 import glob
-import importlib.util
 import os
 import sys
 
-from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
+from PyInstaller.utils.hooks import collect_dynamic_libs
 
 TOOLS = os.path.normpath(SPECPATH)
-
-# collect_dynamic_libs only picks unversioned names (libcapstone.so, ...): unicorn's library is versioned
-# (libunicorn.so.2 on Linux, libunicorn.2.dylib on macOS, unicorn.dll on Windows), so add it by hand, where the
-# package's loader looks for it (importlib.resources files('unicorn')/'lib'; LIBUNICORN_PATH overrides it)
-_uc_lib_dir = os.path.join(os.path.dirname(importlib.util.find_spec('unicorn').origin), 'lib')
-_uc_versioned = (glob.glob(os.path.join(_uc_lib_dir, 'libunicorn.so*'))  # (not libunicorn.a: static, unused)
-                 + glob.glob(os.path.join(_uc_lib_dir, 'libunicorn.*.dylib'))
-                 + glob.glob(os.path.join(_uc_lib_dir, 'unicorn.dll')))
 
 a = Analysis(
     [os.path.join(TOOLS, 'gen.py')],
     pathex=[TOOLS],
-    binaries=collect_dynamic_libs('capstone') + collect_dynamic_libs('unicorn')
-             + [(p, 'unicorn/lib') for p in _uc_versioned],
+    binaries=collect_dynamic_libs('capstone'),
     datas=[(os.path.join(TOOLS, 'rando', 'patch_variants.json'), 'rando'),
            (os.path.join(TOOLS, '..', 'runtime', 'game_addresses', 'versions.h'), 'runtime/game_addresses')]
           + [(p, 'runtime/game_addresses')  # (every game version's patch table: gen.py picks one by build ID)
              for p in sorted(glob.glob(os.path.join(TOOLS, '..', 'runtime', 'game_addresses', 'patches_v*.h')))],
-    hiddenimports=collect_submodules('unicorn') + ['patches'],  # (unicorn imports its arch modules by name at run time; gen.py imports patches once the version is known)
+    hiddenimports=['patches', 'lasgen_uc'],  # (gen.py imports patches once the version is known; lasgen_uc replaces unicorn, from the runtime hook)
     runtime_hooks=[os.path.join(TOOLS, 'lasgen_utf8.py')],
-    excludes=['tkinter', 'pydoc', 'doctest', 'unittest', 'pdb', 'IPython', 'numpy', 'setuptools', '_distutils_hack',
+    excludes=['unicorn', 'tkinter', 'pydoc', 'doctest', 'unittest', 'pdb', 'IPython', 'numpy', 'setuptools', '_distutils_hack',
               'pkg_resources', 'ssl', '_ssl', '_hashlib', '_multibytecodec', '_codecs_cn', '_codecs_hk',
               '_codecs_iso2022', '_codecs_jp', '_codecs_kr', '_codecs_tw', '_decimal'],
     noarchive=False,

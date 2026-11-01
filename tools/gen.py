@@ -288,13 +288,18 @@ class Module:
         mu = self.emu()
         targets = []
 
-        def step_to(frm, to):
+        def step_to(frm, to, skip_faults=False):
             # single-step: Unicorn's `until` is unreliable mid translation-block
             pc = frm
             for _ in range(64):
                 if pc == to:
                     return True
-                mu.emu_start(pc, 0, count=1)
+                try:
+                    mu.emu_start(pc, 0, count=1)
+                except uc.UcError:
+                    if not skip_faults:
+                        raise
+                    mu.reg_write(A.UC_ARM64_REG_PC, pc + 4)
                 pc = mu.reg_read(A.UC_ARM64_REG_PC)
             return False
 
@@ -311,7 +316,11 @@ class Module:
                     if (w2 & 0x1F000000) == 0x10000000 or (w2 & 0xFF800000) == 0x91000000:
                         mu.emu_start(a2, 0, count=1)
                     a2 += 4
-                if not step_to(start, cmp):
+                # (a load before the cmp may fault - a pointer chain through memory we don't have, Arceus's
+                # `ldr x8, [sp, #0xa0]; ldr w9, [x8, #0x220]` at 0x70017f6c78 - and is skipped: the index it
+                # computes is overwritten at the cmp anyway. Unskipped, the table was left to rt_dispatch,
+                # "no function at" its first case after the player's name)
+                if not step_to(start, cmp, skip_faults=True):
                     return None
                 self._set_index(mu, idx_regs, i)
                 if not step_to(cmp, br_pc):

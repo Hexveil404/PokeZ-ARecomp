@@ -966,8 +966,13 @@ uint64_t renderer_shader_builds(void) {
     return n;
 }
 
+static __thread int t_worker = -1;   // (this thread's worker slot; -1: not a worker. vk_compile_abandon)
+static __thread bool t_prep_job;     // (a shader preparation job: counted in prep_pending)
+static __thread _Atomic int *t_build_state;  // (the Pipe being built: its state)
+static __thread int t_build_slot;
 static void *worker(void *a) {
     int me = (int)(intptr_t)a;
+    t_worker = me;
     for (;;) {
         pthread_mutex_lock(&jobs_lock);
         while (!jobs_head) pthread_cond_wait(&jobs_cond, &jobs_lock);
@@ -3093,6 +3098,12 @@ static void pipe_ci_fill(PipeCI *c, const PipeKey *k) {
 static void build_pipeline(void *arg) {
     Pipe *pp = arg;
     PipeKey *k = &pp->k;
+    extern bool vk_shader_bad(uint64_t vs, uint64_t fs);  // (device.c: this driver's compiler crashes on these: never asked again)
+    if (vk_shader_bad(k->prog->hash[0], k->prog->hash[1])) {
+        atomic_fetch_add(&builds_done, 1);
+        atomic_store(&pp->state, 2);
+        return;
+    }
     PipeCI c;
     pipe_ci_fill(&c, k);
     uint64_t t0 = SDL_GetTicksNS();
@@ -3100,19 +3111,19 @@ static void build_pipeline(void *arg) {
                          k->prog->code[1] ? k->prog->code[1] : k->prog->prep_fh);
     SLOW_FEEDBACK(c.pi);
     extern bool g_vk_no_opt;  // (device.c vk_bad_code_note: this driver's optimizer gave the GPU invalid instructions)
-    extern bool vk_shader_bad(uint64_t vs, uint64_t fs);  // (device.c: this driver's compiler crashed on these)
     extern __thread uint64_t t_build_vs, t_build_fs;
-    if (g_vk_no_opt || vk_shader_bad(k->prog->hash[0], k->prog->hash[1])) c.pi.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+    if (g_vk_no_opt) c.pi.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
     t_build_vs = k->prog->hash[0], t_build_fs = k->prog->hash[1];
-    {   // (test) LARECOMP_TEST_COMPILE_CRASH=<n>: the n-th pipeline fails as a compiler crash would, unless it's already listed
+    t_build_state = &pp->state, t_build_slot = bs;
+    {   // (test) LARECOMP_TEST_COMPILE_CRASH=<n>: the n-th pipeline fails as a compiler crash would
         static _Atomic long left = -1;
         long e = -1;
         if (atomic_compare_exchange_strong(&left, &e, ENV("LARECOMP_TEST_COMPILE_CRASH") ? atol(ENV("LARECOMP_TEST_COMPILE_CRASH")) : 0)) {}
-        if (atomic_load(&left) > 0 && atomic_fetch_sub(&left, 1) == 1 && !(c.pi.flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT))
-            *(volatile int *)(uintptr_t)8 = 1;
+        if (atomic_load(&left) > 0 && atomic_fetch_sub(&left, 1) == 1) *(volatile int *)(uintptr_t)8 = 1;
     }
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &c.pi, NULL, &pp->pipe);
     t_build_vs = t_build_fs = 0;
+    t_build_state = NULL;
     SLOW_FEEDBACK_HIT();
     build_end(bs);
     {   // (how much of the session's pipeline time is the driver's: every 200, with the driver's cache hits)
@@ -3130,6 +3141,21 @@ static void build_pipeline(void *arg) {
     atomic_fetch_add(&builds_done, 1);
     atomic_store(&pp->state, r == VK_SUCCESS ? 1 : 2);
     slow_build(t0, "pipeline vs/fs", k->prog->code[0], k->prog->code[1]);
+}
+
+// The driver's compiler crashed under this thread's build_pipeline (device.c vk_compile_crash_recover): what the rest of the job
+// and the worker's loop would have done, and another worker in its place. The caller then never returns to the driver.
+bool vk_compile_abandon(void) {
+    if (t_worker < 0 || !t_build_state) return false;
+    build_end(t_build_slot);
+    atomic_fetch_add(&builds_done, 1);
+    atomic_store(t_build_state, 2);
+    if (t_prep_job) prep_pending--;
+    atomic_store(&worker_t0[t_worker], 0);
+    pthread_t t;
+    pthread_create(&t, NULL, worker, (void *)(intptr_t)t_worker);
+    t_worker = -1;
+    return true;
 }
 
 // Dynamic vertex input (g_vk.vids): the draw's layout, as build_pipeline would bake it in
@@ -6158,7 +6184,9 @@ static CsProg *compute_program(NvnProgram *np) {
 typedef struct { void (*fn)(void *); void *arg; } PrepJob;
 static void prep_job_run(void *a) {
     PrepJob *j = a;
+    t_prep_job = true;
     j->fn(j->arg);
+    t_prep_job = false;
     free(j);
     prep_pending--;
 }

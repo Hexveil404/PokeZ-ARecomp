@@ -931,6 +931,9 @@ static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep) {
     MEMORY_BASIC_INFORMATION mi;
     if (VirtualQuery((void *)(uintptr_t)ep->ContextRecord->Rsp, &mi, sizeof mi) && mi.State == MEM_COMMIT)
         lr = *(uint64_t *)(uintptr_t)ep->ContextRecord->Rsp;
+    // The driver's compiler crashed on a build worker: the game goes on without that pipeline, this thread stays here (#93)
+    extern bool vk_compile_crash_recover(uint64_t pc, const char *what, uint64_t fa) __attribute__((weak));
+    if (vk_compile_crash_recover && vk_compile_crash_recover(ep->ContextRecord->Rip, what, fa)) for (;;) Sleep(INFINITE);
     run_end();  // (the log has the report: not an end without a word)
     rt_fault_report(what, fa, ep->ContextRecord->Rip, lr);
 }

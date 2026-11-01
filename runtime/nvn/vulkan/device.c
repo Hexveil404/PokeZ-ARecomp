@@ -523,37 +523,68 @@ void vk_bad_code_note(void) {
         n >= 2 ? ", the next start builds pipelines without optimization" : "");
 }
 
-// The driver's shader compiler itself can crash on one pipeline (#93, RTX 5060 Ti, 621.01: inside nvgpucomp64.dll, in
-// vkCreateGraphicsPipelines): its two shaders go in cache/gpu_bad_shaders, by driver, and from the next start that pipeline
-// alone is built without optimization. Graphics pipelines only (t_build_*: this thread's build).
+// The driver's shader compiler itself can crash on one pipeline (#93, RTX 5060 Ti, 621.01: always nvgpucomp64.dll+3ec30c0, in
+// vkCreateGraphicsPipelines, on one particle's shaders; the same crash with VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT, so
+// that's no way round it). Its two shaders go in cache/gpu_bad_shaders, by driver, and that pipeline is never given to the driver
+// again: its draws are skipped, as for any pipeline that failed to build. On a worker the game goes on at once
+// (vk_compile_crash_recover). Graphics pipelines only (t_build_*: this thread's build).
 #define BAD_SHADERS_FILE "cache/gpu_bad_shaders"
+#define BAD_SHADERS_MAX 256
 __thread uint64_t t_build_vs, t_build_fs;
-static struct { uint64_t vs, fs; } bad_sh[64];
-static int nbad_sh;
+static struct { uint64_t vs, fs; } bad_sh[BAD_SHADERS_MAX];
+static _Atomic int nbad_sh;
+static pthread_mutex_t bad_sh_lock = PTHREAD_MUTEX_INITIALIZER;
 static void bad_shaders_load(void) {
     FILE *f = fopen(BAD_SHADERS_FILE, "r");
     if (!f) return;
     unsigned drv;
     unsigned long long v, s;
-    while (nbad_sh < 64 && fscanf(f, "%u %llx %llx", &drv, &v, &s) == 3)
-        if (drv == g_vk.props.driverVersion) bad_sh[nbad_sh].vs = v, bad_sh[nbad_sh++].fs = s;
+    int n = 0;
+    while (n < BAD_SHADERS_MAX && fscanf(f, "%u %llx %llx", &drv, &v, &s) == 3)
+        if (drv == g_vk.props.driverVersion) bad_sh[n].vs = v, bad_sh[n++].fs = s;
     fclose(f);
-    if (nbad_sh) LOG("[vk] %d pipeline(s) built without optimization: this driver's compiler crashed on them\n", nbad_sh);
+    nbad_sh = n;
+    if (n) LOG("[vk] %d pipeline(s) skipped: this driver's compiler crashes on them\n", n);
 }
 bool vk_shader_bad(uint64_t vs, uint64_t fs) {
-    for (int i = 0; i < nbad_sh; i++) if (bad_sh[i].vs == vs && bad_sh[i].fs == fs) return true;
+    int n = atomic_load(&nbad_sh);
+    for (int i = 0; i < n; i++) if (bad_sh[i].vs == vs && bad_sh[i].fs == fs) return true;
     return false;
 }
-// (crash_explain.c, on the crashing thread, for a crash in the driver's code)
+// (crash_explain.c / vk_compile_crash_recover, on the crashing thread, for a crash in the driver's code) Listed at once: the
+// pipeline's other variants, queued behind it, must not crash too.
 void vk_compile_crash_note(void) {
     if (!t_build_vs && !t_build_fs) return;
-    bool again = vk_shader_bad(t_build_vs, t_build_fs);
-    LOG("[vk] the driver's compiler crashed on pipeline vs %016llx fs %016llx%s\n", (unsigned long long)t_build_vs,
-        (unsigned long long)t_build_fs, again ? ", already built without optimization" : "");
-    rt_gpu_bad_code = again ? -2 : -1;
-    if (again) return;
-    FILE *f = fopen(BAD_SHADERS_FILE, "a");
-    if (f) { fprintf(f, "%u %llx %llx\n", g_vk.props.driverVersion, (unsigned long long)t_build_vs, (unsigned long long)t_build_fs); fclose(f); }
+    LOG("[vk] the driver's compiler crashed on pipeline vs %016llx fs %016llx: skipped from now on\n",
+        (unsigned long long)t_build_vs, (unsigned long long)t_build_fs);
+    rt_gpu_bad_code = -1;
+    pthread_mutex_lock(&bad_sh_lock);
+    if (!vk_shader_bad(t_build_vs, t_build_fs)) {
+        int n = atomic_load(&nbad_sh);
+        if (n < BAD_SHADERS_MAX) bad_sh[n].vs = t_build_vs, bad_sh[n].fs = t_build_fs, atomic_store(&nbad_sh, n + 1);
+        FILE *f = fopen(BAD_SHADERS_FILE, "a");
+        if (f) { fprintf(f, "%u %llx %llx\n", g_vk.props.driverVersion, (unsigned long long)t_build_vs, (unsigned long long)t_build_fs); fclose(f); }
+    }
+    pthread_mutex_unlock(&bad_sh_lock);
+}
+// The game needn't stop for it: a crash on a build worker leaves that thread where it is, for good, and the game goes on without
+// that one pipeline. Only the compiling thread is lost (#93's first crash left it in the crash dialog: 66 more first-use shaders,
+// 8500 more frames and the pipeline cache saved at exit, so the driver holds nothing others wait for). No return if it
+// did that; false: this thread isn't a worker, or isn't building (the crash dialog, and the list works from the next start).
+bool vk_compile_abandon(void);
+bool vk_compile_crash_recover(uint64_t pc, const char *what, uint64_t fa) {
+    if (!t_build_vs && !t_build_fs) return false;
+    extern bool rt_compile_crash_at(uint64_t pc);  // (crash_explain.c: in the driver)
+    if (!rt_compile_crash_at(pc)) return false;
+    extern const char *plat_symbol(uint64_t pc, uint64_t *offset);
+    uint64_t off = 0;
+    const char *m = plat_symbol(pc, &off);
+    LOG("[vk] %s accessing %#llx at %s+%llx, on a build worker: the game goes on\n", what, (unsigned long long)fa, m ? m : "?",
+        (unsigned long long)off);
+    int was = rt_gpu_bad_code;
+    vk_compile_crash_note();
+    rt_gpu_bad_code = was;  // (no dialog comes: a later, unrelated crash mustn't read as this one)
+    return vk_compile_abandon();
 }
 
 void vk_device_fault_report(void) {

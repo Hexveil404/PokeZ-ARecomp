@@ -374,6 +374,12 @@ static void prescan(uint64_t handle, Fences *f, int depth) {
 // ~100 small lists over a frame at a time; one submission each cost ~20% of the translating thread). Every fence in
 // them names this item, so a wait on any of them waits for the whole call's submission - later than its own list's
 // end at most, never earlier.
+// (exec.c: the GPU-filled indirect parameters' submit-time snapshot, ia_snap_submit) Called on the game's thread after
+// its lists are queued, before nvnQueueSubmitCommands returns: what the game wrote for them, before it goes on to the
+// next frame (under the GPU overlap it rewrites them while the render thread may be items behind)
+void (*rq_submit_hook)(uint64_t q);
+uint64_t rq_queued_relaxed(void) { return __atomic_load_n(&q_enq, __ATOMIC_RELAXED); }  // (diagnostics: no lock)
+
 uint64_t rq_submit_lists(const uint64_t *handles, int n) {
     if (n == 1) return rq_submit(handles[0]);
     Fences f = {.n = 0, .cap = 32};
@@ -383,6 +389,7 @@ uint64_t rq_submit_lists(const uint64_t *handles, int n) {
     memcpy(it.lists, handles, sizeof *it.lists * (size_t)n);
     uint64_t q = enqueue(&it, f.p, f.n);
     if (f.p != f.v) free(f.p);
+    if (rq_submit_hook) rq_submit_hook(q);
     return q;
 }
 
@@ -393,6 +400,7 @@ uint64_t rq_submit(uint64_t handle) {
     Item it = {.kind = IT_EXEC, .handle = handle};
     uint64_t q = enqueue(&it, f.p, f.n);
     if (f.p != f.v) free(f.p);
+    if (rq_submit_hook) rq_submit_hook(q);
     return q;
 }
 

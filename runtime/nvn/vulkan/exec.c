@@ -3940,10 +3940,13 @@ static void gmem_window_init(void) {
     const char *w = ENV("LARECOMP_VK_GMEM_WINDOW");
     gmem_window = w ? strtoull(w, NULL, 10) << 20 : g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 256ull << 20 : 0;
 }
+// Not with a heap besides the physical window (Pokémon Legends Arceus): its storage buffers are spread over the pool -
+// its glyph instances 450 KB below the top 256 MB, its exposure's compute buffers ~1 GB below - and read as zero there
+// (no dialogue text, every character overexposed). The whole pool then, as on a discrete GPU (~30 fps on an Intel iGPU).
 static void gmem_window_get(uint64_t *lo, uint64_t *len) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;  // (the translator and the render thread - run_queued_now - both ask)
     pthread_once(&once, gmem_window_init);
-    if (!gmem_window || !gwin()->phys || gwin_max <= gmem_window) { *lo = 0; *len = gwin_max; return; }
+    if (!gmem_window || !gwin()->phys || gwin_max <= gmem_window || kernel_heap_size()) { *lo = 0; *len = gwin_max; return; }
     *lo = (gwin_max - gmem_window) & ~0xFFFFFull;
     *len = gwin_max - *lo;
 }

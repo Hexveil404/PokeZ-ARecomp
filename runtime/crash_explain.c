@@ -65,6 +65,8 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
                                       "Your progress up to your last save or autosave is safe.";
     const char *app = g_game_is_la ? "LAS Recomp" : "ZA Recomp";
     char head[160], what[600];
+    extern void vk_compile_crash_note(void) __attribute__((weak));  // (Vulkan: was this thread compiling a pipeline?)
+    if (vk_compile_crash_note && ((g_pc && in_gpu_driver(g_pc)) || getenv("LARECOMP_TEST_COMPILE_CRASH"))) vk_compile_crash_note();
     // (the file count is Link's Awakening's: Pokémon Z-A's RomFS has its own, and every crash read as missing files)
     if (g_game_is_la && rt_romfs_files >= 0 && rt_romfs_files < ROMFS_FILES) {
         snprintf(head, sizeof head, "Your game files are incomplete");
@@ -92,6 +94,14 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
                                                                          // unwind; runtime/hle/warp.c rt_cxa_throw)
         snprintf(head, sizeof head, "The game ran into an error it couldn't recover from");
         snprintf(what, sizeof what, "This is a bug in %s, not a problem with your game files or PC. %s", app, report);
+    } else if (rt_gpu_bad_code < 0) {
+        snprintf(head, sizeof head, "The graphics driver's shader compiler crashed");
+        if (rt_gpu_bad_code == -1)
+            snprintf(what, sizeof what, "It crashed on one of the game's shaders. %s now knows which one and will build it another "
+                     "way. Start the game again: nothing is lost, up to your last save or autosave.", app);
+        else
+            snprintf(what, sizeof what, "It crashed on a shader again, even built the safer way. Please report it as a GitHub issue "
+                     "and attach the log file below. Your progress up to your last save or autosave is safe.");
     } else if (rt_gpu_bad_code) {  // (before the Vulkan messages: the device loss that follows says nothing useful)
         snprintf(head, sizeof head, "The graphics driver produced bad code for the GPU");
         snprintf(what, sizeof what, rt_gpu_bad_code == 1

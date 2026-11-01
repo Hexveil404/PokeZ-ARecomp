@@ -523,6 +523,39 @@ void vk_bad_code_note(void) {
         n >= 2 ? ", the next start builds pipelines without optimization" : "");
 }
 
+// The driver's shader compiler itself can crash on one pipeline (#93, RTX 5060 Ti, 621.01: inside nvgpucomp64.dll, in
+// vkCreateGraphicsPipelines): its two shaders go in cache/gpu_bad_shaders, by driver, and from the next start that pipeline
+// alone is built without optimization. Graphics pipelines only (t_build_*: this thread's build).
+#define BAD_SHADERS_FILE "cache/gpu_bad_shaders"
+__thread uint64_t t_build_vs, t_build_fs;
+static struct { uint64_t vs, fs; } bad_sh[64];
+static int nbad_sh;
+static void bad_shaders_load(void) {
+    FILE *f = fopen(BAD_SHADERS_FILE, "r");
+    if (!f) return;
+    unsigned drv;
+    unsigned long long v, s;
+    while (nbad_sh < 64 && fscanf(f, "%u %llx %llx", &drv, &v, &s) == 3)
+        if (drv == g_vk.props.driverVersion) bad_sh[nbad_sh].vs = v, bad_sh[nbad_sh++].fs = s;
+    fclose(f);
+    if (nbad_sh) LOG("[vk] %d pipeline(s) built without optimization: this driver's compiler crashed on them\n", nbad_sh);
+}
+bool vk_shader_bad(uint64_t vs, uint64_t fs) {
+    for (int i = 0; i < nbad_sh; i++) if (bad_sh[i].vs == vs && bad_sh[i].fs == fs) return true;
+    return false;
+}
+// (crash_explain.c, on the crashing thread, for a crash in the driver's code)
+void vk_compile_crash_note(void) {
+    if (!t_build_vs && !t_build_fs) return;
+    bool again = vk_shader_bad(t_build_vs, t_build_fs);
+    LOG("[vk] the driver's compiler crashed on pipeline vs %016llx fs %016llx%s\n", (unsigned long long)t_build_vs,
+        (unsigned long long)t_build_fs, again ? ", already built without optimization" : "");
+    rt_gpu_bad_code = again ? -2 : -1;
+    if (again) return;
+    FILE *f = fopen(BAD_SHADERS_FILE, "a");
+    if (f) { fprintf(f, "%u %llx %llx\n", g_vk.props.driverVersion, (unsigned long long)t_build_vs, (unsigned long long)t_build_fs); fclose(f); }
+}
+
 void vk_device_fault_report(void) {
     static int once;
     if (once++ || !g_fault_ext) return;
@@ -983,6 +1016,7 @@ static void create_device(void) {
     g_vk_spirv_salt = bad_e && !atoi(bad_e) ? 0 : (uint32_t)bad_code_count();
     if (g_vk_spirv_salt) LOG("[vk] shaders salted (%u): the driver's own cache isn't used for them\n", g_vk_spirv_salt);
     if (g_vk_no_opt) LOG("[vk] pipelines without optimization: the GPU met invalid instructions twice on this driver\n");
+    bad_shaders_load();
     VkPipelineCacheCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = sz,
                                     .pInitialData = data};
     if (vkCreatePipelineCache(g_vk.dev, &pc, NULL, &g_vk.pcache) != VK_SUCCESS) {

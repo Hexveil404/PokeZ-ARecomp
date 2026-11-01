@@ -2244,6 +2244,7 @@ typedef struct {
     bool vs_uses_vid;
     _Atomic int state;  // 0 building, 1 ready, 2 failed
     uint64_t prep_vh, prep_fh;  // (prepared programs: their code hashes, for LARECOMP_PREP_CHECK)
+    uint64_t hash[2];           // the stages' code hashes (a compiler crash names them: device.c vk_compile_crash_note)
     ShaderFp fp[2];             // (stale-program detector, shader_prep.h; compute: [0]; touched by the replay only)
     struct PipeMemo *pmemo;     // (render thread) draw_'s pipeline key memo for this program
     bool reuse;                 // set reuse (stage_set): some uniform buffers are dynamic, sets are kept while their contents repeat
@@ -2663,6 +2664,7 @@ static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
         shader_first_visit("program", vh, fh, ck);
     }
     Prog *p = calloc(1, sizeof *p);
+    p->hash[0] = shader_stage_hash(&np->stages[0]), p->hash[1] = shader_stage_hash(&np->stages[1]);
     prog_fp_check(p, np);  // (takes the fingerprint)
     kv_set(&prog_kv, slot, h, p);
     note_code(&np->stages[0], fp[0], "vs");
@@ -3098,8 +3100,19 @@ static void build_pipeline(void *arg) {
                          k->prog->code[1] ? k->prog->code[1] : k->prog->prep_fh);
     SLOW_FEEDBACK(c.pi);
     extern bool g_vk_no_opt;  // (device.c vk_bad_code_note: this driver's optimizer gave the GPU invalid instructions)
-    if (g_vk_no_opt) c.pi.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+    extern bool vk_shader_bad(uint64_t vs, uint64_t fs);  // (device.c: this driver's compiler crashed on these)
+    extern __thread uint64_t t_build_vs, t_build_fs;
+    if (g_vk_no_opt || vk_shader_bad(k->prog->hash[0], k->prog->hash[1])) c.pi.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+    t_build_vs = k->prog->hash[0], t_build_fs = k->prog->hash[1];
+    {   // (test) LARECOMP_TEST_COMPILE_CRASH=<n>: the n-th pipeline fails as a compiler crash would, unless it's already listed
+        static _Atomic long left = -1;
+        long e = -1;
+        if (atomic_compare_exchange_strong(&left, &e, ENV("LARECOMP_TEST_COMPILE_CRASH") ? atol(ENV("LARECOMP_TEST_COMPILE_CRASH")) : 0)) {}
+        if (atomic_load(&left) > 0 && atomic_fetch_sub(&left, 1) == 1 && !(c.pi.flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT))
+            *(volatile int *)(uintptr_t)8 = 1;
+    }
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &c.pi, NULL, &pp->pipe);
+    t_build_vs = t_build_fs = 0;
     SLOW_FEEDBACK_HIT();
     build_end(bs);
     {   // (how much of the session's pipeline time is the driver's: every 200, with the driver's cache hits)
@@ -6252,6 +6265,7 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
         p->vkey = vkey;
         p->fkey = fkey;
         p->prep_vh = r->vs, p->prep_fh = r->fs;
+        p->hash[0] = r->vs, p->hash[1] = r->fs;
         bool ok = translate_program_now(p);
         p->code[0] = p->code[1] = 0;  // (the game files' copies are gone after this call)
         PREP_PUT(prep_progs, ck, p);  // (failed ones too: the game then skips them as it would its own)

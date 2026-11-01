@@ -39,6 +39,65 @@ SERVICE("pctl:s", pctl_s) { pctl_root(s, req, resp); }
 SERVICE("pctl:a", pctl_a) { pctl_root(s, req, resp); }
 SERVICE("pctl:r", pctl_r) { pctl_root(s, req, resp); }
 
+// ------------------------------------------------------------------ nifm:u
+// A console with no connection. The game asks for it before anything online (Link Play > Mystery Gift > Get via Internet,
+// #107): nn::nifm::Initialize keeps a request from the start, and the logging stub returned no IGeneralService, so
+// RequestClient's constructor called through a null pointer. The request never goes on hold (state 2: the only one
+// SubmitAndWait waits in) and is never available (3): the game goes back to its list, with no message (a console shows
+// the connection applet's error there).
+#define NIFM_NO_NETWORK MAKE_RESULT(110, 1111)
+
+static void nifm_request(Service *s, IpcReq *req, IpcResp *resp) {
+    (void)s;
+    switch (req->cmd) {
+    case 0:  // GetRequestState
+        OUT(uint32_t, 0) = 1;
+        resp_size(resp, 4);
+        break;
+    case 1:  // GetResult
+    case 21:  // GetAppletInfo: failing, HandleNetworkRequestResult opens no connection applet (we have none) and doesn't retry
+        resp->result = NIFM_NO_NETWORK;
+        break;
+    case 2:  // GetSystemEventReadableHandles: never signalled, nothing waits on them
+        resp->copy_handles[resp->ncopy++] = new_event_handle();
+        resp->copy_handles[resp->ncopy++] = new_event_handle();
+        break;
+    default:  // (Cancel, Submit and the requirement setters)
+        LOG("[nifm] IRequest cmd %u (ok)\n", req->cmd);
+    }
+}
+
+static void nifm_general(Service *s, IpcReq *req, IpcResp *resp) {
+    (void)s;
+    switch (req->cmd) {
+    case 1: {  // GetClientId: not 0, which reads as invalid
+        IpcBuf *b = out_buf(req, 0);
+        if (b && b->size >= 4) *(uint32_t *)(uintptr_t)b->addr = 1;
+        OUT(uint32_t, 0) = 1;
+        resp_size(resp, 4);
+        break;
+    }
+    case 4:  // CreateRequest
+        ipc_return_object(resp, service_new("nifm:IRequest", nifm_request, NULL));
+        break;
+    case 5: case 12: case 15: case 18:  // GetCurrentNetworkProfile, GetCurrentIpAddress, GetCurrentIpConfigInfo, GetInternetConnectionStatus
+        resp->result = NIFM_NO_NETWORK;
+        break;
+    default:
+        LOG("[nifm] IGeneralService cmd %u (ok)\n", req->cmd);
+        resp_size(resp, 0x10);  // (IsAnyInternetRequestAccepted and the like: false)
+    }
+}
+
+SERVICE("nifm:u", nifm_u) {
+    (void)s;
+    if (req->cmd == 4 || req->cmd == 5) {  // CreateGeneralServiceOld, CreateGeneralService
+        ipc_return_object(resp, service_new("nifm:IGeneralService", nifm_general, NULL));
+        return;
+    }
+    LOG("[nifm] IStaticService cmd %u (ok)\n", req->cmd);
+}
+
 // ------------------------------------------------------------------ csrng
 // GenerateRandomBytes (cmd 0) into the output buffer. Z-A asks it for the seeds of its rolls, hundreds of times a
 // session; the logging stub left the buffer as it was, so every roll came out the same - each ball caught (#61).

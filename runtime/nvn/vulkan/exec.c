@@ -2164,9 +2164,11 @@ static void compile_program(void *arg) {
 }
 
 // The guest memory window that shader global memory, the vertex cache and the texture upload checks cover: the heap
-// (SetHeapSize), or for a game on the SDK's virtual address memory, which has no heap (Pokémon Legends Z-A), its
-// largest physical memory region (svcMapPhysicalMemory, at most HEAP_MAX). Picked once, at first use: shaders bake
-// the base in.
+// (SetHeapSize), or for a game on the SDK's virtual address memory (Pokémon Legends Z-A: no heap) its largest physical
+// memory region (svcMapPhysicalMemory, at most HEAP_MAX). A game with both gets the larger: Pokémon Legends Arceus sets
+// a heap but keeps its graphics memory in a 3.1 GB physical pool (0x7b77b00000) - on the heap window its characters'
+// skinning (transform feedback) and storage buffers were outside it, and characters and text weren't drawn. Picked
+// once, at first use: shaders bake the base in.
 typedef struct { uint64_t base, max; bool phys; } GWin;
 static GWin gwin_ = {HEAP_BASE, HEAP_MAX, false};
 static atomic_bool gwin_done;
@@ -2183,11 +2185,11 @@ static void gwin_pick(void) {
             plat_commit(fb, fs);  // (the host import needs every page committed)
             LOG("[vk] guest memory window forced: %llx +%llx\n", fb, fs);
             atomic_store(&gwin_done, true);
-        } else if (kernel_heap_size()) atomic_store(&gwin_done, true);
+        } else if (kernel_heap_size() && kernel_heap_size() >= sz) atomic_store(&gwin_done, true);
         else if (sz >= (64ull << 20)) {
             gwin_ = (GWin){a, sz < HEAP_MAX ? sz : HEAP_MAX, true};
-            LOG("[vk] guest memory window: physical memory %llx +%llx (no heap)\n", (unsigned long long)a,
-                (unsigned long long)gwin_.max);
+            LOG("[vk] guest memory window: physical memory %llx +%llx (heap %llu MB)\n", (unsigned long long)a,
+                (unsigned long long)gwin_.max, (unsigned long long)kernel_heap_size() >> 20);
             atomic_store(&gwin_done, true);
         }
     }

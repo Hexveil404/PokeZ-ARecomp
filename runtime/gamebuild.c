@@ -593,6 +593,11 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                 log_tail(u->log, last, sizeof last);
                 u->tries++;
                 if (jobs > 1) jobs /= 2;
+#ifdef _WIN32
+                uint64_t fp, fc;  // (out of memory or not: the first thing to ask about a compiler that died)
+                plat_mem_free(&fp, &fc);
+                LOG("[gamebuild] free now: %llu MB of RAM, %llu MB of commit (RAM + page file)\n", (unsigned long long)(fp >> 20), (unsigned long long)(fc >> 20));
+#endif
                 LOG("[gamebuild] compiling %s stopped (exit status %d: %s): trying it again, %d jobs\n", u->stem, r, last, jobs);
                 PlatProc p = start_compile(&t, u);
                 if (p) { run[k].p = p; continue; }

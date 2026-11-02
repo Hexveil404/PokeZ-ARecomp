@@ -1612,6 +1612,8 @@ static int hang_watch(void *arg) {
         told = true;
         LOG("[hang] no new frame for %.0f s (frame %llu): the game looks stuck - where each thread is:\n", limit,
             (unsigned long long)f);
+        extern void vk_builds_log(void);
+        vk_builds_log();  // (before the dump, which stops each thread for a moment: #112's two "20002 ms" builds)
 #ifdef _WIN32
         plat_dump_threads();
 #endif

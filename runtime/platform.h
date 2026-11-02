@@ -31,6 +31,9 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
 // Memory in use (the "[mem]" log line): the process's private commit, and the part of it inside the guest window.
 // False where it isn't measured (macOS, Linux).
 bool plat_mem_usage(uint64_t *process, uint64_t *guest);
+#ifdef _WIN32
+void plat_mem_free(uint64_t *phys, uint64_t *commit);  // (Windows, the game code build's failures) free RAM and commit, bytes
+#endif
 // (profiling, LARECOMP_SAMPLE_EXEC: Windows) the calling thread is the one to sample; a no-op elsewhere
 void plat_sample_focus(void);
 #ifdef __linux__

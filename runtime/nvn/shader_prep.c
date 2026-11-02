@@ -617,6 +617,7 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
     }
     FILE **files = calloc((size_t)idx_nfiles + 1, sizeof *files);
     int done = 0, prepared = 0, missing = 0, failed = 0, prepared_seen = 0;
+    double t_read = 0, t_make = 0, t_said = ms_now();  // (this runs inside the game's device setup: where a slow one went, #111 #112)
     for (int own = 0; own < 2; own++)  // the shipped list, then the player's own
     for (char *line = own ? seen : list, *next; line && *line && !(cancel && *cancel); line = next) {
         next = strchr(line, '\n');
@@ -627,14 +628,24 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
         if (own && !getenv("LARECOMP_SHADER_LIST") && shader_seen_shipped(line)) continue;  // (prepared already)
         const IdxEnt *ev = idx_find(r.vs), *ef = r.kind == 'G' ? idx_find(r.fs) : NULL;
         ShaderBlob bv = {0}, bf = {0};
+        double t_a = ms_now();
         uint8_t *dv = ev ? blob_read(ev, &bv, files) : NULL, *df = ef ? blob_read(ef, &bf, files) : NULL;
+        double t_b = ms_now();
         if (!dv || (r.kind == 'G' && !df)) missing++;
         else if (renderer_prepare(&r, &bv, &bf)) *(own ? &prepared_seen : &prepared) += 1;
         else failed++;
+        double t_c = ms_now();
+        t_read += t_b - t_a, t_make += t_c - t_b;
+        if (t_c - t_said > 5000) {
+            t_said = t_c;
+            LOG("[shader] preparing: %d of %d lines, %d building, %.0f ms reading, %.0f ms translating\n", prepared + prepared_seen + missing + failed,
+                total, renderer_prepare_pending(), t_read, t_make);
+        }
         free(dv);
         free(df);
         if (progress && (++done & 7) == 0) progress(done - renderer_prepare_pending(), total + 1);
     }
+    double t_builds = ms_now();
     while (!(cancel && *cancel) && renderer_prepare_pending()) {  // (the last builds)
         if (progress) progress(done - renderer_prepare_pending(), total + 1);
         struct timespec ts = {0, 5000000};
@@ -646,8 +657,9 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
     free(files);
     free(list);
     free(seen);
-    LOG("[shader] prepared %d + %d seen before, not found %d%s%s (%d failed; index %zu shaders in %.0f ms, total %.0f ms)\n",
-        prepared, prepared_seen, missing, cancel && *cancel ? ", " : "", cancel && *cancel ? "skipped" : "", failed, idx_n, t_idx, ms_now() - t0);
+    LOG("[shader] prepared %d + %d seen before, not found %d%s%s (%d failed; index %zu shaders in %.0f ms, total %.0f ms: reading %.0f, translating %.0f, waiting for builds %.0f)\n",
+        prepared, prepared_seen, missing, cancel && *cancel ? ", " : "", cancel && *cancel ? "skipped" : "", failed, idx_n, t_idx, ms_now() - t0,
+        t_read, t_make, ms_now() - t_builds);
     return true;
 }
 

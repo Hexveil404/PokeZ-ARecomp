@@ -113,6 +113,12 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
     return (int)n;
 }
 
+void plat_mem_free(uint64_t *phys, uint64_t *commit) {
+    MEMORYSTATUSEX m = {.dwLength = sizeof m};
+    *phys = *commit = 0;
+    if (GlobalMemoryStatusEx(&m)) *phys = m.ullAvailPhys, *commit = m.ullAvailPageFile;
+}
+
 bool plat_mem_usage(uint64_t *process, uint64_t *guest) {
     PROCESS_MEMORY_COUNTERS_EX pc = {.cb = sizeof pc};
     if (!K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pc, sizeof pc)) return false;

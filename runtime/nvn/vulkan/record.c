@@ -771,7 +771,7 @@ void rec_CmdBindPipelineObj(VkCommandBuffer cb, VkPipelineBindPoint bp, void *ob
 }
 static bool draw_dropped(void) {
     if (!unbound) return false;
-    if (!atomic_fetch_add_explicit(&r_dropped, 1, memory_order_relaxed)) LOG("[vk] recorder: a pipeline failed to build: its draws are dropped\n");
+    if (!atomic_fetch_add_explicit(&r_dropped, 1, memory_order_relaxed)) LOG("[vk] recorder: a pipeline has no result yet or failed to build: its draws are dropped\n");
     return true;
 }
 

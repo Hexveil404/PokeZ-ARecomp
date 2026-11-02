@@ -33,6 +33,7 @@ typedef struct GameVersion {
 
 bool game_files_are_la(const char *game_dir);  // (game_addresses.c)
 // The version whose main build ID is the first 20 bytes of id (exefs/main 0x40), or NULL.
+extern uint8_t g_main_build_id[8];  // the main module's, set at start
 const GameVersion *game_version_by_build_id(const uint8_t id[20]);
 // The version of a main program file (exefs/main), or NULL (missing, unreadable or unknown).
 const GameVersion *game_version_of_main(const char *main_path);

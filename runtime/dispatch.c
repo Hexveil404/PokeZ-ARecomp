@@ -7,6 +7,7 @@
 
 #include "gamelib.h"
 #include "hle.h"
+#include "game_addresses.h"
 
 typedef struct { const uint64_t *addrs; const GuestFn *fns; uint64_t count, lo, hi; } FnTable;
 static FnTable tables[2];
@@ -150,8 +151,61 @@ RtJmp *rt_setjmp_site(Cpu *c, uint64_t ret) {
     return j;
 }
 
+// Pokemon Z-A, main 8A1C86C437394B69: two start-up steps that the game only reaches through pointers, on different
+// threads. f_7000ac2a2c stores a delegate in the object at 0x7006109cc0 (+0xc0), but silently does nothing if that object
+// isn't ready yet (its flag at +0x140); f_7000bbb0dc then calls the delegate (f_7000bbb174) without checking it. So a step
+// that came too early ends much later in "no function at 0 (lr=7000bbb1ac)": #101 #111, both on a slow first start, both
+// gone on the next one. Here the object is ready ~0.7 s before the store, and a store 3 s late only delays the call.
+// Skipping the empty delegate is no way out (the game then stays on an empty screen for good), so each step waits for
+// what it needs, within reason. The "[boot]" lines tell which case a report was. LARECOMP_BOOT_DELEGATE_WAIT=0: no waits.
+// LARECOMP_TEST_OBJECT_LATE=<ms>: the object seems not ready at the first step for that long (with no waits: the crash).
+#define BOOT_DELEGATE_OBJ 0x7006109cc0ull
+#define BOOT_DELEGATE_SET 0x7000ac2a2cull
+#define BOOT_DELEGATE_USE 0x7000bbb0dcull
+#define BOOT_OBJ_READY ((volatile uint32_t *)(uintptr_t)(BOOT_DELEGATE_OBJ + 0x140))
+#define BOOT_OBJ_DONE ((volatile uint8_t *)(uintptr_t)(BOOT_DELEGATE_OBJ + 0x100))
+#define BOOT_OBJ_FN ((volatile uint64_t *)(uintptr_t)(BOOT_DELEGATE_OBJ + 0xc0 + 0x20))
+static bool boot_delegate_build(void) {
+    static const uint8_t id[8] = {0x8A, 0x1C, 0x86, 0xC4, 0x37, 0x39, 0x4B, 0x69};
+    return !g_game_is_la && !memcmp(g_main_build_id, id, sizeof id);
+}
+static bool boot_wait_on(void) {
+    const char *e = getenv("LARECOMP_BOOT_DELEGATE_WAIT");
+    return !(e && !atoi(e));
+}
+static void boot_wait(const char *what, volatile uint32_t *r32, volatile uint64_t *r64) {
+    uint64_t t0 = plat_now_ns();
+    while (!(r32 ? *r32 != 0 : *r64 != 0) && plat_now_ns() - t0 < 30000000000ull) plat_sleep_until_ns(plat_now_ns() + 1000000);
+    LOG("[boot] %s %s after %.0f ms\n", what, (r32 ? *r32 != 0 : *r64 != 0) ? "came" : "still missing", (double)(plat_now_ns() - t0) / 1e6);
+}
+static void *boot_object_back(void *arg) {
+    plat_sleep_until_ns(plat_now_ns() + (uint64_t)(uintptr_t)arg * 1000000);
+    *BOOT_OBJ_READY = 1;
+    return NULL;
+}
+static void boot_delegate_set(Cpu *c) {
+    const char *late = getenv("LARECOMP_TEST_OBJECT_LATE");
+    static bool tested;
+    if (late && !tested) {
+        tested = true, *BOOT_OBJ_READY = 0;
+        pthread_t t;
+        pthread_create(&t, NULL, boot_object_back, (void *)(uintptr_t)atoll(late));
+        pthread_detach(t);
+    }
+    LOG("[boot] step store: object ready %u, delegate %llx\n", *BOOT_OBJ_READY, (unsigned long long)*BOOT_OBJ_FN);
+    if (!*BOOT_OBJ_READY && boot_wait_on()) boot_wait("the object", BOOT_OBJ_READY, NULL);
+    dispatch_lookup(BOOT_DELEGATE_SET)(c);
+}
+static void boot_delegate_use(Cpu *c) {
+    LOG("[boot] step call: object ready %u, delegate %llx, done %u\n", *BOOT_OBJ_READY, (unsigned long long)*BOOT_OBJ_FN, *BOOT_OBJ_DONE);
+    if (!*BOOT_OBJ_DONE && !*BOOT_OBJ_FN && boot_wait_on()) boot_wait("the delegate", NULL, BOOT_OBJ_FN);
+    dispatch_lookup(BOOT_DELEGATE_USE)(c);
+}
+
 __attribute__((noinline)) static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
+    if (pc == BOOT_DELEGATE_SET && boot_delegate_build()) return boot_delegate_set;
+    if (pc == BOOT_DELEGATE_USE && boot_delegate_build()) return boot_delegate_use;
     if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
         rt_unwind_point();  // (HLE calls aren't cached below, so every one passes here: a reboot's safe point)
         int i = (int)((pc - HLE_BASE) / 16);
@@ -169,6 +223,10 @@ __attribute__((noinline)) static GuestFn dispatch_slow(Cpu *c) {
             if (jmps[i].buf && jmps[i].ret == pc && jmps[i].sp == c->sp) longjmp(jmps[i].host, 1);
         uint64_t off;
         const char *s = loader_symbol_at(c->x[30], &off);
+#ifdef _WIN32
+        LOG("no function at %llx: where every thread is:\n", pc);
+        plat_dump_threads();
+#endif
         FATAL("no function at %llx (lr=%llx %s+%llx)\n", pc, c->x[30], s ? s : "?", off);
     }
     unsigned h = (unsigned)(pc >> 2) & (DCACHE - 1);
@@ -349,3 +407,41 @@ void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {
 }
 
 void crash_handler_install(void) { plat_crash_handler_install(); }
+
+// (debug) LARECOMP_WATCH_POLL=<hex addr>,<bytes, up to 64>: a thread reads that guest memory every 100 us and logs each
+// change with where every thread is. No page protection, so the game can't notice (LARECOMP_WATCH_ADDR made it abort);
+// the price is that the writer may have moved on by the time the dump comes.
+static void *watch_poll(void *arg) {
+    (void)arg;
+    uint64_t addr = 0;
+    unsigned len = 0;
+    sscanf(getenv("LARECOMP_WATCH_POLL"), "%llx,%u", (unsigned long long *)&addr, &len);
+    if (!addr || !len || len > 64) return NULL;
+    uint8_t last[64], now[64];
+    memcpy(last, (const void *)(uintptr_t)addr, len);
+    uint64_t t0 = plat_now_ns();
+    for (;;) {
+        plat_sleep_until_ns(plat_now_ns() + 100000);
+        memcpy(now, (const void *)(uintptr_t)addr, len);
+        if (!memcmp(now, last, len)) continue;
+        char hex[8 * 17 + 1];
+        hex[0] = 0;
+        for (unsigned i = 0; i + 8 <= len; i += 8) {
+            uint64_t v;
+            memcpy(&v, now + i, 8);
+            snprintf(hex + strlen(hex), 18, "%llx ", (unsigned long long)v);
+        }
+        LOG("[watch] %llx changed at t=%.3f: %s\n", (unsigned long long)addr, (double)(plat_now_ns() - t0) / 1e9, hex);
+        memcpy(last, now, len);
+#ifdef _WIN32
+        plat_dump_threads();
+#endif
+    }
+    return NULL;
+}
+void rt_watch_poll_start(void) {
+    if (!getenv("LARECOMP_WATCH_POLL")) return;
+    pthread_t t;
+    pthread_create(&t, NULL, watch_poll, NULL);
+    pthread_detach(t);
+}

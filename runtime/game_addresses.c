@@ -30,6 +30,7 @@ static const GameVersion *g_version;
 
 static int hexval(char c) { return c <= '9' ? c - '0' : c - 'A' + 10; }
 
+uint8_t g_main_build_id[8];  // (game_addresses.h: code that only fits one build of a game)
 const GameVersion *game_version_by_build_id(const uint8_t id[20]) {
     for (size_t i = 0; i < sizeof versions / sizeof versions[0]; i++) {
         const char *h = versions[i].build_id;
@@ -96,6 +97,7 @@ bool game_version_select(const char *game_dir, char *why, size_t why_size) {
         snprintf(why, why_size, "the game files' exefs/main is missing or unreadable");
         return false;
     }
+    memcpy(g_main_build_id, id, sizeof g_main_build_id);
     const GameVersion *v = game_version_by_build_id(id);
     if (!v && !is_la_program(exefs)) {
         // Another game (Pokémon Legends Z-A): Link's Awakening's hooks stay off (g_game_is_la), and an address read

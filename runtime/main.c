@@ -83,6 +83,10 @@ static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
 // rtld runs a module's DT_INIT, which registers it (and its TLS template) with musl via
 // __nnmusl_init_dso and then runs its init_array; fall back to the array if there is no DT_INIT.
 static void module_init(Cpu *c, Module *m) {
+    {   extern void rt_watch_poll_start(void);  // (debug: dispatch.c, once the images are mapped)
+        static bool once;
+        if (!once) once = true, rt_watch_poll_start();
+    }
     LOG("init %s (DT_INIT %llx, %llu init_array entries)\n", m->name, m->init, m->init_array_sz / 8);
     if (m->init) guest_call(c, m->init);
     else run_array(c, m->init_array, m->init_array_sz);

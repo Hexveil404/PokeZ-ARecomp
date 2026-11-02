@@ -1407,7 +1407,9 @@ static bool ov_slot_ready(void) {  // (the slot's pool and buffer exist, and the
 void *vk_overlay_begin(void *window_cmd) {
     if (ov_direct < 0) {
         const char *e = getenv("LARECOMP_VK_OVERLAY_DIRECT");
-        ov_direct = !rec_on() || (e && atoi(e) != 0);
+        // (render passes, compat_rp.c: the secondary below inherits dynamic rendering, which such a driver hasn't got, and
+        // its pass would have to begin with secondary contents: #112)
+        ov_direct = !rec_on() || g_vkc.render_pass || (e && atoi(e) != 0);
         LOG("[vk] overlay: %s\n", ov_direct ? "recorded into the window image's command buffer" : "a secondary command buffer the recorder executes");
     }
     if (ov_direct || !cur_frame.ok || ov_open || ov_frame[slot] == cur_frame.id || !ov_slot_ready()) {

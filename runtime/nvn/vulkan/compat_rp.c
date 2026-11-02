@@ -240,15 +240,24 @@ VkResult vkc_CreateGraphicsPipelines(VkDevice dev, VkPipelineCache cache, uint32
     if (!g_vkc.render_pass) return vkCreateGraphicsPipelines(dev, cache, n, ci, al, out);
     for (uint32_t i = 0; i < n; i++) {
         VkGraphicsPipelineCreateInfo c = ci[i];
-        const VkPipelineRenderingCreateInfo *r = c.pNext;
-        if (r && r->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO && !c.renderPass) {
+        // (anywhere in the chain: exec.c's SLOW_FEEDBACK goes in front of it, and looking only at the first entry left every
+        // pipeline of the game with no render pass - invalid, which NVIDIA forgives and an old Intel driver doesn't: the
+        // menus drawn by other pipelines showed, the world didn't, #112. LARECOMP_VK_VALIDATION=1 with
+        // LARECOMP_VK_INTEL_RENDER_PASSES=1 tells: VUID-VkGraphicsPipelineCreateInfo-dynamicRendering-06576)
+        VkBaseOutStructure *prev = NULL, *e = (VkBaseOutStructure *)c.pNext;
+        while (e && e->sType != VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO) prev = e, e = e->pNext;
+        const VkPipelineRenderingCreateInfo *r = (const VkPipelineRenderingCreateInfo *)e;
+        bool unlinked = false;
+        if (r && !c.renderPass) {
             VkSampleCountFlagBits s = c.pMultisampleState ? c.pMultisampleState->rasterizationSamples : VK_SAMPLE_COUNT_1_BIT;
             c.renderPass = vkc_render_pass_for(r->colorAttachmentCount, r->pColorAttachmentFormats, r->depthAttachmentFormat,
                                                r->stencilAttachmentFormat, s, VK_IMAGE_LAYOUT_GENERAL);
             c.subpass = 0;
-            c.pNext = r->pNext;  // (the backend puts VkPipelineRenderingCreateInfo first in the chain)
+            if (prev) prev->pNext = e->pNext, unlinked = true;  // (the caller's chain: put back below)
+            else c.pNext = r->pNext;
         }
         VkResult res = vkCreateGraphicsPipelines(dev, cache, 1, &c, al, &out[i]);
+        if (unlinked) prev->pNext = e;
         if (res != VK_SUCCESS) return res;
     }
     return VK_SUCCESS;

@@ -68,6 +68,10 @@ typedef struct {
     int ssgi;            // indirect light (screen-space GI): 0 off, 1 low, 2 medium, 3 high (vulkan/exec.c ssgi_apply)
     int ssgi_strength;   // its strength, percent (50-300; 100 one physical bounce)
     bool water_ssr;      // water reflections (vulkan/exec.c water_apply)
+    int water_mode;      // how they are found: 0 screen search, 1 mirrored picture (SSPR), 2 mirrored scene (planar)
+    bool water_depth;    // water: deeper is darker and bluer (from its real depth), in the same pass
+    bool water_caustics; // water: moving light patterns on the floor under it
+    bool water_vivid;    // water: a more turquoise, slightly glowing look (stylized; off: the game's colours)
     bool tex_hd, tex_dump;  // HD texture packs (textures/hd) on; dump the game's textures (textures/dump): vulkan/textures.c
     int shadow_res;    // 1-4: shadow maps drawn at that many times the game's size, from the next start (vulkan/textures.c)
     int shadow_sharp;  // 1-4: the game's shadow filter that many times narrower, up to shadow_res (vulkan/exec.c)

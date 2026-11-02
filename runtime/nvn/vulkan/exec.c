@@ -866,6 +866,17 @@ static int new_chunk(uint64_t size) {
 
 static void ring_retire(void) {}  // chunks are recycled lazily in vk_transient
 
+// (planar reflections) while their draws wait to be drawn again, the chunks used since the first (seq >= ring_pin)
+// aren't recycled, though the submissions that used them finished; ring_unpin: they now wait for the next submission.
+// ring_lost: no memory for another chunk (vk_transient) took the pin away, so that frame has no reflection
+static uint64_t ring_pin;
+static bool ring_lost;
+static void ring_unpin(void) {
+    if (!ring_pin) return;
+    for (int i = 0; i < nchunks; i++) if (chunks[i].seq >= ring_pin) chunks[i].seq = vk_pending_seq();
+    ring_pin = 0;
+}
+
 VkSpan vk_transient(uint64_t size, uint64_t align) {
     if (align < 16) align = 16;
     uint64_t pending = vk_pending_seq();
@@ -882,10 +893,11 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
     uint64_t done = vk_completed_seq();
     int pick = -1;
     for (int i = 0; i < nchunks; i++)
-        if (i != active && chunks[i].seq <= done && chunks[i].size >= size) { pick = i; break; }
+        if (i != active && chunks[i].seq <= done && !(ring_pin && chunks[i].seq >= ring_pin) && chunks[i].size >= size) { pick = i; break; }
     if (pick < 0) pick = new_chunk(size > CHUNK_SIZE ? size : CHUNK_SIZE);
     if (pick < 0) {  // no memory for another chunk (a GTX 1060 with 6 GB: issue #45): wait for the work already submitted,
         // which frees the chunks only it used, and take one of those (the recording in progress keeps its own)
+        if (ring_pin) ring_pin = 0, ring_lost = true;
         vk_wait_seq(submit_seq);
         done = vk_completed_seq();
         for (int i = 0; i < nchunks; i++)
@@ -1830,9 +1842,13 @@ static bool heap_whole_userptr(void);
 static void gtao_apply_pending(void);
 static void water_apply_pending(void);
 static void gtao_forget(NvnTexture *t);  // (vk_exec_texture_destroyed: the AO and water passes' saved targets)
+static void planar_replay_pending(void);
+static void planar_light_pending(void);
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     vk_end_pass();
+    planar_replay_pending();  // (the G-buffer pass just ended: its draws again, mirrored - before a submission can come)
+    planar_light_pending();   // (the lighting pass just ended: its draw again, on them)
     gtao_apply_pending();  // (the lighting pass just ended: its image times the ambient occlusion)
     water_apply_pending();  // (the water drawn: its reflections)
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each pass its own submission)
@@ -2917,6 +2933,13 @@ typedef struct {
 } PipeKey;
 
 typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; } Pipe;  // state: 0 building, 1 ready, 2 failed
+// (planar reflections, below the water reflections) a captured draw's call: kind 0 draw, 1 indexed, 2 GPU-indirect
+typedef struct { int kind; bool indexed; VkBuffer buf; VkDeviceSize off; uint32_t a, b, c, e; int32_t d; } PlDrawCall;
+static bool planar_on(void);
+static void planar_capture(Prog *pr, Pipe *pp, uint32_t streams, const VkDescriptorSet sets[2], uint32_t ndyn, const uint32_t *dyn,
+                           uint32_t nv_dyn, bool gmem, const PlDrawCall *dc);
+static void planar_light(Prog *pr, Pipe *pp, const VkDescriptorImageInfo *fii, VkDescriptorSet vset, const uint32_t *dyn,
+                         uint32_t nv_dyn, const float rs0[4], const float *tint, uint32_t streams, const PlDrawCall *dc);
 // (record.c, at the bind) the pipeline of a Pipe: NULL while it builds (wait: sleeps until it is done) or failed
 static VkPipeline pipe_resolve(void *obj, bool wait) {
     Pipe *pp = obj;
@@ -5063,6 +5086,7 @@ static void gmem_direct_pick(uint32_t stages, uint32_t gd[GMEM_DIRECT_MAX * 4], 
 
 // Binds the chunk set for a draw / dispatch whose shaders (stages: a mask of 1 << stage) use global memory: their storage
 // buffers' chunks first.
+static struct { VkDescriptorSet set; uint32_t index; bool direct; uint32_t gd[GMEM_DIRECT_MAX * 4]; } gm_last;  // (gmem_chunk_bind's last)
 static void gmem_chunk_bind(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout layout, uint32_t set_index, uint32_t stages) {
     static int log_sb = -1;  // LARECOMP_LOG_GMEM_SBUF=1: each distinct storage buffer bound to a gmem shader, once
     if (log_sb < 0) log_sb = getenv("LARECOMP_LOG_GMEM_SBUF") != NULL;
@@ -5087,6 +5111,8 @@ static void gmem_chunk_bind(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeli
     VkDescriptorSet set = gmem_chunk_set(dk);
     rec_CmdBindDescriptorSets(cb, bp, layout, set_index, 1, &set, 0, NULL);
     if (direct) rec_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof gd, gd);
+    gm_last.set = set, gm_last.index = set_index, gm_last.direct = direct;  // (planar reflections replay the draw)
+    if (direct) memcpy(gm_last.gd, gd, sizeof gd);
 }
 
 // Once a frame (the present's submission): a chunk shaders missed is imported for the next frame; the lowest address
@@ -7315,6 +7341,7 @@ static void draw_(CmdRec *r, bool indexed) {
     PROF_T0();
     uint32_t dyn[2 * MAX_BIND], ndyn = 0;  // (set reuse: the sets' dynamic offsets, vertex then fragment)
     VkDescriptorSet vset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL, dyn, &ndyn);
+    uint32_t nv_dyn = ndyn;  // (the vertex set's share of the offsets: planar_capture swaps that set)
     PROF_ADD(prof_sets);
     VkDescriptorImageInfo fii[64];
     uint64_t prof_tx_ = prof ? SDL_GetTicksNS() : 0;
@@ -7581,6 +7608,12 @@ static void draw_(CmdRec *r, bool indexed) {
         }
     }
     if (!nruns) { run_at[0] = 0; run_n[0] = inst; nruns = 1; run_gold[0] = false; }
+    PlDrawCall pl_dc = {.kind = g_ind_gpu && ind_ok ? 2 : use_index ? 1 : 0, .indexed = indexed};  // (planar reflections)
+    if (pl_dc.kind == 2) pl_dc.buf = gmem_buf, pl_dc.off = g_ind_off, pl_dc.a = g_ind_stride;
+    else if (pl_dc.kind == 1) pl_dc.a = icount, pl_dc.b = run_n[0], pl_dc.d = base_vertex, pl_dc.e = base_inst + run_at[0];
+    else pl_dc.a = count, pl_dc.b = run_n[0], pl_dc.c = first, pl_dc.e = base_inst + run_at[0];
+    if (nruns == 1 && !raster_discard && planar_on())  // (the G-buffer's draws, kept to be drawn again mirrored)
+        planar_capture(pr, pp, vl.used_streams, sets, ndyn, dyn, nv_dyn, gc_shift && (pr->vi->uses_gmem || pr->fi->uses_gmem), &pl_dc);
     for (int ri = 0; ri < nruns; ri++) {
         if (nruns > 1 || run_gold[0]) {  // this run's tint: a fragment set of its own
             float rtint[RECOLOUR_TINT_FLOATS] = {0};
@@ -7601,6 +7634,8 @@ static void draw_(CmdRec *r, bool indexed) {
         } else if (!use_index) rec_CmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
         else rec_CmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);
     }
+    if (lighting && nruns == 1 && planar_on())  // (and the lighting, onto the mirrored G-buffer)
+        planar_light(pr, pp, fii, vset, dyn, nv_dyn, rs0, tint, vl.used_streams, &pl_dc);
     dl_note("draw vs %llx fs %llx%s xfb %d", (unsigned long long)st.program->stages[0].code_addr,
             (unsigned long long)st.program->stages[1].code_addr, g_ind_gpu && ind_ok ? " indirect" : "", xfb_on);
     if (g_ind_gpu && ind_ok && dl_on > 0) {
@@ -8657,10 +8692,10 @@ static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt, V
     for (int i = 0; i < 24; i++)
         if (cache[i].p && cache[i].fs == fs && cache[i].kind == kind && cache[i].f == dsfmt && cache[i].cf == cfmt) return cache[i].p;
     if (!post_layout) {
-        VkDescriptorSetLayoutBinding b[4];
-        for (uint32_t i = 0; i < 4; i++)
+        VkDescriptorSetLayoutBinding b[6];
+        for (uint32_t i = 0; i < 6; i++)
             b[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
-        VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 4, .pBindings = b};
+        VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 6, .pBindings = b};
         VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &post_set_layout));
         VkPushConstantRange r = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 128};  // (32 bytes but for GTAO's camera: 128)
         VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
@@ -8694,6 +8729,11 @@ static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt, V
     else if (kind == 4)  // (colour = dst + src; alpha kept: the indirect light onto the lit image)
         cba = (VkPipelineColorBlendAttachmentState){.blendEnable = VK_TRUE, .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
                                                     .dstColorBlendFactor = VK_BLEND_FACTOR_ONE, .colorBlendOp = VK_BLEND_OP_ADD,
+                                                    .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO, .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+                                                    .alphaBlendOp = VK_BLEND_OP_ADD, .colorWriteMask = 0xF};
+    else if (kind == 6)  // (colour = src + dst x src1, dual-source; alpha kept: the water's depth, caustics and reflections)
+        cba = (VkPipelineColorBlendAttachmentState){.blendEnable = VK_TRUE, .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+                                                    .dstColorBlendFactor = VK_BLEND_FACTOR_SRC1_COLOR, .colorBlendOp = VK_BLEND_OP_ADD,
                                                     .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO, .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
                                                     .alphaBlendOp = VK_BLEND_OP_ADD, .colorWriteMask = 0xF};
     VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1,
@@ -9079,7 +9119,8 @@ static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *src
 }
 // sten / kind (g_vk.smaa_stencil): kind 1 clears sten and writes 1 where the pass draws, kind 2 draws only there
 static const float *post_pc_big;  // (GTAO) 32 floats pushed instead of pc's 8
-static bool post_mips_last;  // (water) the last input sampled with its mip levels (the others: level 0 only)
+static bool post_mips_last;  // (water) input 3 sampled with its mip levels (the others: level 0 only)
+static bool post_nearest_first;  // (SSPR's hash) input 0 can't be filtered: its format is an integer one
 static VkSampler post_mip_sampler(void) {
     static VkSampler s;
     if (!s) {
@@ -9118,10 +9159,10 @@ static void post_pass_ex(VkCommandBuffer cb, const char *fs, const VkImageView *
     }
     rec_CmdBeginRendering(cb, &ri);
     VkDescriptorSet ds = vk_alloc_set(post_set_layout);
-    VkDescriptorImageInfo ii[4];  // (up to 4 inputs: the water's reflections take 4)
-    VkWriteDescriptorSet w[4];
+    VkDescriptorImageInfo ii[6];  // (up to 6 inputs: the water's reflections take 6)
+    VkWriteDescriptorSet w[6];
     for (int i = 0; i < n; i++) {
-        ii[i] = (VkDescriptorImageInfo){post_mips_last && i == n - 1 ? post_mip_sampler() : vk_default_sampler(true), srcs[i],
+        ii[i] = (VkDescriptorImageInfo){post_mips_last && i == 3 ? post_mip_sampler() : vk_default_sampler(i != 5 && !(post_nearest_first && i == 0)), srcs[i],
                                         VK_IMAGE_LAYOUT_GENERAL};
         w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = (uint32_t)i,
                                       .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -9344,13 +9385,40 @@ static void ssgi_apply(TexBackend *tb) {
 // around it. Before the frame's first such draw the depth and the lit image are copied (water_before); once the
 // game moves on to another target (begin_pass), wherever the depth changed is the water's surface, and
 // water_ssr.frag blends what it mirrors onto it (water_apply). F1 > Water reflections; LARECOMP_WATER=0 / 1 overrides
-// it, _STRENGTH (1), _DEBUG=1 (the reflection alone).
+// it, _STRENGTH (1), _DEBUG=1 (the reflection alone). The same pass also darkens and tints the water by its depth (the
+// depth before it is the floor), lights its floor with caustics and gives it the stylized vivid look: F1 > Water depth /
+// Water caustics / Vivid water (LARECOMP_WATER_DEPTH / _CAUSTICS / _VIVID=0 / 1 override them). Those need dual-source
+// blending (the game's water x a per-channel transmittance, plus light): without it only the reflections.
 static struct { bool pending; uint64_t frame; NvnTexture *target, *depth; TexBackend dsnap, csnap; } water;
 
-static bool water_on(void) {
+static int water_env(const char *name) {  // (-1: not set)
+    const char *e = getenv(name);
+    return e ? atoi(e) != 0 : -1;
+}
+static bool water_reflect_on(void) {
     static int env = -2;
-    if (env == -2) { const char *e = getenv("LARECOMP_WATER"); env = e ? atoi(e) != 0 : -1; }
+    if (env == -2) env = water_env("LARECOMP_WATER");
     return env >= 0 ? env : g_settings.water_ssr;
+}
+static int water_extras(void) {  // bits: 1 depth, 2 caustics, 4 vivid (0 without dual-source blending)
+    static int dual = -1, ed = -2, ec, ev;
+    if (dual < 0) {
+        VkPhysicalDeviceFeatures f;
+        vkGetPhysicalDeviceFeatures(g_vk.phys, &f);
+        dual = f.dualSrcBlend != 0;
+    }
+    if (ed == -2) ed = water_env("LARECOMP_WATER_DEPTH"), ec = water_env("LARECOMP_WATER_CAUSTICS"), ev = water_env("LARECOMP_WATER_VIVID");
+    if (!dual) return 0;
+    return (ed >= 0 ? ed : g_settings.water_depth) | (ec >= 0 ? ec : g_settings.water_caustics) << 1 |
+           (ev >= 0 ? ev : g_settings.water_vivid) << 2;
+}
+static bool water_on(void) { return water_reflect_on() || water_extras(); }  // (the water pass runs)
+// How the reflections are found: 0 the screen search alone, 1 the picture mirrored in the water's plane (SSPR, below the
+// planar ones), 2 the scene drawn again from a mirrored camera (planar). F1 > Reflection method; LARECOMP_WATER_MODE
+static int water_mode(void) {
+    static int env = -2;
+    if (env == -2) { const char *e = getenv("LARECOMP_WATER_MODE"); env = e ? atoi(e) : -1; }
+    return !water_reflect_on() ? 0 : env >= 0 ? env : g_settings.water_mode;
 }
 
 // A water surface: blended onto the lit image, writing depth, reading a depth texture
@@ -9402,6 +9470,8 @@ static void water_before(void) {
     water.pending = true, water.target = gtao.target, water.depth = st.rt.depth;
 }
 
+static bool planar_inputs(VkImageView *lit, VkImageView *depth, float *y);  // (planar water reflections: below)
+static bool sspr_run(VkImageView dpre, VkImageView cpre, const float *wpc, VkImageView *out, float *y);  // (and SSPR)
 static void water_apply_pending(void) {
     if (!water.pending || st.rt.color[0] == water.target) return;  // (still drawing onto the lit image: later)
     water.pending = false;
@@ -9416,17 +9486,604 @@ static void water_apply_pending(void) {
     extern uint64_t renderer_exec_frame(void);
     float pc[32];
     memcpy(pc, gtao.pc, sizeof pc);
-    pc[20] = gtao_env("LARECOMP_WATER_STRENGTH", 1.0f);
+    int extras = water_extras();
+    pc[20] = water_reflect_on() ? gtao_env("LARECOMP_WATER_STRENGTH", 1.0f) : 0;
+    pc[21] = (float)extras;  // (bits: 1 depth, 2 caustics, 4 vivid)
     pc[23] = (float)(renderer_exec_frame() % 36000) / 60.0f;  // (the ripples' time, in seconds)
     pc[24] = pc[26] = (float)tb->width, pc[25] = pc[27] = (float)tb->height;
+    pc[28] = gtao_env("LARECOMP_WATER_ABSORB", 1.0f);     // (depth: how fast the light fades per metre, x)
+    pc[29] = gtao_env("LARECOMP_WATER_CAUSTIC_K", 1.0f);  // (caustics' brightness, x)
     pc[30] = gtao_env("LARECOMP_WATER_DEBUG", 0);
     post_pc_big = pc;
-    VkImageView in[4] = {dnow, dpre, cpre, probe};
+    // (inputs 4, 5: the mirror image and its depth - planar_inputs -, or stand-ins the shader doesn't read: bit 8 off)
+    VkImageView in[6] = {dnow, dpre, cpre, probe, cpre, dnow};
+    if (planar_inputs(&in[4], &in[5], &pc[31])) pc[21] += 8;
+    else if (sspr_run(dpre, cpre, pc, &in[4], &pc[31])) pc[21] += 16;
     post_mips_last = true;  // (the cube: its smaller levels for the blur and the cap)
-    post_pass_ex(vk_cmd(), "water_ssr.frag", in, 4, tb, NULL, false, NULL, pc[30] != 0 ? 0 : 5);
+    // (kind 6: dual-source - the game's water x a per-channel transmittance, plus reflection and light; 5: alpha)
+    post_pass_ex(vk_cmd(), extras ? "water_ssr2.frag" : "water_ssr.frag", in, 6, tb, NULL, false, NULL,
+                 pc[30] != 0 ? 0 : extras ? 6 : 5);
     post_pc_big = NULL, post_mips_last = false;
     static int nlog;
-    if (nlog++ < 2) LOG("[water] reflections on: %ux%u, strength %.2f\n", tb->width, tb->height, pc[20]);
+    if (nlog++ < 2) LOG("[water] on: %ux%u, reflection strength %.2f, depth %d, caustics %d, vivid %d\n", tb->width, tb->height,
+                        pc[20], extras & 1, extras >> 1 & 1, extras >> 2 & 1);
+    extern void planar_level_probe(VkImageView dnow, VkImageView dpre, const float *pc);
+    planar_level_probe(dnow, dpre, pc);
+}
+
+// ================================================================== planar water reflections
+// The screen-space reflections above only find what the picture shows: not the underside of a bridge over the water,
+// not the back of what faces the camera. Z-A's water is level, so its exact mirror image is the scene drawn from a
+// camera mirrored in the water's plane. Each G-buffer draw (4+ colour targets, the scene's depth: planar_capture) is
+// kept - its state as the state cache had it (ss), its descriptor sets with the vertex set made again around a
+// mirrored copy of its camera (constant buffer 5's rows 0-3: mv_note_draw), its call - and when the G-buffer pass ends
+// (begin_pass), all of them are drawn again into images like its targets at a fraction of the size, with the faces'
+// winding flipped. The mirrored camera's depth row is replaced by one that clips everything below the water (an
+// oblique near plane: depth = 1 - k (y - h) / w, reversed and monotonic along each ray), so the pool's floor doesn't
+// hide the world above it, and no shader changes. Only within one submission: when one came between the draws and
+// the replay, that frame has none. F1 > Reflection method: Mirrored scene (LARECOMP_WATER_MODE=2). The water shader
+// reads the lit image at each water pixel's own uv (a point of the plane is where it was), water at another level keeps
+// the screen search; the game's light volumes aren't drawn again, so lamps light the mirror less than the scene.
+// LARECOMP_PLANAR_Y=<height> (the water's plane), _SCALE (0.5), _DUMP=<frame> (the images -> build/planar_<i>.png).
+#define PL_K 0.25f  // (the clip row's slope: k (y - h) must stay below w for what is seen; 4 x the height over w is cut)
+typedef struct {
+    Pipe *pp;
+    VkPipelineLayout layout;
+    uint32_t streams;
+    __typeof__(ss) s;
+    VkDescriptorSet sets[2];
+    uint32_t ndyn, dyn[2 * MAX_BIND];
+    bool gmem, gdirect;
+    VkDescriptorSet gset;
+    uint32_t gindex, gd[GMEM_DIRECT_MAX * 4];
+    PlDrawCall dc;
+} PlDraw;
+static struct {
+    PlDraw *d;
+    int n, cap, dropped;
+    uint64_t frame, done, seq;  // (the frame captured, the one replayed, the submission the draws are in)
+    NvnTexture *rt0;            // (the G-buffer's first target)
+    VkFormat color[8], depth, stencil;
+    uint32_t ncolor, w, h;
+    float y;                    // the water's plane
+    struct { uint64_t src; uint64_t size; float data[1024]; } cb[8];  // (mirrored copies of the frame's constant buffers 5)
+    int ncb;
+    TexBackend img[15];         // (0-7 like the G-buffer's targets, 8 its depth, 9-11 like the lighting's targets, 12 that
+                                // depth as the unclipped mirror's: R32F; SSPR: 13 the projection hash, 14 its colours)
+    float scale;
+    NvnTexture *gtex[8], *gdepth;  // (the G-buffer's targets: the lighting reads them as textures)
+    float vpm[16], vpm_std[16]; // (the mirrored camera - planar_matrix of the first constant buffer 5 -, and unclipped)
+    uint64_t lit_done;          // (the frame whose lighting was drawn again: planar_light)
+    float lcb[1024];            // (the lighting's camera, mirrored)
+} pl;
+static struct { VkBuffer buf; VmaAllocation mem; float *ptr; uint64_t seq[4], seen; int next; bool have; } pl_lv;  // (planar_level_probe)
+
+// For the water pass: this frame's mirror image, its depth (image 12: the game's projection, so the shader's own
+// wpos gives the mirrored point) and the plane they were drawn for. False: no reflection was drawn this frame.
+static bool planar_inputs(VkImageView *lit, VkImageView *depth, float *y) {
+    extern uint64_t renderer_exec_frame(void);
+    if (!planar_on() || pl.lit_done != renderer_exec_frame() || !pl.img[9].image || !pl.img[12].image) return false;
+    *lit = post_view(&pl.img[9]), *depth = post_view(&pl.img[12]), *y = pl.y;
+    return true;
+}
+
+static bool planar_on(void) { return water_mode() == 2; }
+
+// The pass's first colour target when it has 4 or more (the G-buffer: its slot 0 is empty), else NULL - a depth-only
+// pass before it binds the slots with nothing in them
+static NvnTexture *planar_gbuf_target(void) {
+    NvnTexture *first = NULL;
+    int n = 0;
+    for (int i = 0; i < 8; i++) if (st.rt.color[i]) { if (!first) first = st.rt.color[i]; n++; }
+    return n >= 4 ? first : NULL;
+}
+
+// m: a view-projection (by columns); out: the same seen in the mirror of the plane y = h, its depth row clipping below
+// it (clip false: the depth row as the game's - the lighting's depth, planar_light)
+static void planar_matrix(const float *m, float h, float *out, bool clip) {
+    float r[16];
+    for (int i = 0; i < 4; i++) {
+        r[0 + i] = m[0 + i];                       // (x R: column 1 negated, column 3 += 2h column 1)
+        r[4 + i] = -m[4 + i];
+        r[8 + i] = m[8 + i];
+        r[12 + i] = m[12 + i] + 2 * h * m[4 + i];
+    }
+    const float plane[4] = {0, 1, 0, -h};
+    memcpy(out, r, sizeof r);
+    if (clip)
+        for (int c = 0; c < 4; c++) out[c * 4 + 2] = r[c * 4 + 3] - PL_K * plane[c];
+}
+
+static void planar_capture(Prog *pr, Pipe *pp, uint32_t streams, const VkDescriptorSet sets[2], uint32_t ndyn, const uint32_t *dyn,
+                           uint32_t nv_dyn, bool gmem, const PlDrawCall *dc) {
+    NvnTexture *rt = planar_gbuf_target();
+    if (!rt || !fsr2_scene_pass()) return;
+    Range c5 = st.ubuf[0][2];
+    if (!((pr->vi->cbuf_mask >> 5) & 1) || !c5.addr || c5.size < 64) return;  // (no camera of its own to mirror)
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t f = renderer_exec_frame();
+    if (pl.frame != f) {  // (the frame's first G-buffer draw)
+        ring_unpin();
+        ring_lost = false;
+        pl.frame = f, pl.n = 0, pl.ncb = 0, pl.seq = submit_seq, pl.rt0 = rt;
+        pl.ncolor = pass_ncolor, pl.depth = pass_depth, pl.stencil = pass_stencil, pl.w = pass_w, pl.h = pass_h;
+        memcpy(pl.color, pass_color, sizeof pl.color);
+        memcpy(pl.gtex, st.rt.color, sizeof pl.gtex), pl.gdepth = st.rt.depth;
+        if (getenv("LARECOMP_PLANAR_Y")) pl.y = gtao_env("LARECOMP_PLANAR_Y", 0.0f), pl_lv.have = true;
+        pl.scale = gtao_env("LARECOMP_PLANAR_SCALE", 0.5f);
+    }
+    // (no water height yet; or no water in the picture for 2 s - its draws, or too few of its pixels -: nothing to mirror,
+    // and walking the city costs nothing. Coming back to it, the screen's reflections until the height is read again)
+    static int fixed_y = -1;
+    if (fixed_y < 0) fixed_y = getenv("LARECOMP_PLANAR_Y") != NULL;
+    if (!pl_lv.have || (!fixed_y && f - pl_lv.seen > 120)) return;
+    if (rt != pl.rt0 || ring_lost) return;  // (another such pass in the frame: the first only)
+    if (!ring_pin) ring_pin = vk_pending_seq();  // (the copies of what is kept stay until the replay: planar_replay_pending)
+    uint64_t size = c5.size > sizeof pl.cb[0].data ? sizeof pl.cb[0].data : c5.size;
+    int ci = 0;
+    while (ci < pl.ncb && (pl.cb[ci].src != c5.addr || pl.cb[ci].size != size)) ci++;
+    if (ci == pl.ncb) {
+        if (pl.ncb == 8) return;
+        pl.ncb++;
+        pl.cb[ci].src = c5.addr, pl.cb[ci].size = size;
+        memcpy(pl.cb[ci].data, (const void *)(uintptr_t)c5.addr, size);
+        planar_matrix((const float *)(uintptr_t)c5.addr, pl.y, pl.cb[ci].data, true);
+        if (ci == 0) {
+            memcpy(pl.vpm, pl.cb[0].data, sizeof pl.vpm);
+            planar_matrix((const float *)(uintptr_t)c5.addr, pl.y, pl.vpm_std, false);
+        }
+    }
+    // the vertex set again, around the mirrored copy (its range as the original's: the copy is that long)
+    st.ubuf[0][2].addr = (uint64_t)(uintptr_t)pl.cb[ci].data, st.ubuf[0][2].size = size;
+    uint32_t mdyn[2 * MAX_BIND], mn = 0;
+    VkDescriptorSet mset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL, mdyn, &mn);
+    st.ubuf[0][2] = c5;
+    if (mn != nv_dyn || ndyn > 2 * MAX_BIND) return;
+    if (pl.n == pl.cap) {
+        int cap = pl.cap ? pl.cap * 2 : 1024;
+        PlDraw *d = realloc(pl.d, (size_t)cap * sizeof *d);
+        if (!d) return;
+        pl.d = d, pl.cap = cap;
+    }
+    PlDraw *d = &pl.d[pl.n++];
+    d->pp = pp, d->layout = pr->layout, d->streams = streams, d->s = ss;
+    d->sets[0] = mset, d->sets[1] = sets[1];
+    d->ndyn = ndyn;
+    memcpy(d->dyn, mdyn, mn * sizeof mdyn[0]);
+    memcpy(d->dyn + mn, dyn + nv_dyn, (ndyn - nv_dyn) * sizeof dyn[0]);
+    d->gmem = gmem;
+    if (gmem) d->gset = gm_last.set, d->gindex = gm_last.index, d->gdirect = gm_last.direct, memcpy(d->gd, gm_last.gd, sizeof d->gd);
+    d->dc = *dc;
+}
+
+// i: 0-7 a colour target, 8 the depth; made again when the format or size changes
+static TexBackend *planar_image(int i, VkFormat f, uint32_t w, uint32_t h) {
+    TexBackend *d = &pl.img[i];
+    if (d->image && (d->width != w || d->height != h || d->format != f)) {
+        vk_views_forget(d);
+        vk_defer_image(d->image, d->mem);
+        d->image = VK_NULL_HANDLE;
+        d->mem = VK_NULL_HANDLE;
+    }
+    if (!d->image) {
+        bool ds = i == 8;
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = f,
+                                .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+                                .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                .usage = i == 13 ? VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                                         : VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                         (ds ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateImage(g_vk.vma, &ci, &ai, &d->image, &d->mem, NULL) != VK_SUCCESS) { d->image = VK_NULL_HANDLE; return NULL; }
+        d->format = f; d->width = w; d->height = h; d->depth = 1; d->layers = 1; d->levels = 1; d->samples = 1;
+        d->aspect = !ds ? VK_IMAGE_ASPECT_COLOR_BIT
+                  : VK_IMAGE_ASPECT_DEPTH_BIT | (pl.stencil != VK_FORMAT_UNDEFINED ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+        d->base_type = VK_IMAGE_VIEW_TYPE_2D;
+        vk_image_init_layout(vk_cmd(), d->image, d->aspect);
+    }
+    return d;
+}
+
+// The water's height for the mirror (LARECOMP_PLANAR_Y overrides it): after the water pass, water_level.frag averages
+// the world height of a grid of the picture's water pixels (where the depth changed) into a 1 x 1 image; that is copied
+// into one of four host-visible slots and read once its submission is done - a few frames later, which the level
+// (still water) allows. No water seen: the last height stays.
+void planar_level_probe(VkImageView dnow, VkImageView dpre, const float *pc) {
+    extern uint64_t renderer_exec_frame(void);
+    if (water_mode() == 0) return;
+    if (!pl_lv.buf) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 4 * 16, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info;
+        if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &pl_lv.buf, &pl_lv.mem, &info) != VK_SUCCESS) { pl_lv.buf = VK_NULL_HANDLE; return; }
+        pl_lv.ptr = info.pMappedData;
+    }
+    uint64_t done = vk_completed_seq();  // (the oldest slot whose copy the GPU finished: the newest such height)
+    for (int i = 0; i < 4; i++) {
+        int s = (pl_lv.next + i) & 3;
+        if (!pl_lv.seq[s] || pl_lv.seq[s] > done) continue;
+        vmaInvalidateAllocation(g_vk.vma, pl_lv.mem, (VkDeviceSize)s * 16, 16);
+        const float *v = pl_lv.ptr + s * 4;
+        if (v[1] >= 4) pl.y = v[0], pl_lv.have = true, pl_lv.seen = renderer_exec_frame();  // (enough water samples)
+        pl_lv.seq[s] = 0;
+    }
+    static TexBackend img;
+    if (!img.image) {
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+                                .extent = {1, 1, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+                                .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateImage(g_vk.vma, &ci, &ai, &img.image, &img.mem, NULL) != VK_SUCCESS) { img.image = VK_NULL_HANDLE; return; }
+        img.format = VK_FORMAT_R32G32B32A32_SFLOAT; img.width = img.height = 1; img.depth = img.layers = img.levels = 1;
+        img.samples = 1; img.aspect = VK_IMAGE_ASPECT_COLOR_BIT; img.base_type = VK_IMAGE_VIEW_TYPE_2D;
+        vk_image_init_layout(vk_cmd(), img.image, img.aspect);
+    }
+    float p[32];
+    memcpy(p, pc, sizeof p);
+    post_pc_big = p;
+    VkImageView in[2] = {dnow, dpre};
+    post_pass_ex(vk_cmd(), "water_level.frag", in, 2, &img, NULL, true, NULL, 0);
+    post_pc_big = NULL;
+    int s = pl_lv.next;
+    pl_lv.next = (s + 1) & 3;
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    VkBufferImageCopy c = {.bufferOffset = (VkDeviceSize)s * 16, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {1, 1, 1}};
+    rec_CmdCopyImageToBuffer(cb, img.image, VK_IMAGE_LAYOUT_GENERAL, pl_lv.buf, 1, &c);
+    vk_full_barrier(cb);
+    pl_lv.seq[s] = vk_pending_seq();
+}
+
+// One captured draw into the open pass (its images w x h at s times the game's). flip: the mirrored winding. e: what this
+// pass has so far, zeroed at its start - the state cache's filtering doesn't know this pass, and replaying everything
+// for each draw was nearly all of the mirrored scene's CPU cost (LARECOMP_VK_STATE_FILTER=0: everything, as draw_ does)
+typedef struct { const PlDraw *prev; VkBuffer ib; VkDeviceSize io; VkIndexType it; uint32_t vb_known; VkBuffer vb[17]; VkDeviceSize vo[17]; } PlEmit;
+static void planar_emit(VkCommandBuffer cb, const PlDraw *d, float s, uint32_t w, uint32_t h, bool flip, PlEmit *e) {
+    const __typeof__(ss) *q = &d->s;
+    bool f = ss_enabled();
+    const PlDraw *pd = f ? e->prev : NULL;
+    const __typeof__(ss) *p = pd ? &pd->s : NULL;
+#define PL_NEW(x) (!p || p->x != q->x)
+#define PL_NEWM(x) (!p || memcmp(&p->x, &q->x, sizeof q->x))
+    if (!pd || pd->pp != d->pp) rec_CmdBindPipelineObj(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d->pp);
+    if (g_vk.vids && PL_NEWM(vi)) set_vertex_input(cb, &q->vi);
+    if (PL_NEW(dt)) rec_CmdSetDepthTestEnable(cb, q->dt);
+    if (PL_NEW(dw)) rec_CmdSetDepthWriteEnable(cb, q->dw);
+    if (PL_NEW(dop)) rec_CmdSetDepthCompareOp(cb, q->dop);
+    if (PL_NEW(sten)) rec_CmdSetStencilTestEnable(cb, q->sten);
+    for (int fc = 0; fc < 2; fc++) {
+        if (!PL_NEWM(sface[fc])) continue;
+        VkStencilFaceFlags face = fc ? VK_STENCIL_FACE_BACK_BIT : VK_STENCIL_FACE_FRONT_BIT;
+        const uint32_t *v = q->sface[fc];
+        rec_CmdSetStencilOp(cb, face, (VkStencilOp)v[0], (VkStencilOp)v[1], (VkStencilOp)v[2], (VkCompareOp)v[3]);
+        rec_CmdSetStencilCompareMask(cb, face, v[4]);
+        rec_CmdSetStencilWriteMask(cb, face, v[5]);
+        rec_CmdSetStencilReference(cb, face, v[6]);
+    }
+    if (PL_NEWM(bc)) rec_CmdSetBlendConstants(cb, q->bc);
+    if (PL_NEW(cull)) rec_CmdSetCullMode(cb, q->cull);
+    if (PL_NEW(ff)) rec_CmdSetFrontFace(cb, !flip ? q->ff : q->ff == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
+    if (PL_NEW(topo)) rec_CmdSetPrimitiveTopology(cb, q->topo);
+    if (PL_NEW(pre)) rec_CmdSetPrimitiveRestartEnable(cb, q->pre);
+    if (PL_NEW(dbe)) rec_CmdSetDepthBiasEnable(cb, q->dbe);
+    if (PL_NEWM(db)) rec_CmdSetDepthBias(cb, q->db[1], q->db[2], q->db[0]);
+    if (PL_NEWM(vp)) {
+        VkViewport vp = q->vp;
+        vp.x *= s, vp.y *= s, vp.width *= s, vp.height *= s;
+        rec_CmdSetViewport(cb, 0, 1, &vp);
+    }
+    if (PL_NEWM(sc)) {
+        int32_t x0 = (int32_t)floorf(q->sc.offset.x * s), y0 = (int32_t)floorf(q->sc.offset.y * s);
+        int32_t x1 = (int32_t)ceilf((q->sc.offset.x + (float)q->sc.extent.width) * s), y1 = (int32_t)ceilf((q->sc.offset.y + (float)q->sc.extent.height) * s);
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > (int32_t)w) x1 = (int32_t)w;
+        if (y1 > (int32_t)h) y1 = (int32_t)h;
+        VkRect2D sc = {{x0, y0}, {(uint32_t)(x1 > x0 ? x1 - x0 : 0), (uint32_t)(y1 > y0 ? y1 - y0 : 0)}};
+        rec_CmdSetScissor(cb, 0, 1, &sc);
+    }
+#undef PL_NEW
+#undef PL_NEWM
+    bool same_layout = pd && pd->layout == d->layout;
+    if (!same_layout || pd->sets[0] != d->sets[0] || pd->sets[1] != d->sets[1] || pd->ndyn != d->ndyn ||
+        memcmp(pd->dyn, d->dyn, d->ndyn * sizeof d->dyn[0]))
+        rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d->layout, 0, 2, d->sets, d->ndyn, d->ndyn ? d->dyn : NULL);
+    if (d->gmem) {
+        bool same = same_layout && pd->gmem && pd->gset == d->gset && pd->gindex == d->gindex;
+        if (!same) rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d->layout, d->gindex, 1, &d->gset, 0, NULL);
+        if (d->gdirect && !(same && pd->gdirect && !memcmp(pd->gd, d->gd, sizeof d->gd)))
+            rec_CmdPushConstants(cb, d->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof d->gd, d->gd);
+    }
+    if ((d->dc.kind == 1 || (d->dc.kind == 2 && d->dc.indexed)) && (!f || e->ib != q->ib || e->io != q->io || e->it != q->it)) {
+        rec_CmdBindIndexBuffer(cb, q->ib, q->io, q->it);
+        e->ib = q->ib, e->io = q->io, e->it = q->it;
+    }
+    for (int i = 0; i < 17; i++) {
+        if (!(d->streams & (1u << i))) continue;
+        if (f && (e->vb_known & (1u << i)) && e->vb[i] == q->vb[i] && e->vo[i] == q->vo[i]) continue;
+        rec_CmdBindVertexBuffers(cb, (uint32_t)i, 1, &q->vb[i], &q->vo[i]);
+        e->vb_known |= 1u << i, e->vb[i] = q->vb[i], e->vo[i] = q->vo[i];
+    }
+    if (d->dc.kind == 2) rec_CmdDrawIndirect(cb, d->dc.buf, d->dc.off, 1, d->dc.a, d->dc.indexed);
+    else if (d->dc.kind == 1) rec_CmdDrawIndexed(cb, d->dc.a, d->dc.b, 0, d->dc.d, d->dc.e);
+    else rec_CmdDraw(cb, d->dc.a, d->dc.b, d->dc.c, d->dc.e);
+    e->prev = d;
+}
+
+static void planar_replay_pending(void) {
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t f = renderer_exec_frame();
+    if (ring_pin && pl.frame != f) ring_unpin(), pl.n = 0;  // (a frame's draws that never got drawn again)
+    if (!pl.n || pl.done == pl.frame || pl.frame != f) return;
+    if (planar_gbuf_target() == pl.rt0) return;  // (a new pass on the same targets: still the G-buffer)
+    int n = pl.n;
+    pl.n = 0;
+    if (ring_lost) return;
+    // (the G-buffer pass spans submissions: its copies are pinned in the ring - ring_pin -, and its descriptor sets
+    // live as long as their submission's pool, until SUBS submissions later)
+    if (submit_seq - pl.seq >= SUBS - 4) {
+        if (pl.dropped++ < 10) LOG("[planar] frame %llu: %llu submissions during the G-buffer pass, no reflection\n",
+                                   (unsigned long long)pl.frame, (unsigned long long)(submit_seq - pl.seq));
+        ring_unpin();
+        return;
+    }
+    float s = pl.scale > 0.05f && pl.scale <= 1 ? pl.scale : 0.5f;
+    uint32_t w = (uint32_t)(pl.w * s), h = (uint32_t)(pl.h * s);
+    if (w < 8 || h < 8 || pl.depth == VK_FORMAT_UNDEFINED) { ring_unpin(); return; }
+    VkRenderingAttachmentInfo ca[8] = {0}, da = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    for (uint32_t i = 0; i < pl.ncolor; i++) {
+        ca[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        if (pl.color[i] == VK_FORMAT_UNDEFINED) continue;
+        TexBackend *b = planar_image((int)i, pl.color[i], w, h);
+        if (!b) { ring_unpin(); return; }
+        ca[i].imageView = post_view(b), ca[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, ca[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    }
+    TexBackend *db = planar_image(8, pl.depth, w, h);
+    TexBackend *zd = planar_image(12, VK_FORMAT_R32_SFLOAT, w, h);  // (planar_light_pending; made here, outside any pass)
+    if (!db || !zd) { ring_unpin(); return; }
+    static const VkComponentMapping id = {0};
+    da.imageView = vk_image_view(db, VK_IMAGE_VIEW_TYPE_2D, db->format, 0, 1, 0, 1, id, db->aspect);
+    da.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;  // (cleared to 0: reversed, far)
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {w, h}}, .layerCount = 1,
+                          .colorAttachmentCount = pl.ncolor, .pColorAttachments = ca, .pDepthAttachment = &da,
+                          .pStencilAttachment = pl.stencil != VK_FORMAT_UNDEFINED ? &da : NULL};
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    rec_CmdBeginRendering(cb, &ri);
+    PlEmit em = {0};
+    for (int k = 0; k < n; k++) planar_emit(cb, &pl.d[k], s, w, h, true, &em);
+    rec_CmdEndRendering(cb);
+    ss_forget();
+    vk_full_barrier(cb);
+    ring_unpin();  // (its copies: until this submission is done)
+    pl.done = pl.frame;  // (only now: planar_light lights what this drew, not a dropped frame's old images)
+    static int nlog;
+    if (nlog++ < 3) LOG("[planar] frame %llu: %d draws mirrored in y = %.3f into %ux%u (%u targets, %llu submissions since the first)\n",
+                        (unsigned long long)pl.frame, n, pl.y, w, h, pl.ncolor, (unsigned long long)(submit_seq - pl.seq));
+    static long dump = -2;
+    if (dump == -2) dump = getenv("LARECOMP_PLANAR_DUMP") ? atol(getenv("LARECOMP_PLANAR_DUMP")) : -1;
+    if (dump >= 0 && pl.frame == (uint64_t)dump)
+        for (uint32_t i = 0; i < pl.ncolor; i++) {
+            if (!pl.img[i].image) continue;
+            char path[64];
+            snprintf(path, sizeof path, "build/planar_%u.png", i);
+            renderer_save_texture_tex(&pl.img[i], path);
+        }
+}
+
+// The deferred lighting draw again (draw_, right after the game's, with what it bound), onto the mirrored G-buffer:
+// its textures that are the G-buffer's targets swapped for planar_replay_pending's images, its camera (fragment
+// constant buffer 2: rows 12-15 the depth -> world matrix, row 19 the eye - gtao_before_lighting) for the mirrored
+// one's - the depth was drawn with pl.vpm, so its inverse gives back the real point; the eye is under the water, where
+// the light the mirror shows leaves from. Into images like the lighting pass's targets (9-11), the mirrored depth
+// attached when the pass has the scene's. Its light volumes and later passes aren't drawn again.
+static void mul4(const float *a, const float *b, float *out) {  // (by columns: out = a x b)
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++)
+            out[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+}
+
+// (kept by planar_light until its pass ends: ended right after the draw, the next draw's begin_pass would apply the
+// AO and SSGI in the middle of the lighting pass)
+static struct { bool pending; PlDraw d; uint32_t ncolor; VkFormat color[3], depth, stencil; uint64_t seq; } pl_l;
+
+static void planar_light(Prog *pr, Pipe *pp, const VkDescriptorImageInfo *fii, VkDescriptorSet vset, const uint32_t *dyn,
+                         uint32_t nv_dyn, const float rs0[4], const float *tint, uint32_t streams, const PlDrawCall *dc) {
+    extern uint64_t renderer_exec_frame(void);
+    if (pl.done != pl.frame || pl.frame != renderer_exec_frame() || pl.lit_done == pl.frame || pl_l.pending || !pl.img[8].image ||
+        !pl.img[12].image) return;
+    Range c2 = st.ubuf[1][2];
+    if (!c2.addr || c2.size < 22 * 16 || pass_ncolor > 3) return;
+    int nt = pr->fi->ntex < 64 ? pr->fi->ntex : 64, nrep = 0;
+    VkDescriptorImageInfo alt[64];
+    memcpy(alt, fii, (size_t)nt * sizeof alt[0]);
+    static const VkComponentMapping id = {0};
+    // the lighting turns its depth into distances with the game's projection (fog, the shadows' cascades): not the
+    // clipping depth the mirror was drawn with: image 12 instead (planar_light_pending)
+    for (int i = 0; i < nt; i++) {
+        NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+        if (!t) continue;
+        if (t == pl.gdepth) {
+            // (the lighting reads this one twice, as depth and as stencil - its material bits: the stencil read through
+            // the depth image gave a dotted picture)
+            NvnTexEntry *e = gtao_tex_entry(pr->fi, i);
+            bool sten = e && (e->has_view && (e->view.setmask & 16) ? e->view.ds_mode : e->tex->ds_mode) == 1;
+            alt[i].imageView = sten ? vk_image_view(&pl.img[8], VK_IMAGE_VIEW_TYPE_2D, pl.img[8].format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_STENCIL_BIT)
+                                    : post_view(&pl.img[12]);
+            nrep++;
+            continue;
+        }
+        for (int k = 0; k < 8; k++)
+            if (pl.gtex[k] && t == pl.gtex[k] && pl.img[k].image) { alt[i].imageView = post_view(&pl.img[k]); nrep++; break; }
+    }
+    if (nrep < 3) {
+        static int nlog;
+        if (nlog++ < 3) LOG("[planar] a lighting draw reading %d of the G-buffer's images: not drawn again\n", nrep);
+        return;
+    }
+    uint64_t size = c2.size > sizeof pl.lcb ? sizeof pl.lcb : c2.size;
+    memcpy(pl.lcb, (const void *)(uintptr_t)c2.addr, size);
+    // (rows 12-15, G: the game's own (ndc, depth) -> world, in its conventions - its y sign... VP x G is that convention
+    // alone, so inverse(mirrored VP) x VP x G is the same reconstruction for the mirrored depth)
+    if (mv_frame[0] == pl.frame) {
+        float inv[16], t[16], g[16];
+        memcpy(g, pl.lcb + 12 * 4, sizeof g);
+        inv4(pl.vpm_std, inv);
+        mul4(mv_vp[0], g, t);
+        mul4(inv, t, pl.lcb + 12 * 4);
+    } else inv4(pl.vpm_std, pl.lcb + 12 * 4);
+    pl.lcb[19 * 4 + 1] = 2 * pl.y - pl.lcb[19 * 4 + 1];
+    st.ubuf[1][2].addr = (uint64_t)(uintptr_t)pl.lcb, st.ubuf[1][2].size = size;
+    uint32_t fdyn[2 * MAX_BIND], nf = 0;
+    VkDescriptorSet fset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, tint, 0, 0, 0, alt, fdyn, &nf);
+    st.ubuf[1][2] = c2;
+    if (nv_dyn + nf > 2 * MAX_BIND) return;
+    PlDraw *d = &pl_l.d;
+    memset(d, 0, sizeof *d);
+    d->pp = pp, d->layout = pr->layout, d->streams = streams, d->s = ss, d->dc = *dc;
+    d->sets[0] = vset, d->sets[1] = fset;
+    d->ndyn = nv_dyn + nf;
+    memcpy(d->dyn, dyn, nv_dyn * sizeof dyn[0]);
+    memcpy(d->dyn + nv_dyn, fdyn, nf * sizeof fdyn[0]);
+    if (gc_shift && (pr->vi->uses_gmem || pr->fi->uses_gmem))
+        d->gmem = true, d->gset = gm_last.set, d->gindex = gm_last.index, d->gdirect = gm_last.direct, memcpy(d->gd, gm_last.gd, sizeof d->gd);
+    pl_l.ncolor = pass_ncolor, pl_l.depth = pass_depth, pl_l.stencil = pass_stencil, pl_l.seq = submit_seq;
+    memcpy(pl_l.color, pass_color, pass_ncolor * sizeof pass_color[0]);
+    pl_l.pending = true;
+}
+
+static void planar_light_pending(void) {
+    extern uint64_t renderer_exec_frame(void);
+    if (!pl_l.pending) return;
+    pl_l.pending = false;
+    // (a submission since its draw: the ring may have taken back what its sets point at. That frame has no reflection)
+    if (pl.frame != renderer_exec_frame() || pl_l.seq != submit_seq) return;
+    PlDraw *d = &pl_l.d;
+    TexBackend *zd = &pl.img[12];
+    uint32_t w = pl.img[8].width, h = pl.img[8].height;
+    float s = (float)w / (float)pl.w;
+    static const VkComponentMapping id = {0};
+    VkRenderingAttachmentInfo ca[3] = {0}, da = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    for (uint32_t i = 0; i < pl_l.ncolor; i++) {
+        ca[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        if (pl_l.color[i] == VK_FORMAT_UNDEFINED) continue;
+        TexBackend *b = planar_image(9 + (int)i, pl_l.color[i], w, h);
+        if (!b) return;
+        ca[i].imageView = post_view(b), ca[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, ca[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    }
+    bool with_depth = pl_l.depth != VK_FORMAT_UNDEFINED && pl_l.depth == pl.img[8].format;
+    if (!with_depth && (pl_l.depth != VK_FORMAT_UNDEFINED || pl_l.stencil != VK_FORMAT_UNDEFINED)) return;  // (another depth: no image like it)
+    if (with_depth) {
+        da.imageView = vk_image_view(&pl.img[8], VK_IMAGE_VIEW_TYPE_2D, pl.img[8].format, 0, 1, 0, 1, id, pl.img[8].aspect);
+        da.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        da.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    }
+    {   // (planar_depth.frag: back to the world with the clipping camera's inverse, forward with the unclipped one)
+        float m[32];
+        inv4(pl.vpm, m);
+        memcpy(m + 16, pl.vpm_std, sizeof pl.vpm_std);
+        post_pc_big = m;
+        VkImageView in[1] = {vk_image_view(&pl.img[8], VK_IMAGE_VIEW_TYPE_2D, pl.img[8].format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT)};
+        post_pass_ex(vk_cmd(), "planar_depth.frag", in, 1, zd, NULL, false, NULL, 0);
+        post_pc_big = NULL;
+    }
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {w, h}}, .layerCount = 1,
+                          .colorAttachmentCount = pl_l.ncolor, .pColorAttachments = ca, .pDepthAttachment = with_depth ? &da : NULL,
+                          .pStencilAttachment = with_depth && pl_l.stencil != VK_FORMAT_UNDEFINED ? &da : NULL};
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    rec_CmdBeginRendering(cb, &ri);
+    PlEmit em = {0};
+    planar_emit(cb, d, s, w, h, false, &em);
+    rec_CmdEndRendering(cb);
+    ss_forget();
+    vk_full_barrier(cb);
+    pl.lit_done = pl.frame;
+    static long dump = -2;
+    if (dump == -2) dump = getenv("LARECOMP_PLANAR_DUMP") ? atol(getenv("LARECOMP_PLANAR_DUMP")) : -1;
+    if (dump >= 0 && pl.frame == (uint64_t)dump && pl.img[9].image) renderer_save_texture_tex(&pl.img[9], "build/planar_lit.png");
+}
+
+// ================================================================== screen-space planar reflections
+// The planar reflection's picture without drawing anything again (Remi Genin, "Screen Space Planar Reflections in Ghost
+// Recon Wildlands", 2017): every pixel of the scene above the water's plane, its depth and lit colour from before the
+// water, is mirrored in the plane and projected; sspr_project.comp writes where it came from at the half-size pixel it
+// lands on (imageAtomicMax on row << 16 | column, so of the pixels that land together the one lowest on the screen wins:
+// nearest the water, and the same one each frame). sspr_resolve.frag then fetches those colours, single-pixel cracks
+// filled from a neighbour; its alpha is the distance from the camera for the ripples. No temporal fill or stretch at the
+// picture's edges as in the article: what's left empty goes to the water shader's screen search, then the cube.
+// Sees only what the picture shows, like that search, but exactly and at one cost. One plane: the commonest level
+// (planar_level_probe); other water keeps the search. F1 > Reflection method: Mirrored picture (LARECOMP_WATER_MODE=1).
+static bool sspr_run(VkImageView dpre, VkImageView cpre, const float *wpc, VkImageView *out, float *y) {
+    if (water_mode() != 1 || !pl_lv.have) return false;
+    static VkPipeline pipe;
+    static VkPipelineLayout layout;
+    static VkDescriptorSetLayout dsl;
+    if (!pipe) {
+        VkDescriptorSetLayoutBinding b[2] = {{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+                                             {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
+        VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = b};
+        VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &dsl));
+        VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 112};
+        VkPipelineLayoutCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl,
+                                         .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+        VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &pi, NULL, &layout));
+        VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = layout,
+                                          .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                    .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                                                    .module = vk_builtin_shader("sspr_project.comp"), .pName = "main"}};
+        VK_CHECK(vkCreateComputePipelines(g_vk.dev, VK_NULL_HANDLE, 1, &ci, NULL, &pipe));
+    }
+    uint32_t sw = (uint32_t)wpc[26], sh = (uint32_t)wpc[27], w = sw / 2, h = sh / 2;
+    TexBackend *hb = planar_image(13, VK_FORMAT_R32_UINT, w, h), *cb2 = planar_image(14, VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
+    if (!hb || !cb2) return false;
+    // the projection's constants: the mirror as one matrix from the picture's (ndc, depth) to its own clip space
+    // (VP x mirror x VP^-1), and the two rows of VP^-1 that give the world height
+    float vp[16], t[16], u[28];
+    const float mirror[16] = {1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, 2 * pl.y, 0, 1};
+    inv4(wpc, vp);
+    mul4(mirror, wpc, t);
+    mul4(vp, t, u);
+    for (int c = 0; c < 4; c++) u[16 + c] = wpc[c * 4 + 1], u[20 + c] = wpc[c * 4 + 3];
+    // (a point a metre higher: further down the image's rows or up? - the image can be upside down: the hash's order
+    // follows)
+    float cen[4], up[4];
+    for (int r = 0; r < 4; r++) cen[r] = wpc[8 + r] * 0.5f + wpc[12 + r];
+    for (int r = 0; r < 4; r++) up[r] = vp[r] * cen[0] / cen[3] + vp[4 + r] * (cen[1] / cen[3] + 1) + vp[8 + r] * cen[2] / cen[3] + vp[12 + r];
+    bool flip = up[1] / up[3] * wpc[22] > 0;
+    u[24] = wpc[22], u[25] = pl.y, u[26] = flip ? (float)(sh - 1) : -1, u[27] = 0;
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    static const VkClearColorValue zero = {0};
+    VkImageSubresourceRange all = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    rec_CmdClearColorImage(cb, hb->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
+    vk_full_barrier(cb);
+    VkDescriptorSet set = vk_alloc_set(dsl);
+    VkDescriptorImageInfo ii[2] = {{vk_default_sampler(false), dpre, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, post_view(hb), VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet wr[2];
+    for (uint32_t k = 0; k < 2; k++)
+        wr[k] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = k, .descriptorCount = 1,
+                                       .descriptorType = k ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                       .pImageInfo = &ii[k]};
+    rec_UpdateDescriptorSets(2, wr);
+    rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+    rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &set, 0, NULL);
+    rec_CmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof u, u);
+    rec_CmdDispatch(cb, (sw + 7) / 8, (sh + 7) / 8, 1);
+    float pc[32];
+    memcpy(pc, wpc, sizeof pc);
+    pc[28] = u[26], pc[31] = pl.y;
+    const float *water_pc = post_pc_big;  // (the water pass's, in the middle of setting up)
+    post_pc_big = pc, post_nearest_first = true;
+    VkImageView in[3] = {post_view(hb), cpre, dpre};
+    post_pass_ex(cb, "sspr_resolve.frag", in, 3, cb2, NULL, true, NULL, 0);
+    post_pc_big = water_pc, post_nearest_first = false;
+    *out = post_view(cb2), *y = pl.y;
+    return true;
 }
 
 static void gtao_forget(NvnTexture *t) {

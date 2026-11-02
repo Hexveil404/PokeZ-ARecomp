@@ -745,6 +745,35 @@ static void tab_display(bool in_game) {
                   "Fontes, lagos e o mar refletem os prédios, personagens e o céu ao redor, com ondulações suaves; onde "
                   "a imagem não tem o que refletir, o reflexo do céu do próprio jogo. Mais visível em ângulos baixos. "
                   "Muda na hora."));
+    if (g_settings.water_ssr) {  // (vulkan/exec.c water_mode)
+        const char *wms[3] = {TR("Screen search", "Busca na tela"), TR("Mirrored picture", "Imagem espelhada"),
+                              TR("Mirrored scene", "Cena espelhada")};
+        opt_choice(TR("Reflection method", "Método de reflexo"), &g_settings.water_mode, wms, 3, 0,
+                   TR("Screen search: follows each ray through the picture. Mirrored picture: flips the picture in the "
+                      "water, sharper and steadier, showing only what is on screen. Mirrored scene: draws the scene "
+                      "again from below the water, so it also shows the undersides of bridges and the backs of things; "
+                      "costs the most, and lamps light it less. Changes at once.",
+                      "Busca na tela: segue cada raio pela imagem. Imagem espelhada: inverte a imagem na água, mais "
+                      "nítida e estável, mostrando só o que está na tela. Cena espelhada: desenha a cena de novo por "
+                      "baixo da água, mostrando também a parte de baixo das pontes e o lado de trás das coisas; é a "
+                      "mais pesada, e os postes a iluminam menos. Muda na hora."));
+    }
+    // (the same pass as the reflections: vulkan/exec.c water_apply_pending, shaders.c water_ssr.frag)
+    opt_toggle(TR("Water depth", "Profundidade da água"), &g_settings.water_depth, false,
+               TR("Deeper water looks darker and bluer, from how deep it really is at each point: clear at the edges, "
+                  "murkier in the middle of a pool or river. Changes at once.",
+                  "Água mais funda fica mais escura e azulada, conforme a profundidade real em cada ponto: clara nas "
+                  "bordas, mais turva no meio de uma fonte ou rio. Muda na hora."));
+    opt_toggle(TR("Water caustics", "Cáusticas na água"), &g_settings.water_caustics, false,
+               TR("Moving patterns of light on the floor under the water, as sunlight is bent by the ripples. Brightest "
+                  "in shallow, well-lit water. Changes at once.",
+                  "Padrões de luz em movimento no fundo, sob a água, como a luz do sol desviada pelas ondulações. Mais "
+                  "fortes em água rasa e bem iluminada. Muda na hora."));
+    opt_toggle(TR("Vivid water", "Água vívida"), &g_settings.water_vivid, false,
+               TR("A stylized look: water a little more turquoise and slightly glowing, so it stays bright and easy to "
+                  "read in dark places. Off: the game's own colours. Changes at once.",
+                  "Um visual estilizado: a água um pouco mais turquesa e levemente brilhante, para continuar clara e "
+                  "fácil de ver em lugares escuros. Desligado: as cores do próprio jogo. Muda na hora."));
 #ifndef __APPLE__
     if (!la) {  // (runtime/nvn/vulkan/exec.c fsr2_copy: applies at once)
         int t = g_settings.taa ? 1 : 0;

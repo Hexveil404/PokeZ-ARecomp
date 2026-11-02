@@ -851,18 +851,57 @@ static const char *builtin_src(const char *name, int *stage) {
     // until it passes behind the scene without the water: that colour is what the water reflects, blended over it with
     // Schlick's Fresnel (a little straight down, most at grazing angles) times prm.x, the strength. Rays that leave the
     // picture fade out at its edges; past the scene, the sky where it is on screen. prj.z 1: the reflection alone.
-    if (!strcmp(name, "water_ssr.frag")) {
+    // water_ssr2.frag (exec.c blend kind 6, dual-source: colour = o + dst x o1) also does what prm.y's bits ask: 1 the
+    // depth (the light through the water fades per channel with the path to the floor - the depth before the water -,
+    // red first, times prj.x; the water's own colour, lit by the cube's sky, fills in), 2 caustics on that floor (two
+    // warped wave layers, brightest where they cancel, times prj.y and the floor's own light), 4 the vivid look.
+    if (!strcmp(name, "water_ssr.frag") || !strcmp(name, "water_ssr2.frag")) {
         *stage = STAGE_FRAGMENT;
-        static char *src;
-        if (!src) {
+        bool dual = name[9] == '2';
+        static char *srcs[2];
+        char **src = &srcs[dual];
+        if (!*src) {
             static const char body[] =
                 "layout(set = 0, binding = 2) uniform sampler2D t2;\n"
                 "layout(set = 0, binding = 3) uniform samplerCube t3;\n"
+                "layout(set = 0, binding = 4) uniform sampler2D t4;\n"
+                "layout(set = 0, binding = 5) uniform sampler2D t5;\n"
+                // (the mirror's depth and SSPR's distance, nearest: filtered, a silhouette mixes a real value with the cleared 0)
+                "vec4 fetch_at(sampler2D t, vec2 uv) {\n"
+                "  ivec2 s = textureSize(t, 0);\n"
+                "  return texelFetch(t, clamp(ivec2(uv * vec2(s)), ivec2(0), s - 1), 0);\n"
+                "}\n"
                 "vec2 to_uv(mat4 vp, vec3 w, out float dz) {\n"
                 "  vec4 c = vp * vec4(w, 1.0);\n"
                 "  dz = c.z / c.w;\n"
                 "  return vec2(c.x / c.w * 0.5 + 0.5, c.y / c.w * pc.prm.z * 0.5 + 0.5);\n"
                 "}\n"
+                // the ripples' slope (d height / dx, dz): two layers of three waves each, drifting in opposite
+                // directions at different speeds and sizes, so the pattern doesn't visibly repeat
+                "vec2 ripple_slope(vec2 p, float t) {\n"
+                "  vec2 s = vec2(0.0);\n"
+                "  const vec2 d[6] = vec2[](vec2(0.96, 0.28), vec2(0.73, 0.68), vec2(0.99, -0.13),\n"
+                "                           vec2(-0.35, -0.94), vec2(-0.80, -0.60), vec2(0.10, -0.99));\n"
+                "  const float f[6] = float[](5.3, 7.9, 11.4, 6.7, 9.6, 13.8), v[6] = float[](2.1, 2.6, 3.3, -1.7, -2.2, -2.9);\n"
+                "  for (int i = 0; i < 6; i++) s += d[i] * cos(dot(p, d[i]) * f[i] + t * v[i]) * pow(f[i], -0.2);\n"
+                "  return s;\n"
+                "}\n"
+                // caustics: cells around drifting points (warped), bright along their borders - where the distances to
+                // the nearest two points meet - like the web of light under real ripples; two sizes
+                "float caustic_layer(vec2 p, float t) {\n"
+                "  p += 0.25 * vec2(sin(p.y * 1.7 + t * 0.6), sin(p.x * 1.5 - t * 0.5));\n"
+                "  vec2 i = floor(p), f = fract(p);\n"
+                "  float d1 = 8.0, d2 = 8.0;\n"
+                "  for (int y = -1; y <= 1; y++)\n"
+                "    for (int x = -1; x <= 1; x++) {\n"
+                "      vec2 g = vec2(x, y), c = i + g;\n"
+                "      vec2 h = fract(sin(vec2(dot(c, vec2(127.1, 311.7)), dot(c, vec2(269.5, 183.3)))) * 43758.5453);\n"
+                "      float d = length(g + 0.5 + 0.4 * sin(t * 0.8 + 6.2831 * h) - f);\n"
+                "      if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) d2 = d;\n"
+                "    }\n"
+                "  return pow(clamp(1.0 - (d2 - d1) * 2.5, 0.0, 1.0), 4.0);\n"
+                "}\n"
+                "float caustic(vec2 p, float t) { return 0.65 * caustic_layer(p * 1.8, t) + 0.35 * caustic_layer(p * 3.1 + 5.0, t * 1.2); }\n"
                 "void main() {\n"
                 "  vec2 uv = gl_FragCoord.xy / pc.sz.xy;\n"
                 "  float dn = depth_at(t0, uv), db = depth_at(t1, uv);\n"
@@ -873,28 +912,69 @@ static const char *builtin_src(const char *name, int *stage) {
                 // (Z-A's water is level: straight up - the depth's own slope left thin lines at its triangles' seams -
                 // tilted by gentle moving ripples, prm.w the time)
                 "  float tm = pc.prm.w;\n"
-                "  vec2 rp = vec2(sin(P.x * 7.3 + tm * 2.9) + 0.6 * sin(P.z * 11.7 - tm * 2.3),\n"
-                "                 cos(P.z * 6.1 + tm * 2.6) + 0.6 * cos(P.x * 12.1 + tm * 3.2));\n"
-                "  vec3 N = normalize(vec3(rp.x * 0.008, 1.0, rp.y * 0.008));\n"
+                "  vec2 rs = ripple_slope(P.xz, tm);\n"
+                "  vec3 N = normalize(vec3(-rs.x * 0.006, 1.0, -rs.y * 0.006));\n"
                 "  vec3 R = reflect(-V, N);\n"
                 "  float F = 0.05 + 0.95 * pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 5.0);\n"
                 "  float t = 0.1, found = 0.0, dz;\n"
-                "  vec2 hit = uv;\n"
-                "  for (int i = 0; i < 48; i++) {\n"
+                "  vec2 hit = uv, occ_q = uv;\n"
+                "  float n_after = 0.0, n_hidden = 0.0, run = 0.0;\n"  // (steps since it first went behind something; of them, hidden)
+                // the mirror image (prm.y bit 8; prj.w its plane - water at another level goes on below): a point of the
+                // plane shows at its own uv there. The ripples: the ray's point at the distance the mirror shows, mirrored
+                // and projected with the normal camera. Nothing drawn there: the screen's search, as without the mirror
+                "  bool mir = false;\n"
+                "  vec3 mcol = vec3(0.0);\n"
+                "  int fl0 = int(pc.prm.y + 0.5);\n"
+                "  if ((fl0 & 24) != 0 && abs(P.y - pc.prj.w) < 0.15) {\n"
+                "    float dist = -1.0;\n"  // (8: t5 the mirror's depth; 16, SSPR: t4's alpha the distance from the camera)
+                "    if ((fl0 & 8) != 0) { float dm = fetch_at(t5, uv).r; if (dm > 0.0) dist = length(wpos(uv, dm) - P); }\n"
+                "    else { float L = fetch_at(t4, uv).a; if (L > 0.0) dist = max(L - length(P - pc.cam.xyz), 0.0); }\n"
+                "    if (dist >= 0.0) {\n"
+                "      vec3 T = P + R * min(dist, 200.0);\n"
+                "      T.y = 2.0 * pc.prj.w - T.y;\n"
+                "      vec2 q = clamp(to_uv(vp, T, dz), vec2(0.0), vec2(1.0));\n"
+                // (SSPR's holes: all four texels filled, or the search - a filtered read would darken towards them)
+                "      if ((fl0 & 8) != 0 ? fetch_at(t5, q).r > 0.0 : all(greaterThan(textureGather(t4, q, 3), vec4(0.0)))) {\n"
+                "        mir = true;\n"
+                "        mcol = textureLod(t4, q, 0.0).rgb;\n"
+                "      }\n"
+                "    }\n"
+                "  }\n"
+                "  for (int i = 0; i < 48 && !mir; i++) {\n"
                 "    vec3 Q = P + R * t;\n"
                 "    vec2 q = to_uv(vp, Q, dz);\n"
                 "    if (any(lessThan(q, vec2(0.0))) || any(greaterThan(q, vec2(1.0))) || dz <= 0.0) break;\n"
                 "    float ds = depth_at(t1, q);\n"
+                "    if (n_after > 0.0 || ds > dz) n_after += 1.0;\n"
                 "    if (ds > dz) {\n"  // (the scene is in front of the ray here: it passed behind something)
                 "      vec3 S = wpos(q, ds);\n"
                 "      if (length(S - Q) < t * 0.2 + 0.25) { found = 1.0; hit = q; break; }\n"
-                // (something well in front of the ray - the player, a lamp post - only hides it on screen: on past it.
-                // Close behind it, the ray went into a wall: that ends it)
-                "      if (length(S - pc.cam.xyz) > 0.8 * length(Q - pc.cam.xyz)) break;\n"
-                "    }\n"
+                "      float ls = length(S - pc.cam.xyz), lq = length(Q - pc.cam.xyz);\n"
+                // (close behind it, the ray went into a wall: that ends it)
+                "      if (ls > 0.8 * lq) { if (n_hidden == 0.0) occ_q = q; n_hidden += 1.0; break; }\n"
+                // (something thin - the player, a lamp post - only hides the ray on screen: a metre to either side the
+                // ray isn't behind anything, so on past it, and it doesn't count as hidden. Otherwise a broad surface; only
+                // a little in front of the ray, step after step, it is a thick one - the face of a bridge over the ray
+                // inside its arch - and blocks it: coming out above it, the ray would pick up the lit buildings behind
+                // the bridge on screen)
+                "      vec3 side = normalize(cross(S - pc.cam.xyz, vec3(0.0, 1.0, 0.0)));\n"
+                "      float dzs;\n"
+                "      vec2 qa = to_uv(vp, S + side, dzs), qb = to_uv(vp, S - side, dzs);\n"
+                "      if (depth_at(t1, qa) <= dz || depth_at(t1, qb) <= dz) run = 0.0;\n"
+                "      else {\n"
+                "        if (n_hidden == 0.0) occ_q = q;\n"
+                "        n_hidden += 1.0;\n"
+                "        run = ls > 0.5 * lq ? run + 1.0 : 0.0;\n"
+                "        if (run >= 2.0) { n_hidden = n_after; break; }\n"
+                "      }\n"
+                "    } else run = 0.0;\n"
                 "    t *= 1.13;\n"
                 "  }\n"
-                "  if (found == 0.0) {\n"  // (nothing hit: the sky, where the far end of the ray is on screen and is sky)
+                // (a ray that stayed hidden to its end went under something the camera can't see - a bridge's arch,
+                // an awning: what it mirrors is that, in shade, not the cube, which was captured out in the open and
+                // at night shows the city's lights there. Mostly hidden: the occluder's colour, darkened)
+                "  float hidden = found == 0.0 && n_after > 0.0 ? smoothstep(0.5, 0.9, n_hidden / n_after) : 0.0;\n"
+                "  if (found == 0.0 && hidden < 0.5 && !mir) {\n"  // (nothing hit: the sky, where the far end of the ray is on screen and is sky)
                 "    vec2 q = to_uv(vp, P + R * 5000.0, dz);\n"
                 "    if (all(greaterThanEqual(q, vec2(0.0))) && all(lessThanEqual(q, vec2(1.0))) && depth_at(t1, q) <= 0.0) { found = 1.0; hit = q; }\n"
                 "  }\n"
@@ -904,9 +984,135 @@ static const char *builtin_src(const char *name, int *stage) {
                 // around it as bright spots that would show up where there is no lamp: capped at 3x its face's mean)
                 "  vec3 env = textureLod(t3, R, 0.0).rgb, avg = textureLod(t3, R, 16.0).rgb;\n"
                 "  env *= min(1.0, 3.0 * max(avg.r, max(avg.g, avg.b)) / max(max(env.r, max(env.g, env.b)), 1e-4));\n"
-                "  vec3 col = mix(env, textureLod(t2, hit, 0.0).rgb, edge);\n"
+                "  env = mix(env, textureLod(t2, occ_q, 0.0).rgb * 0.35, hidden);\n"
+                "  vec3 col = mir ? mcol : mix(env, textureLod(t2, hit, 0.0).rgb, edge);\n"
                 "  if (pc.prj.z != 0.0) { o = vec4(pc.prj.z > 1.5 ? env : col, 1.0); return; }\n"  // (2: the cube alone)
-                "  o = vec4(col, clamp(F * pc.prm.x, 0.0, 1.0));\n"
+                "  float a = clamp(F * pc.prm.x, 0.0, 1.0);\n"
+                "#ifdef WATER_DUAL\n"
+                "  int fl = int(pc.prm.y + 0.5);\n"
+                "  vec3 B = wpos(uv, db);\n"
+                "  float path = db > 0.0 ? length(B - P) : 30.0;\n"  // (through the water to its floor, metres)
+                "  vec3 Tr = vec3(1.0), add = vec3(0.0);\n"
+                "  vec3 sky = textureLod(t3, vec3(0.0, 1.0, 0.0), 16.0).rgb;\n"  // (the light from above: the cube's mean)
+                "  if ((fl & 1) != 0) {\n"  // (deep water keeps part of the game's own colour: the fade's floor)
+                "    Tr = mix(vec3(0.40, 0.50, 0.60), vec3(1.0), exp(-vec3(0.45, 0.12, 0.07) * pc.prj.x * path));\n"
+                "    add += (1.0 - Tr) * sky * vec3(0.02, 0.06, 0.10);\n"
+                "  }\n"
+                "  if ((fl & 2) != 0 && db > 0.0) {\n"  // (fading with depth, and none right at the shore)
+                "    float c = caustic(B.xz, tm) * exp(-0.6 * path) * smoothstep(0.03, 0.25, path);\n"
+                "    add += textureLod(t2, uv, 0.0).rgb * c * 0.8 * pc.prj.y * Tr;\n"
+                "  }\n"
+                "  if ((fl & 4) != 0) {\n"  // (vivid: less red through it - turquoise - and a faint glow of its own)
+                "    Tr *= vec3(0.88, 0.98, 1.0);\n"
+                "    add += sky * vec3(0.0, 0.035, 0.045) + vec3(0.0, 0.007, 0.009);\n"
+                "  }\n"
+                "  o = vec4(col * a + (1.0 - a) * add, 1.0);\n"
+                "  o1 = vec4((1.0 - a) * Tr, 1.0);\n"
+                "#else\n"
+                "  o = vec4(col, a);\n"
+                "#endif\n"
+                "}\n";
+            const char *dual_decl = dual ? "layout(location = 0, index = 1) out vec4 o1;\n#define WATER_DUAL 1\n" : "";
+            size_t n = strlen(gtao_common) + strlen(dual_decl) + strlen(body) + 1;
+            *src = malloc(n);
+            snprintf(*src, n, "%s%s%s", gtao_common, dual_decl, body);
+        }
+        return *src;
+    }
+    // ---- the planar reflection's depth for its lighting (exec.c planar_light): t0 the depth drawn with the clipping
+    // mirrored camera; each pixel back to the world (inv: that camera's inverse; ndc y up) and into the unclipped one
+    // (vpm) - the depth the game's own projection decodes. Nothing drawn (0) stays 0.
+    if (!strcmp(name, "planar_depth.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(push_constant) uniform P { mat4 inv; mat4 vpm; } pc;\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t0;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+               "  vec2 sz = vec2(textureSize(t0, 0));\n"
+               "  float d = texelFetch(t0, p, 0).r;\n"
+               "  if (d <= 0.0) { o = vec4(0.0); return; }\n"
+               "  vec2 uv = (vec2(p) + 0.5) / sz;\n"
+               "  vec4 w = pc.inv * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0);\n"
+               "  vec4 c = pc.vpm * vec4(w.xyz / w.w, 1.0);\n"
+               "  o = vec4(c.z / c.w, 0.0, 0.0, 1.0);\n"
+               "}\n";
+    }
+    // ---- SSPR (exec.c sspr_run): every pixel of the scene over the water's plane (t, the depth before the water), mirrored
+    // (M: its ndc and depth -> the mirror's clip space), writes where it came from at the half-size pixel it lands on. Of
+    // those that land together the largest value wins: row << 16 | column, the row counted from the picture's top, so
+    // the one lowest on the screen (o.z < 0: the image's rows as they are; else the row is o.z - row, it is upside down)
+    if (!strcmp(name, "sspr_project.comp")) {
+        *stage = STAGE_COMPUTE;
+        return "#version 450\n"
+               "layout(local_size_x = 8, local_size_y = 8) in;\n"
+               "layout(push_constant) uniform P { mat4 M; vec4 ry, rw, o; } pc;\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(set = 0, binding = 1, r32ui) uniform coherent uimage2D h;\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_GlobalInvocationID.xy), s = textureSize(t, 0), hs = imageSize(h);\n"
+               "  if (p.x >= s.x || p.y >= s.y) return;\n"
+               "  float d = texelFetch(t, p, 0).r;\n"
+               "  if (d <= 0.0) return;\n"  // (the sky: reversed depth)
+               "  vec2 uv = (vec2(p) + 0.5) / vec2(s);\n"
+               "  vec4 n = vec4(uv.x * 2.0 - 1.0, (uv.y * 2.0 - 1.0) * pc.o.x, d, 1.0);\n"
+               "  if (dot(pc.ry, n) / dot(pc.rw, n) <= pc.o.y + 0.02) return;\n"  // (under the plane: nothing it mirrors)
+               "  vec4 c = pc.M * n;\n"
+               "  if (c.w <= 0.0) return;\n"
+               "  vec2 q = vec2(c.x / c.w * 0.5 + 0.5, c.y / c.w * pc.o.x * 0.5 + 0.5);\n"
+               "  if (any(lessThan(q, vec2(0.0))) || any(greaterThanEqual(q, vec2(1.0)))) return;\n"
+               "  uint row = pc.o.z < 0.0 ? uint(p.y) : uint(pc.o.z) - uint(p.y);\n"
+               "  imageAtomicMax(h, ivec2(q * vec2(hs)), row << 16 | uint(p.x));\n"
+               "}\n";
+    }
+    // t0 the hash, t1 the lit image, t2 the depth before the water; alpha: how far the mirrored point is from the camera,
+    // 0 for none. prj.x: as o.z above, prj.w the plane
+    if (!strcmp(name, "sspr_resolve.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(push_constant) uniform P { vec4 m0, m1, m2, m3, cam, prm, sz, prj; } pc;\n"
+               "layout(set = 0, binding = 0) uniform usampler2D t0;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D t1;\n"
+               "layout(set = 0, binding = 2) uniform sampler2D t2;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy), s = textureSize(t0, 0);\n"
+               "  uint v = texelFetch(t0, p, 0).r;\n"
+               "  if (v == 0u) {\n"  // (a crack: from the neighbours)
+               "    const ivec2 a[4] = ivec2[](ivec2(0, 1), ivec2(0, -1), ivec2(1, 0), ivec2(-1, 0));\n"
+               "    for (int i = 0; i < 4; i++) v = max(v, texelFetch(t0, clamp(p + a[i], ivec2(0), s - 1), 0).r);\n"
+               "  }\n"
+               "  if (v == 0u) { o = vec4(0.0); return; }\n"
+               "  ivec2 q = ivec2(int(v & 0xFFFFu), pc.prj.x < 0.0 ? int(v >> 16) : int(pc.prj.x) - int(v >> 16));\n"
+               "  vec2 uv = (vec2(q) + 0.5) / pc.sz.zw;\n"
+               "  vec4 w = (uv.x * 2.0 - 1.0) * pc.m0 + (uv.y * 2.0 - 1.0) * pc.prm.z * pc.m1 + texelFetch(t2, q, 0).r * pc.m2 + pc.m3;\n"
+               "  vec3 W = w.xyz / w.w;\n"
+               "  W.y = 2.0 * pc.prj.w - W.y;\n"
+               "  o = vec4(texelFetch(t1, q, 0).rgb, length(W - pc.cam.xyz));\n"
+               "}\n";
+    }
+    // ---- the water's height for the planar reflections (exec.c planar_level_probe), into a 1 x 1 image: t0 the depth
+    // now, t1 the depth before the water; over a 48 x 27 grid of the picture, where the water drew, the mean world
+    // height of the commonest level (a fountain and a river below it are two: their mean would be neither), by metre
+    // (.x), and how many (.y)
+    if (!strcmp(name, "water_level.frag")) {
+        *stage = STAGE_FRAGMENT;
+        static char *src;
+        if (!src) {
+            static const char body[] =
+                "void main() {\n"
+                "  float sum[32], cnt[32];\n"
+                "  for (int k = 0; k < 32; k++) sum[k] = cnt[k] = 0.0;\n"
+                "  for (int j = 0; j < 27; j++)\n"
+                "    for (int i = 0; i < 48; i++) {\n"
+                "      vec2 uv = (vec2(i, j) + 0.5) / vec2(48.0, 27.0);\n"
+                "      float dn = depth_at(t0, uv), db = depth_at(t1, uv);\n"
+                "      if (dn > db + 1e-7) { float y = wpos(uv, dn).y; int k = int(mod(floor(y), 32.0)); sum[k] += y; cnt[k] += 1.0; }\n"
+                "    }\n"
+                "  int b = 0;\n"
+                "  for (int k = 1; k < 32; k++) if (cnt[k] > cnt[b]) b = k;\n"
+                "  o = vec4(cnt[b] > 0.0 ? sum[b] / cnt[b] : 0.0, cnt[b], 0.0, 1.0);\n"
                 "}\n";
             size_t n = strlen(gtao_common) + strlen(body) + 1;
             src = malloc(n);

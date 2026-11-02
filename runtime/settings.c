@@ -304,6 +304,10 @@ void settings_load(void) {
         else if (!strcmp(key, "indirect_light")) { int v = atoi(val); g_settings.ssgi = v < 0 ? 0 : v > 3 ? 3 : v; }
         else if (!strcmp(key, "indirect_light_strength")) { int v = atoi(val); g_settings.ssgi_strength = v < 50 ? 50 : v > 300 ? 300 : v; }
         else if (!strcmp(key, "water_reflections")) g_settings.water_ssr = atoi(val) != 0;
+        else if (!strcmp(key, "water_reflection_method")) { int v = atoi(val); g_settings.water_mode = v < 0 ? 0 : v > 2 ? 2 : v; }
+        else if (!strcmp(key, "water_depth")) g_settings.water_depth = atoi(val) != 0;
+        else if (!strcmp(key, "water_caustics")) g_settings.water_caustics = atoi(val) != 0;
+        else if (!strcmp(key, "water_vivid")) g_settings.water_vivid = atoi(val) != 0;
         else if (!strcmp(key, "tex_dump")) g_settings.tex_dump = atoi(val) != 0;
         else if (!strcmp(key, "resolution")) {  // (auto: never chosen, the GPU's default)
             int n = atoi(val);
@@ -434,6 +438,10 @@ void settings_save(void) {
     fprintf(f, "indirect_light = %d\n", g_settings.ssgi);
     fprintf(f, "indirect_light_strength = %d\n", g_settings.ssgi_strength);
     fprintf(f, "water_reflections = %d\n", g_settings.water_ssr);
+    fprintf(f, "water_reflection_method = %d\n", g_settings.water_mode);
+    fprintf(f, "water_depth = %d\n", g_settings.water_depth);
+    fprintf(f, "water_caustics = %d\n", g_settings.water_caustics);
+    fprintf(f, "water_vivid = %d\n", g_settings.water_vivid);
     fprintf(f, "tex_dump = %d\n", g_settings.tex_dump);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
                                    g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");

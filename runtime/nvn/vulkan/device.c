@@ -151,6 +151,9 @@ static bool ab_inst_ext, ab_on;  // (GPU address binding report: below, after g_
 static void ab_messenger_create(void);
 // LARECOMP_VK_VALIDATION=1: Khronos validation layer (MSYS2 package vulkan-validation-layers)
 // LARECOMP_VK_VALIDATION_STOP=1: require that layer and its callback, and exit nonzero on the first error.
+// LARECOMP_VK_GPUAV=1: that layer's GPU-assisted validation, for what only shows while shaders run: out-of-bounds reads
+// through buffer addresses, bad indirect arguments, unwritten descriptors. Its core checks are off (=2: on as well, much
+// slower): a run with _VALIDATION has them. A few fps. The layer must be found: VK_LAYER_PATH=C:\msys64\ucrt64\bin.
 static bool validating;  // the validation layer is on (validation_exit)
 static void create_instance(void) {
     Uint32 n_sdl = 0;
@@ -159,7 +162,8 @@ static void create_instance(void) {
     uint32_t n_ext = 0;
     for (Uint32 i = 0; i < n_sdl && n_ext < 14; i++) ext[n_ext++] = sdl_ext[i];
     bool strict = getenv("LARECOMP_VK_VALIDATION_STOP") != NULL;
-    bool validate = strict || getenv("LARECOMP_VK_VALIDATION") != NULL;
+    const char *gpuav = getenv("LARECOMP_VK_GPUAV");
+    bool validate = strict || getenv("LARECOMP_VK_VALIDATION") != NULL || gpuav;
     bool want_ab = !ENV("LARECOMP_VK_ADDR_REPORT") || atoi(ENV("LARECOMP_VK_ADDR_REPORT")) != 0;
     {   // the window's HDR colour spaces (HDR10, scRGB) for F1 > Video > HDR (create_swapchain), where the loader has them;
         // debug utils for the GPU address binding report (ab_*)
@@ -178,7 +182,13 @@ static void create_instance(void) {
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
                              .pEngineName = "LARecomp", .apiVersion = VK_API_VERSION_1_3};
-    VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
+    const VkBool32 set_on = VK_TRUE, set_off = VK_FALSE;
+    const VkLayerSettingEXT av_set[2] = {
+        {"VK_LAYER_KHRONOS_validation", "gpuav_enable", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &set_on},
+        {"VK_LAYER_KHRONOS_validation", "validate_core", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &set_off}};
+    const VkLayerSettingsCreateInfoEXT av_info = {.sType = VK_STRUCTURE_TYPE_LAYER_SETTINGS_CREATE_INFO_EXT,
+                                                  .settingCount = gpuav && atoi(gpuav) == 2 ? 1 : 2, .pSettings = av_set};
+    VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pNext = gpuav ? &av_info : NULL, .pApplicationInfo = &app,
                                .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext,
                                .enabledLayerCount = validate ? 1 : 0, .ppEnabledLayerNames = layers};
     VkResult r = vkCreateInstance(&ci, NULL, &g_vk.inst);
@@ -191,6 +201,7 @@ static void create_instance(void) {
         LOG("[vk] validation layer unavailable (%d); continuing without\n", r);
         ci.enabledLayerCount = 0;
         ci.enabledExtensionCount--;
+        ci.pNext = NULL;
         validate = false;
         r = vkCreateInstance(&ci, NULL, &g_vk.inst);
         ab_inst_ext = false;  // (debug utils went with the layer)

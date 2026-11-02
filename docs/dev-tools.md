@@ -115,6 +115,7 @@ python -I tools/devtools/analysis/cells.py tools/devtools/analysis build/fullcap
 | Variable | Effect |
 |---|---|
 | `LARECOMP_HIDDEN=1` | Runs with no window on screen, for scripted tests. |
+| `LARECOMP_VK_GPUAV=1` | GPU-assisted validation: errors that only show while shaders run. A few fps. Needs the layer (MSYS2 `vulkan-validation-layers`) and `VK_LAYER_PATH=C:\msys64\ucrt64\bin`. `=2` keeps the core checks on too. |
 | `LARECOMP_INPUT=<frame:BUTTON:frames,...>` | Scripted pad input. |
 | `LARECOMP_SHOT_AT=<frames>` | Saves the game image at those frames in `build/frames/`. |
 | `LARECOMP_SHADER_FLAT=0/1` | Straight-line shader form off / on. |

@@ -39,6 +39,9 @@ You need your own game files, already set up (`exefs/` + `romfs.bin`) and a comp
 Start `zadevtools.exe`, pick a profile and press **Start**. It starts the game for you, with its own save copy and
 `LARECOMP_DEVTOOLS=1`, and keeps what it received after the game closes or crashes. It reconnects by itself.
 
+The game plays copies of the profile's save and settings, in `testes/sessions/<time>/run/` under `work`. The profile's
+own files are only read, so every **Start** begins from them again: progress and F1 changes stay in that run's folder.
+
 To attach it to a game you started yourself, set `LARECOMP_DEVTOOLS=1` and press **F10** in the game. The game looks for
 `zadevtools.exe` next to its own exe, or at the path in `ZADEVTOOLS`. Without that variable F10 stays the screenshot key.
 

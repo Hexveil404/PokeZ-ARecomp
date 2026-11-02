@@ -11,5 +11,6 @@ lib = C:\za-dev\game\lasgame.dll
 # Optional: a library built by the start screen, as a player's ("DLL: release").
 release_lib =
 
-# One line per save: name | folder holding save_0 | settings file. The save is copied at each start.
+# One line per save: name | folder holding save_0 | settings file. Both are copied at each start and the game plays the
+# copies (testes\sessions\<time>\run under work): these files are only read, and each start begins from them again.
 profile = Test save | C:\za-dev\saves\test\save | C:\za-dev\saves\test\larecomp.ini

@@ -38,6 +38,10 @@ Você precisa dos seus próprios arquivos do jogo já preparados (`exefs/` + `ro
 
 ## ZA DevTools
 
+O jogo usa cópias do save e das configurações do perfil, em `testes/sessions/<hora>/run/` dentro de `work`. Os arquivos do
+próprio perfil são apenas lidos, então cada **Start** recomeça a partir deles: o progresso e as mudanças no F1 ficam na
+pasta daquela execução.
+
 Abra o `zadevtools.exe`, escolha um perfil e clique em **Start**. Ele inicia o jogo com uma cópia própria do save e com
 `LARECOMP_DEVTOOLS=1`, e guarda o que recebeu mesmo depois de o jogo fechar ou crashar. Ele reconecta sozinho.
 

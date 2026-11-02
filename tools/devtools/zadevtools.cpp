@@ -336,6 +336,12 @@ static void game_start() {
     run_hidden("mkdir \"" + g_session_dir + "\"");
     copy_dir(save, g_session_dir + "\\save");
     copy_file(ini, g_session_dir + "\\larecomp.ini");
+    // the game plays another copy (it writes its save and settings in place): session/save stays as it was at the start
+    // for the repro, and the profile's folder is never written - it may be someone's real save
+    std::string run = g_session_dir + "\\run";
+    run_hidden("mkdir \"" + run + "\"");
+    copy_dir(save, run + "\\save");
+    copy_file(ini, run + "\\larecomp.ini");
     std::string clock = std::to_string((long long)time(NULL));
     write_text(g_session_dir + "\\clock.txt", clock);
     write_text(g_session_dir + "\\gamelib.txt", lib);
@@ -345,7 +351,7 @@ static void game_start() {
     SetEnvironmentVariableA("LARECOMP_REPLAY", NULL);
     SetEnvironmentVariableA("LARECOMP_REPLAY_UNTIL", NULL);
     g_replaying.clear();
-    launch(save, ini, lib, g_session_dir + "\\play.log", p.name);
+    launch(run + "\\save", run + "\\larecomp.ini", lib, g_session_dir + "\\play.log", p.name);
 }
 
 static void load_repros() {

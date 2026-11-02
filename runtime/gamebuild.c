@@ -302,6 +302,7 @@ bool gamebuild_killed(void) { return g_killed; }
 typedef struct {
     char src[1100], obj[1100], tmp[1100], log[1100], stem[64], source_hash[65];
     unsigned long long bytes;
+    int tries;  // (a failed compile starts again: below, "compiles")
 } Unit;
 
 typedef struct {
@@ -315,6 +316,7 @@ static void add_unit(Units *us, const char *src, const char *work, const char *s
         us->u = (Unit *)realloc(us->u, sizeof *us->u * us->cap);
     }
     Unit *u = &us->u[us->n++];
+    u->tries = 0;
     snprintf(u->src, sizeof u->src, "%s", src);
     snprintf(u->obj, sizeof u->obj, "%s" SEP "%s.o", work, stem);
     snprintf(u->tmp, sizeof u->tmp, "%s" SEP "%s.o.tmp", work, stem);
@@ -403,6 +405,8 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     add(&a, u->src);
     add(&a, "-o");
     add(&a, u->tmp);
+    const char *tf = getenv("LARECOMP_TEST_COMPILE_FAIL");  // (=<stem>: its first try fails, a test of the tries)
+    if (tf && !strcmp(tf, u->stem) && !u->tries) add(&a, "--larecomp-test-fail");
     PlatProc p = spawn(a.v, u->log);
     args_free(&a);
     return p;
@@ -581,11 +585,24 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             if (r < 0) continue;
             Unit *u = &units.u[run[k].unit];
             if (r != 0 && g_quitting) { ok = false; break; }  // (quitting mid-build ended the compilers: not a failure)
+            // (the generated C compiles everywhere, so a failure is the compiler dying: on #116 clang crashed on main_569 in
+            // one build and main_016 in the next, 12 jobs on 16 GB. Each file gets two more tries, with half the jobs: a
+            // crash here cost a player the whole build. A real error costs a few seconds and still ends as one)
+            if (r != 0 && u->tries < 2) {
+                char last[300];
+                log_tail(u->log, last, sizeof last);
+                u->tries++;
+                if (jobs > 1) jobs /= 2;
+                LOG("[gamebuild] compiling %s stopped (exit status %d: %s): trying it again, %d jobs\n", u->stem, r, last, jobs);
+                PlatProc p = start_compile(&t, u);
+                if (p) { run[k].p = p; continue; }
+            }
             if (r != 0) {
                 char what[1200];
                 snprintf(what, sizeof what, "compiling %s", u->src);
                 snprintf(why, why_size, "the game code didn't compile");
                 helper_failed(what, r, u->log, why, why_size);
+                log_dump_tail(u->log);
                 ok = false;
             } else if (!build_cache_save_object(cache, u->stem, u->src, u->source_hash, why, why_size)) {
                 ok = false;

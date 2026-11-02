@@ -944,6 +944,7 @@ static void create_device(void) {
 #endif
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
+    b->drawIndirectFirstInstance = h->drawIndirectFirstInstance;  // (the game's GPU-culled draws start past instance 0: GPU-AV)
     b->dualSrcBlend = h->dualSrcBlend;
     b->fillModeNonSolid = h->fillModeNonSolid;
     b->samplerAnisotropy = h->samplerAnisotropy;

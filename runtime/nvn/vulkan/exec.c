@@ -5393,6 +5393,11 @@ static void xm_copy_back(VkCommandBuffer cb) {
     xm_back_n = 0;
 }
 
+// The storage slots whose address the dispatch's shader reads (si->ssbo_read; dispatch_compute): only those are
+// copied in and back. Every bound slot was before, other dispatches' bindings too: in Lumiose three crowd dispatches
+// (which read no slot address at all) each copied ~6 MB both ways (~0.9 ms of GPU each, 2.5 ms a frame). Addresses
+// outside the copied ranges read and write the heap, as they always could. LARECOMP_GFAST_ALL=1: every bound slot.
+static uint32_t gfast_mask = 0xFFFF;
 static void gfast_prepare(VkCommandBuffer cb) {
     static int on = -1;
     // (on an integrated GPU the heap import is not across PCIe: the copy and the table search only cost, 234 -> 97 ms on a Steam Deck)
@@ -5405,6 +5410,7 @@ static void gfast_prepare(VkCommandBuffer cb) {
     struct { uint64_t lo, hi; } r[16];
     int n = 0;
     for (int i = 0; i < 16; i++) {  // window offsets of the bound storage buffers, 256-aligned
+        if (!((gfast_mask >> i) & 1)) continue;
         uint64_t a = sbufs(5)[i].addr, sz = sbufs(5)[i].size;  // (overlap: a snapshotted range's copy is what gets copied)
         if (!a || !sz || a < gwin_base || !gmem_covers(a - gwin_base, sz)) continue;
         uint64_t lo = (a - gwin_base) & ~255ull, hi = (a - gwin_base + sz + 255) & ~255ull, top = gc_lazy ? gmem_heap_size() : gmem_size;
@@ -5451,6 +5457,7 @@ static void gfast_prepare(VkCommandBuffer cb) {
     gfast_n = m;
     gfast_back_n = 0;
     for (int i = 0; i < 16; i++) {  // each bound buffer's exact bytes, from wherever its merged range sits
+        if (!((gfast_mask >> i) & 1)) continue;
         uint64_t a = st.sbuf[5][i].addr, sz = st.sbuf[5][i].size;
         if (!a || !sz || a < gwin_base || a - gwin_base + sz > gmem_size) continue;
         uint64_t h = a - gwin_base;
@@ -5521,6 +5528,12 @@ static uint32_t vc_pend[VC_TAB];  // entries the pending submission draws from (
 static int vc_npend;
 static uint32_t *vc_page_gen;  // per heap page: the generation of its last CPU write seen (vc_gen when observed)
 static uint32_t *vc_page_gpu;  // per heap page: the frame the GPU last wrote it (+1; 0: never)
+// per heap page: which of its 64-byte lines the GPU wrote while its mark lasts (vc_page_gpu). The game packs the
+// characters' transform feedback output and storage next to other meshes: after walking away from an area and back,
+// the meshes drawn there shared pages with it, and whole bindings were read across PCIe for a few written lines
+// (Lumiose: up to ~10 GB per 2 s, 7.6% of their pages GPU-written; ~54 fps where a fresh load ran 60). A binding
+// is read in place only when its own bytes meet written lines. LARECOMP_VC_PAGES=1: any written page, as before.
+static uint64_t *vc_page_lines;
 // A page the GPU hasn't written for this many frames is cached again (copied whole first): the game reuses its
 // memory, and pages a compute dispatch or transform feedback wrote once stayed read in place for the rest of the
 // session - the vertices read across PCIe grew to ~10 GB per 2 s after half an hour (GPU time +25%, 60 fps lost)
@@ -5566,6 +5579,7 @@ static bool pt_init(void) {
     if (!pt_state) { LOG("[vk] no page write tracking (%d, page %llu)\n", n, (unsigned long long)pg); return false; }
     vc_page_gen = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_gen);
     vc_page_gpu = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_gpu);
+    vc_page_lines = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_lines);
     vc_page_gen[0] = ++vc_gen;  // (the probe took page 0's tracking)
     return true;
 }
@@ -5635,11 +5649,28 @@ int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now
 // The storage write watch (watch_check): CPU writes only; the GPU's own writes to the range (DMA) don't count
 static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) { return pages_written(addr, size, since, now, false); }
 
-// Heap pages [lo, hi) (offsets) written by the GPU: never cached from now on.
+// The 64-byte lines of heap page p that [lo, hi) (offsets) covers
+static uint64_t vc_line_mask(uint64_t p, uint64_t lo, uint64_t hi) {
+    uint64_t ps = p * VC_PAGE, a = lo > ps ? lo - ps : 0, b = hi < ps + VC_PAGE ? hi - ps : VC_PAGE;
+    if (b <= a) return 0;
+    unsigned f = (unsigned)(a / 64), l = (unsigned)((b - 1) / 64);
+    return (l == 63 ? ~0ull : (1ull << (l + 1)) - 1) & ~((1ull << f) - 1);
+}
+// Whether the GPU wrote (within its mark) any of the bytes [lo, hi) (offsets)
+static bool vc_range_gpu(uint64_t lo, uint64_t hi, uint32_t now) {
+    for (uint64_t p = lo / VC_PAGE; p < (hi + VC_PAGE - 1) / VC_PAGE; p++)
+        if (vc_page_gpu[p] && now < vc_page_gpu[p] + VC_GPU_HOLD && (vc_page_lines[p] & vc_line_mask(p, lo, hi))) return true;
+    return false;
+}
+// Heap bytes [lo, hi) (offsets) written by the GPU: not served from the cache while their mark lasts
 static void vc_mark_gpu(uint64_t lo, uint64_t hi) {
     if (!pt_init()) return;
     uint32_t now = (uint32_t)vk_frame_counter() + 1;
-    for (uint64_t p = lo / VC_PAGE; p < (hi + VC_PAGE - 1) / VC_PAGE && p < gwin_max / VC_PAGE; p++) vc_page_gpu[p] = now;
+    for (uint64_t p = lo / VC_PAGE; p < (hi + VC_PAGE - 1) / VC_PAGE && p < gwin_max / VC_PAGE; p++) {
+        if (!vc_page_gpu[p] || now >= vc_page_gpu[p] + VC_GPU_HOLD) vc_page_lines[p] = 0;  // (a lapsed mark starts again)
+        vc_page_lines[p] |= vc_line_mask(p, lo, hi);
+        vc_page_gpu[p] = now;
+    }
     vc_epoch++;
 }
 
@@ -5710,7 +5741,10 @@ static bool vcache_lookup(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceS
         e->epoch = vc_epoch;
         if (was && !e->gpu) { e->gen = 0; vc_gpu_expired = true; }  // (the GPU's writes aren't tracked: copied whole)
     }
-    if (e->gpu) { prof_vc_bypass++; return false; }
+    // (e->gpu: some page of the entry is GPU-written; this binding is read in place only if its own bytes are)
+    static int coarse = -1;
+    if (coarse < 0) coarse = getenv("LARECOMP_VC_PAGES") != NULL;
+    if (e->gpu && (coarse || vc_range_gpu(addr - gwin_base, addr - gwin_base + size, now))) { prof_vc_bypass++; return false; }
     if (e->used_seq != pend) {  // first use in this submission: brought up to date by vc_flush before it runs
         e->used_seq = pend;
         vc_pend[vc_npend++] = (uint32_t)(e - vc_tab);
@@ -6634,6 +6668,11 @@ static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz) {
         }
     }
     gfast_stores = cp->si->uses_gmem_store;
+    {
+        static int all = -1;
+        if (all < 0) all = getenv("LARECOMP_GFAST_ALL") != NULL;
+        gfast_mask = all ? 0xFFFF : cp->si->ssbo_read;
+    }
     if (cp->si->uses_gmem_map) gfast_prepare(cb);
     VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL, NULL, NULL);
     rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);

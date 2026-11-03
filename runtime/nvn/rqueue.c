@@ -204,6 +204,9 @@ static void wait_until(pthread_cond_t *cv, bool (*ready)(uint64_t), uint64_t arg
 static bool has_room(uint64_t a) { (void)a; return q_enq - q_done < RQ_CAP; }
 static bool no_present(uint64_t a) { (void)a; return presents_pending == 0; }
 static bool all_done(uint64_t a) { (void)a; return q_done == q_enq; }
+// (a present waits for both at once: room checked before the wait for the previous present went stale while the lock
+// was released - other threads filled the queue, and the present was written over an item not yet run)
+static bool present_ready(uint64_t a) { return has_room(a) && no_present(a); }
 // (each waiter its own item: with one shared target, a waiter for a later item let one for an earlier item go on
 // before its list was translated, and the other way round)
 static bool item_done(uint64_t q) { return q_done >= q; }
@@ -235,7 +238,8 @@ static uint64_t enqueue(const Item *it, const uint64_t *fences, int nfences) {
     if (!has_room(0)) { if (!t0) t0 = plat_now_ns(); wait_until(&cv_done, has_room, 0, false, "queue full"); }
     if (it->kind == IT_PRESENT) {
         if (!t0) t0 = plat_now_ns();
-        wait_until(&cv_done, no_present, 0, true, "present (the previous one to finish)");
+        wait_until(&cv_done, present_ready, 0, true, "present (the previous one to finish)");
+        if (!has_room(0)) wait_until(&cv_done, has_room, 0, false, "queue full");  // (only after an unwind's early exit)
         presents_pending++;
         last_present_q = q_enq + 1;
     }

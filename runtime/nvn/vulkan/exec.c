@@ -9355,12 +9355,22 @@ static void gtao_before_lighting(Prog *pr) {
         }
     }
     if (!gtao_on()) { gtao.ao = VK_NULL_HANDLE; return; }
+    // the G-buffer's normals for gtao.frag (cam.w 1): the lighting's first RGBA8 texture at the depth's size, after
+    // its two depth reads. LARECOMP_GTAO_GBUF_NORMALS=0: the normals from the depth, as before
+    VkImageView nv = VK_NULL_HANDLE;
+    if (gtao_env("LARECOMP_GTAO_GBUF_NORMALS", 1) != 0)
+        for (int i = 2; i < pr->fi->ntex && !nv; i++) {
+            NvnTexEntry *e = gtao_tex_entry(pr->fi, i);
+            if (e && e->tex->format == 0x25 && e->tex->width == de->tex->width && e->tex->height == de->tex->height)
+                nv = vk_view(e->tex, &e->view, e->has_view, false, pr->fi->tex[i].type);
+        }
+    pc[19] = nv ? 1.0f : 0.0f;
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     TexBackend *raw = post_image(7, aw, ah), *filt = post_image(8, aw, ah);
     post_pc_big = pc;
-    VkImageView in[2] = {dv, dv};
-    post_pass(cb, "gtao.frag", in, 1, raw, NULL, false);
+    VkImageView in[2] = {dv, nv ? nv : dv};
+    post_pass(cb, "gtao.frag", in, 2, raw, NULL, false);
     VkImageView bin[2] = {post_view(raw), dv};
     post_pass(cb, "gtao_blur.frag", bin, 2, filt, NULL, false);
     post_pc_big = NULL;

@@ -593,6 +593,17 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  vec3 dx = length(Pr - P) < length(P - Pl) ? Pr - P : P - Pl;\n"
                 "  vec3 dy = length(Pd - P) < length(P - Pu) ? Pd - P : P - Pu;\n"
                 "  vec3 N = normalize(cross(dy, dx));\n"
+                // cam.w 1: t1 is the G-buffer's normals - the game's own, smooth across a character's polygons (the
+                // depth's are flat per polygon: on faces and bodies close up the AO changed at each polygon's edge, in
+                // stripes). World space, octahedral, 12 bits each: x = R * 16 + G's high nibble, y = G's low nibble *
+                // 256 + B (as the lighting shader decodes them)
+                "  if (pc.cam.w == 1.0) {\n"
+                "    uvec3 g = uvec3(texelFetch(t1, clamp(ivec2(uv * pc.sz.zw), ivec2(0), ivec2(pc.sz.zw) - 1), 0).rgb * 255.0 + 0.5);\n"
+                "    vec2 e = vec2(float(g.r * 16u + (g.g >> 4)), float((g.g & 15u) * 256u + g.b)) / 4095.0 * 2.0 - 1.0;\n"
+                "    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));\n"
+                "    if (n.z < 0.0) n.xy = (1.0 - abs(e.yx)) * vec2(e.x >= 0.0 ? 1.0 : -1.0, e.y >= 0.0 ? 1.0 : -1.0);\n"
+                "    if (dot(n, n) > 1e-6) { n = normalize(n); if (dot(n, V) > 0.0) N = n; }\n"  // (facing away: keep the depth's)
+                "  }\n"
                 "  if (dot(N, V) < 0.0) N = -N;\n"
                 "  if (pc.prj.z == 2.0) { o = vec4(N * 0.5 + 0.5, 1.0); return; }\n"  // (debug: the normals)
                 "  if (pc.prj.z == 3.0) { o = vec4(vec3(fract(dist / 5.0)), 1.0); return; }\n"  // (debug: 5 m bands)

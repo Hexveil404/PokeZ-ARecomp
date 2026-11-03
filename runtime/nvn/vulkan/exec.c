@@ -3684,15 +3684,16 @@ static void resolve_feedback(Prog *pr) {
             TexBackend *dst = snapshot_image(t, src);
             VkCommandBuffer cb = vk_cmd();
             vk_full_barrier(cb);
-            // The area copied: the whole texture, or (LARECOMP_SNAP_REGION=1) only as far as the game has drawn into it.
+            // The area copied: only as far as the game has drawn into it (LARECOMP_SNAP_REGION=0: the whole texture).
             // Pokémon Z-A in handheld mode draws 1280x720 into targets made 1920x1080 (its docked size): a depth +
             // stencil snapshot of the whole target took 7 ms of a 16 ms frame on the Steam Deck (RADV, [gpuprof]).
             // The extent is the largest viewport / scissor seen at this texture's snapshots (it only grows, so a later
-            // bigger draw is still covered; a new size resets it). LARECOMP_LOG_SNAP=1: each snapshot's area, logged.
+            // bigger draw is still covered; a new size resets it). Steam Deck, the city at night, standing still: 47.1 ->
+            // 50.7 fps, 1% low 36.7 -> 41.1 (b97, 2026-11-02). LARECOMP_LOG_SNAP=1: each snapshot's area, logged.
             uint32_t cw = src->width, ch = src->height;
             {
                 static int region = -1, lg = -1;
-                if (region < 0) region = ENV("LARECOMP_SNAP_REGION") && atoi(ENV("LARECOMP_SNAP_REGION")) != 0;
+                if (region < 0) region = !ENV("LARECOMP_SNAP_REGION") || atoi(ENV("LARECOMP_SNAP_REGION")) != 0;
                 if (lg < 0) lg = ENV("LARECOMP_LOG_SNAP") != NULL;
                 const float *v = st.viewport[0];
                 float vx1 = v[0] + v[2], vy1 = v[3] < 0 ? v[1] : v[1] + v[3];

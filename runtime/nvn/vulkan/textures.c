@@ -1048,8 +1048,12 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     // nothing. LARECOMP_TEX_RECHECK=<frames>: another interval)
     static long recheck = -1;
     if (recheck < 0) recheck = ENV("LARECOMP_TEX_RECHECK") ? atol(ENV("LARECOMP_TEX_RECHECK")) : 600;
-    bool periodic = frame - b->full_frame >= (uint64_t)recheck && full_hash_budget >= total;
-    if (!full && periodic) { full = true; full_hash_budget -= total; }
+    // (a texture bigger than the 4 MB budget gets it whole when it is the frame's first: before, it could never have
+    // its safety-net hash. The budget saturates at 0 - a wrap made it unlimited for the rest of the frame)
+#define TEX_BUDGET_TAKE(n) (full_hash_budget = full_hash_budget > (n) ? full_hash_budget - (n) : 0)
+    bool budget_ok = full_hash_budget >= total || full_hash_budget == (4u << 20);
+    bool periodic = frame - b->full_frame >= (uint64_t)recheck && budget_ok;
+    if (!full && periodic) { full = true; TEX_BUDGET_TAKE(total); }
     bool identified_now = !b->tp;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
     if (identified_now) b->tp = texpatch_marker(t);
     bool restyle = b->tp > 0 && b->tp <= TEXPATCH_RECOLOUR_BASE && b->uploaded && b->tp_gen != texpatch_generation();
@@ -1065,12 +1069,17 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
         int ch = vk_pages_changed(t->addr, total, b->wgen, &now);
         if (ch > 0) prof_tex_watch_written++;
         else if (ch < 0) prof_tex_watch_unknown++, prof_tex_watch_gpu += ch == -2;
-        if (ch >= 0) {
+        if (ch > 0 && !full && b->uploaded) {
+            // Written since the last check: the sparse sample (8 bytes in 2048) can miss the change, and the generation
+            // would be used up - the texture stale for good. A full hash when the budget allows, else the write is kept
+            // for the next check (its generation not taken) and only the sample is compared now.
+            if (full_hash_budget >= total || full_hash_budget == (4u << 20)) { full = true; TEX_BUDGET_TAKE(total); b->wgen = now; }
+        } else if (ch >= 0) {
             b->wgen = now;
             if (!ch && b->uploaded && !restyle) {
                 if (!periodic) { prof_tex_watch_skips++; return; }
                 tracked_clean = true;
-                if (b->dynamic) full_hash_budget -= total;  // (the others took theirs above)
+                if (b->dynamic) TEX_BUDGET_TAKE(total);  // (the others took theirs above)
             }
         }
     }
@@ -1178,6 +1187,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
         }
     }
 }
+#undef TEX_BUDGET_TAKE
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render) {
     TexBackend *b = tex_backend(t);

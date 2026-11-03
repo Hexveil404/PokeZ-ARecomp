@@ -9226,6 +9226,7 @@ static void post_pass_ex(VkCommandBuffer cb, const char *fs, const VkImageView *
     VkPipeline pipe = post_pipeline_kind(fs, kind, sten ? sten->format : VK_FORMAT_UNDEFINED,
                                          dst->format == VK_FORMAT_R8G8B8A8_UNORM ? VK_FORMAT_UNDEFINED : dst->format);
     vk_full_barrier(cb);
+    if (g_gpuprof_frame) gp_mark(cb, "post %s %ux%u of %ux%u", fs, aw, ah, dst->width, dst->height);
     VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = post_view(dst),
                                     .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
                                     .loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : kind >= 3 ? VK_ATTACHMENT_LOAD_OP_LOAD
@@ -9278,7 +9279,9 @@ static void post_pass_ex(VkCommandBuffer cb, const char *fs, const VkImageView *
 // Ambient occlusion). Test switches: LARECOMP_GTAO=<0-3> (the level), _RADIUS (metres, 1.5), _INTENSITY (the factor,
 // 0.85 at 100%), _FLIPY (ndc y sign, -1), _FROM=<frame> (on from that frame: A/B in one run), _DEBUG (1 the AO alone,
 // 2 the normals, 3 distance bands).
-static struct { bool pending; NvnTexture *target; VkImageView ao, depth; uint64_t frame; float pc[32]; } gtao;
+// (fx / fy: the part of the depth the lighting draws - its viewport -, as fractions of it: GTAO's passes shade only that,
+// gtao_region)
+static struct { bool pending; NvnTexture *target; VkImageView ao, depth; uint64_t frame; float pc[32], fx, fy; } gtao;
 
 static float gtao_env(const char *name, float def) {
     const char *v = getenv(name);  // (not ENV(): its cache is per call site, and this one serves several names)
@@ -9390,21 +9393,38 @@ static void gtao_before_lighting(Prog *pr) {
                 if (v) water_probe = v, best = e->tex->width;            }
         }
     }
+    // The lighting draw's viewport: the part of the depth the frame has. Z-A draws 1280x720 into its 1920x1080 targets
+    // in handheld mode, and GTAO over the whole depth shaded 2.25x the pixels (Steam Deck, Lumiose: ~2.6 ms for the AO
+    // and its filter, the apply after the lighting more). The passes keep the whole image's size and uv (the world
+    // positions come out the same); only their scissor stops there, with a margin for the filter's and the upsample's
+    // taps. LARECOMP_GTAO_REGION=0 shades the whole image
+    static int region = -1;
+    if (region < 0) region = !ENV("LARECOMP_GTAO_REGION") || atoi(ENV("LARECOMP_GTAO_REGION")) != 0;
+    gtao.fx = gtao.fy = 1;
+    const float *vp = st.viewport[0];
+    if (region && vp[0] >= 0 && vp[1] >= 0 && vp[2] > 0 && vp[3] > 0 && de->tex->width && de->tex->height) {
+        gtao.fx = fminf(1, (vp[0] + vp[2]) / (float)de->tex->width);
+        gtao.fy = fminf(1, (vp[1] + vp[3]) / (float)de->tex->height);
+    }
     if (!gtao_on()) { gtao.ao = VK_NULL_HANDLE; return; }
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     TexBackend *raw = post_image(7, aw, ah), *filt = post_image(8, aw, ah);
     post_pc_big = pc;
     VkImageView in[2] = {dv, dv};
+    // (margins: the filter reads 2 texels around, the upsample 1 - raw covers both)
+    if (gtao.fx < 1 || gtao.fy < 1) post_area_w = (uint32_t)ceilf(aw * gtao.fx) + 4, post_area_h = (uint32_t)ceilf(ah * gtao.fy) + 4;
     post_pass(cb, "gtao.frag", in, 1, raw, NULL, false);
     VkImageView bin[2] = {post_view(raw), dv};
+    if (gtao.fx < 1 || gtao.fy < 1) post_area_w -= 2, post_area_h -= 2;
     post_pass(cb, "gtao_blur.frag", bin, 2, filt, NULL, false);
+    post_area_w = post_area_h = 0;
     post_pc_big = NULL;
     gtao.ao = pc[30] >= 2 ? post_view(raw) : post_view(filt);  // (debug views 2 / 3: unfiltered)
     gtao.depth = dv;
     static int nlog;
-    if (nlog++ < 2) LOG("[gtao] on: depth %ux%u, AO %ux%u, radius %.2f m, camera (%.1f, %.1f, %.1f)\n", db->width, db->height, aw, ah,
-                        pc[20], pc[16], pc[17], pc[18]);
+    if (nlog++ < 2) LOG("[gtao] on: depth %ux%u, AO %ux%u (shaded %.0f%% x %.0f%%), radius %.2f m, camera (%.1f, %.1f, %.1f)\n", db->width,
+                        db->height, aw, ah, gtao.fx * 100, gtao.fy * 100, pc[20], pc[16], pc[17], pc[18]);
 }
 
 // The lighting pass has begun drawing into target: its contents are multiplied when it ends
@@ -9427,7 +9447,10 @@ static void gtao_apply_pending(void) {
         VkCommandBuffer cb = vk_cmd();
         post_pc_big = pc;
         VkImageView ain[2] = {gtao.ao, gtao.depth};
+        if (gtao.fx < 1 || gtao.fy < 1)  // (gtao_before_lighting: only the part the frame has - the rest is never shown)
+            post_area_w = (uint32_t)ceilf(tb->width * gtao.fx) + 2, post_area_h = (uint32_t)ceilf(tb->height * gtao.fy) + 2;
         post_pass_ex(cb, "gtao_apply.frag", ain, 2, tb, NULL, false, NULL, pc[30] != 0 ? 0 : 3);
+        post_area_w = post_area_h = 0;
         post_pc_big = NULL;
     }
     if (ssgi_on() && ssgi.albedo) ssgi_apply(tb);
@@ -9453,12 +9476,19 @@ static void ssgi_apply(TexBackend *tb) {
     TexBackend *raw = post_image_f(9, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT), *filt = post_image_f(10, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT);
     post_pc_big = pc;
     VkImageView in[2] = {gtao.depth, lit};
+    // (gtao_before_lighting's region - the lighting's viewport - as GTAO's passes, with the same margins: the filter
+    // reads 2 texels around, the upsample 1. Steam Deck handheld, Lumiose: ~6 ms over the whole image)
+    bool part = gtao.fx < 1 || gtao.fy < 1;
+    if (part) post_area_w = (uint32_t)ceilf(hw * gtao.fx) + 4, post_area_h = (uint32_t)ceilf(hh * gtao.fy) + 4;
     post_pass(cb, "ssgi.frag", in, 2, raw, NULL, false);
     VkImageView bin[2] = {post_view(raw), gtao.depth};
+    if (part) post_area_w -= 2, post_area_h -= 2;
     post_pass(cb, "ssgi_blur.frag", bin, 2, filt, NULL, false);
     pc[26] = (float)tb->width, pc[27] = (float)tb->height;
     VkImageView ain[3] = {post_view(filt), gtao.depth, ssgi.albedo};
+    if (part) post_area_w = (uint32_t)ceilf(tb->width * gtao.fx) + 2, post_area_h = (uint32_t)ceilf(tb->height * gtao.fy) + 2;
     post_pass_ex(cb, "ssgi_apply.frag", ain, 3, tb, NULL, false, NULL, pc[30] != 0 ? 0 : 4);
+    post_area_w = post_area_h = 0;
     post_pc_big = NULL;
     static int nlog;
     if (nlog++ < 2) LOG("[ssgi] on: %ux%u (bounce light %ux%u), reach %.1f m, strength %.2f\n", w, h, hw, hh, pc[20], pc[21]);

@@ -33,6 +33,9 @@ bool maxwell_gmem_lazy;
 bool maxwell_flat_default = true;
 bool maxwell_quad_ops;  // (vk_exec_init: the device has quad subgroup operations in fragment shaders)
 bool maxwell_quad_deriv_default;  // (vk_exec_init: AMD; quad_deriv)
+// (vulkan/device.c: the device has shaderOutputLayer. Without it - Dozen, DirectX 12 underneath - a vertex shader's
+// render target layer is written to a local and dropped: the draw goes to layer 0 instead of its pipeline failing)
+bool maxwell_output_layer = true;
 bool maxwell_gmem_fs_miss;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
@@ -2224,7 +2227,7 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
             snprintf(mem, sizeof mem, "%.*s", (int)(me - m), m);
             if (!strcmp(mem, "pos")) sp(o, c->stage == STAGE_FRAGMENT ? "gl_FragCoord" : "gl_Position");
             else if (!strcmp(mem, "psize")) sp(o, "gl_PointSize");
-            else if (!strcmp(mem, "layer")) sp(o, "gl_Layer");
+            else if (!strcmp(mem, "layer")) sp(o, maxwell_output_layer || c->stage != STAGE_VERTEX ? "gl_Layer" : "layer_dropped_");
             else sp(o, "%s", mem);  // a<i> (vertex input), v<i> (varying)
             p = me;
             continue;
@@ -2783,7 +2786,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         for (int i = 0; i < 32; i++)
             if (c->out_attr_mask & (1u << i)) sp(&s, "  v%d = vec4(0, 0, 0, 1);\n", i);
         if (info->writes_point_size) sp(&s, "  gl_PointSize = 0.0f;\n");
-        if (info->writes_layer) sp(&s, "  gl_Layer = 0;\n");
+        if (info->writes_layer) sp(&s, maxwell_output_layer ? "  gl_Layer = 0;\n" : "  int layer_dropped_ = 0;\n");
     }
     for (int i = 0; i < 256; i++)
         if (c->reg_used[i]) sp(&s, "  uint r%d = 0u;\n", i);
@@ -3261,7 +3264,7 @@ static uint64_t cache_key(const uint8_t *blob, size_t max_size, int stage, const
         if ((((const uint64_t *)code)[i] & 0xfff0000000000000ull) == 0xe250000000000000ull) return 0;  // BRX
     // (the straight-line switch is in the key: on and off translations of one shader differ, and a GPU that changes
     // the default - AMD - or a player's LARECOMP_SHADER_FLAT must not load the other form)
-    uint64_t v[6] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size, (uint64_t)maxwell_flat_on(), (uint64_t)quad_on() + 2 + 16 * (uint64_t)quad_deriv()};
+    uint64_t v[6] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size, (uint64_t)maxwell_flat_on(), (uint64_t)quad_on() + 2 + 16 * (uint64_t)quad_deriv() + 64 * (uint64_t)!maxwell_output_layer};
     uint64_t h = fnv(fnv(fnv(0xcbf29ce484222325ull, cache_build, sizeof cache_build), v, sizeof v), key, sizeof *key);
     h = fnv(h, blob, (size_t)(code - blob) + end * 8);
     return h ? h : 1;

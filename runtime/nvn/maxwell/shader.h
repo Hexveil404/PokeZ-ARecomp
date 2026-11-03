@@ -128,6 +128,7 @@ extern bool maxwell_quad_ops;
 // The fragment shaders' own derivatives (SHFL xor 1 / 2 into FSWZADD) from the hardware's (dFdxFine / dFdyFine)
 // instead of quad swaps, unless LARECOMP_SHADER_QUAD_DERIV says otherwise (exec.c vk_exec_init: on for AMD GPUs)
 extern bool maxwell_quad_deriv_default;
+extern bool maxwell_output_layer;  // (vulkan/device.c: shaderOutputLayer; translate.c drops vertex layer writes without it)
 // Lazy mode, fragment: a shader without discard / depth output / stores declares early fragment tests (its GMiss
 // atomics would turn them off); one with discard / depth output (no stores) counts no misses - the
 // runtime imports the bound storage buffers' chunks before the draw. true (LARECOMP_VK_GMEM_FS_MISS=1): every shader

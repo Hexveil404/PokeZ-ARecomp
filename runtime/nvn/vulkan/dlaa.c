@@ -238,6 +238,15 @@ bool vk_dlaa_record(VkDevice dev, VkCommandBuffer cmd, const VkFsr2Frame *f) {
         p_setu(p, "OutHeight", f->oh);
         p_seti(p, "DLSS.Feature.Create.Flags", NGX_FLAG_MV_LOWRES | NGX_FLAG_DEPTH_INVERTED);
         p_seti(p, "DLSS.Enable.Output.Subrects", 0);
+        // the model: LARECOMP_DLAA_PRESET=<n> (NVSDK_NGX_DLSS_Hint_Render_Preset: 0 the DLL's default, 6 F, 10 J, 11 K
+        // transformer...), as a hint for every quality value; unset: K (an older DLSS ignores what it doesn't know)
+        {
+            const char *e = getenv("LARECOMP_DLAA_PRESET");
+            unsigned pr = e ? (unsigned)atoi(e) : 11u;
+            static const char *const q[] = {"DLAA", "Quality", "Balanced", "Performance", "UltraPerformance", "UltraQuality"};
+            char k[64];
+            for (int i = 0; i < 6; i++) snprintf(k, sizeof k, "DLSS.Hint.Render.Preset.%s", q[i]), p_setu(p, k, pr);
+        }
         // DLAA's quality value; an older DLSS (before it had one) gets Max Quality at the same size
         p_seti(p, "PerfQualityValue", NGX_PERFQ_DLAA);
         NgxResult r = N.create(cmd, NGX_FEATURE_SUPERSAMPLING, p, &N.feat);

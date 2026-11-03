@@ -234,9 +234,18 @@ static bool has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
     return false;
 }
 
-// Discrete GPU first, Vulkan 1.3 before 1.2 (LARECOMP_GPU=<index> picks one); needs Vulkan 1.2 and a queue that can
-// present. A Vulkan 1.2 GPU does without the 1.3 features (compat.c).
+// Discrete GPU first, Vulkan 1.3 before 1.2; needs Vulkan 1.2 and a queue that can present. A Vulkan 1.2 GPU does
+// without the 1.3 features (compat.c). The Graphics card setting (g_settings.gpu_name, by name: indices change when
+// a GPU is added or turned off) picks one, and LARECOMP_GPU=<index> over it: a laptop's discrete GPU that crashes
+// the game while its integrated one runs it (#123). A saved name no GPU has any more is Auto.
 static bool g_intel_rp;  // (pick_device: this Intel driver runs on render passes)
+static char g_gpu_names[8][VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];  // the Vulkan 1.2 GPUs (no software ones), for the menu (vk_gpu_names)
+static int g_gpu_n;
+int vk_gpu_names(const char **names, int max) {
+    int n = g_gpu_n < max ? g_gpu_n : max;
+    for (int i = 0; i < n; i++) names[i] = g_gpu_names[i];
+    return n;
+}
 static void pick_device(void) {
     uint32_t n = 0;
     vkEnumeratePhysicalDevices(g_vk.inst, &n, NULL);
@@ -250,8 +259,10 @@ static void pick_device(void) {
         LOG("[vk] gpu %u: %s (api %u.%u.%u)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
             VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
         if (p.apiVersion < VK_API_VERSION_1_2) continue;
+        if (g_gpu_n < 8 && p.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU) snprintf(g_gpu_names[g_gpu_n++], sizeof g_gpu_names[0], "%s", p.deviceName);
         int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 6 : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 4 : 2;
         if (p.apiVersion >= VK_API_VERSION_1_3) score++;
+        if (g_settings.gpu_name[0] && !strcmp(p.deviceName, g_settings.gpu_name)) score = 50;
         if ((int)i == want) score = 100;
         if (score > best_score) { best_score = score; best = (int)i; }
     }
@@ -2274,11 +2285,17 @@ void ui_window_init(void) {
     if (g_settings.fullscreen && !ENV("LARECOMP_WINDOW") && !ENV("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     create_instance();
     if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
+    // A chosen Graphics card that fails to start (a FATAL, a driver crash) would fail every start, the start screen's
+    // too (it runs on that GPU, so its menu can't undo the choice): the settings file says Auto until the GPU is up
+    char chosen[sizeof g_settings.gpu_name];
+    snprintf(chosen, sizeof chosen, "%s", g_settings.gpu_name);
+    if (chosen[0]) { g_settings.gpu_name[0] = 0; settings_save(); snprintf(g_settings.gpu_name, sizeof g_settings.gpu_name, "%s", chosen); }
     pick_device();
     create_device();
     create_swapchain();
     vk_exec_init();
     vk_shaders_init();
+    if (chosen[0]) settings_save();
 }
 
 SDL_Window *ui_window(void) { return window; }

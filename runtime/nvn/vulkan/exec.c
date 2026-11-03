@@ -2707,20 +2707,24 @@ static bool key_memo_on(void) {
 
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey);
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
-    static struct { uint64_t code[2], fp[2]; ShaderKey vkey; uint8_t rt[8]; uint32_t gen; Prog *prog; } m;
+    // (everything get_program_'s key holds of the fragment key: its render target kinds and its integer texture slots -
+    // the slots were left out, so a draw that changed only them reused the previous draw's variant and sampled a
+    // stencil / integer texture through a float sampler, or the other way round)
+    static struct { uint64_t code[2], fp[2]; ShaderKey vkey; uint8_t rt[8]; uint32_t stencil, sint, gen; Prog *prog; } m;
     bool on = key_memo_on();
     // (the code fingerprints too: other code at the same address is another program - code_fp)
     uint64_t fp0 = code_fp(&np->stages[0]), fp1 = code_fp(&np->stages[1]);
     if (on && m.prog && m.gen == key_gen && (np->stage_mask & 3) == 3 && m.code[0] == np->stages[0].code_addr &&
         m.code[1] == np->stages[1].code_addr && m.fp[0] == fp0 && m.fp[1] == fp1 && !memcmp(&m.vkey, vkey, sizeof *vkey) &&
-        !memcmp(m.rt, fkey->rt_kind, 8)) {
+        !memcmp(m.rt, fkey->rt_kind, 8) && m.stencil == fkey->stencil_slots && m.sint == fkey->sint_slots) {
         prof_prog_memo++;
         return m.prog;
     }
     Prog *p = get_program_(np, vkey, fkey);
     if (on && p) {
         m.code[0] = np->stages[0].code_addr; m.code[1] = np->stages[1].code_addr; m.fp[0] = fp0; m.fp[1] = fp1;
-        m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.gen = key_gen; m.prog = p;
+        m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.stencil = fkey->stencil_slots; m.sint = fkey->sint_slots;
+        m.gen = key_gen; m.prog = p;
     }
     return p;
 }
@@ -3791,6 +3795,11 @@ static uint64_t range_hash(uint64_t addr, uint64_t size) {
     const uint64_t *w = (const uint64_t *)(uintptr_t)addr;
     uint64_t h = 1469598103934665603ull, n = size / 8;
     for (uint64_t i = 0; i < n; i++) h = (h ^ w[i]) * 1099511628211ull;
+    if (size & 7) {  // (the last 1-7 bytes too: a 4- or 12-byte range's final field changing was invisible)
+        uint64_t t = 0;
+        memcpy(&t, (const uint8_t *)(uintptr_t)addr + n * 8, size & 7);
+        h = (h ^ t ^ (size & 7) << 56) * 1099511628211ull;
+    }
     return h;
 }
 static void snap_ring_import_tail(void);  // (with the lazy chunks below)
@@ -5795,7 +5804,10 @@ static bool guest_direct(int kind, uint64_t addr, uint64_t size, VkBuffer *buf, 
         return true;
     }
     if (addr + size > gwin_base + gmem_lo + gmem_size && gwin_want() != gmem_tried) { gmem_tried = gwin_want(); gmem_info(); }
-    if (gmem_lo && xm_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }  // (the mirror needs no import)
+    // (the mirror needs no import) Vertex streams only, as below: a windowed import (gmem_lo: LARECOMP_VK_GMEM_WINDOW,
+    // a Steam Deck) reached this first and served index buffers from stale mirror bytes - with the mirror forced on
+    // there (LARECOMP_VK_XFB_MIRROR=1, off by default on AMD), characters' triangles stretched into spikes (2026-10-30)
+    if (gmem_lo && kind == 0 && xm_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }
     if (!GM_IN(addr, size)) return false;
     if (vcache_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }
     if (kind == 0 && xm_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }
@@ -6249,17 +6261,21 @@ static CsProg *compute_program(NvnProgram *np) {
     if (!ss->code_addr) return NULL;
     struct CsEnt *tab = g_cs_tab;
     int n = g_cs_n, at = -1;
-    uint64_t fp = code_fp(ss);
-    for (int i = 0; i < n && at < 0; i++)
-        if (tab[i].addr == ss->code_addr) {
-            if (tab[i].fp == fp) return tab[i].cp;
-            at = i;  // (other code there now: this entry gets the new program)
-        }
+    // The workgroup size is a specialization constant of the pipeline, read from the control section, not the code:
+    // it is part of the address cache's fingerprint (the same code with another local size got the first one's
+    // pipeline - a dispatch of the wrong number of invocations)
     uint32_t local[3];
     for (int i = 0; i < 3; i++) {
         local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
         if (!local[i]) local[i] = 1;
     }
+    uint64_t fp = code_fp(ss);
+    fp ^= ((uint64_t)local[0] | (uint64_t)local[1] << 21 | (uint64_t)local[2] << 42) * 0x9E3779B97F4A7C15ull;
+    for (int i = 0; i < n && at < 0; i++)
+        if (tab[i].addr == ss->code_addr) {
+            if (tab[i].fp == fp) return tab[i].cp;
+            at = i;  // (other code there now: this entry gets the new program)
+        }
     if (shader_rec_recording()) {
         ShaderRec rec = {.kind = 'C', .vs = shader_stage_hash(ss), .local = {local[0], local[1], local[2]}};
         shader_rec_note(&rec);

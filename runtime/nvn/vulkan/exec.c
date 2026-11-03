@@ -9231,6 +9231,19 @@ static void post_pass_ex(VkCommandBuffer cb, const char *fs, const VkImageView *
     rec_CmdEndRendering(cb);
 }
 
+// textures.c lm_smooth, between frames: the lightmap smoothing (shaders.c lightmap_smooth.frag) from src's level 0
+// into dst's (an RGBA8 image of the same size), in the frame's command buffer
+void vk_lightmap_smooth_pass(TexBackend *src, TexBackend *dst, float sigma_s, float sigma_r) {
+    static const VkComponentMapping id = {0};
+    VkImageView v = vk_image_view(src, VK_IMAGE_VIEW_TYPE_2D, src->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
+    float pc[8] = {vk_format_is_srgb(src->format) ? 1.0f : 0.0f, sigma_s, sigma_r, 0, 0, 0, 0, 0};
+    uint32_t aw = post_area_w, ah = post_area_h;
+    const float *big = post_pc_big;
+    post_area_w = post_area_h = 0, post_pc_big = NULL;
+    post_pass(vk_cmd(), "lightmap_smooth.frag", &v, 1, dst, pc, false);
+    post_area_w = aw, post_area_h = ah, post_pc_big = big;
+}
+
 // ================================================================== GTAO (ambient occlusion)
 // Pokémon Z-A draws no screen-space ambient occlusion. Its frame is deferred: the G-buffer, then one lighting pass
 // (fragment shader GTAO_LIGHTING) that reads the scene depth (its texture 1) and rebuilds each pixel's world position as

@@ -522,6 +522,35 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(s / max(n, 1e-6), 1.0);\n"
                "}\n";
     }
+    // Lightmap smoothing (textures.c lm_smooth): an edge-preserving (bilateral) filter per channel over the game's
+    // block-compressed lightmap, into an RGBA8 image of the same size. The steps between its 4x4 blocks are small and
+    // go; the edges between the atlas's regions are large and stay. Weights on the stored (sRGB-encoded) values.
+    // a = sRGB source (1 / 0), sigma in texels, sigma of the values (0-1).
+    if (!strcmp(name, "lightmap_smooth.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "vec3 enc(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }\n"
+               "vec3 dec(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }\n"
+               "vec4 load(ivec2 p) { vec4 c = texelFetch(t, p, 0); return pc.a.x > 0.5 ? vec4(enc(max(c.rgb, 0.0)), c.a) : c; }\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy), sz = textureSize(t, 0) - 1;\n"
+               "  float ss = pc.a.y, sr = pc.a.z;\n"
+               "  int r = int(ceil(ss * 2.0));\n"
+               "  vec4 c0 = load(p), num = vec4(0.0), den = vec4(0.0);\n"
+               "  for (int dy = -r; dy <= r; dy++)\n"
+               "    for (int dx = -r; dx <= r; dx++) {\n"
+               "      vec4 c = load(clamp(p + ivec2(dx, dy), ivec2(0), sz)), d = c - c0;\n"
+               "      vec4 w = exp(-float(dx * dx + dy * dy) / (2.0 * ss * ss)) * exp(-(d * d) / (2.0 * sr * sr));\n"
+               "      num += w * c;\n"
+               "      den += w;\n"
+               "    }\n"
+               "  vec4 v = num / den;\n"
+               "  o = pc.a.x > 0.5 ? vec4(dec(v.rgb), v.a) : v;\n"
+               "}\n";
+    }
     if (!strcmp(name, "rcas.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"

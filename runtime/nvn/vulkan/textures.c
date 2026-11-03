@@ -819,7 +819,9 @@ static bool hd_load_dds(NvnTexture *t, TexBackend *b, uint64_t h, const char *pa
 
 // F1 > Textures (setting tex_hd) changed: between frames, every live texture goes back to the game's image or is
 // looked up in the pack again (the next upload check rehashes it)
+static void lm_process(void);
 static void hd_switch(void) {
+    lm_process();  // (the lightmaps queued for smoothing: also between frames, on the uploading thread)
     static int last = -1;
     static long flip_at = -2;  // (tests: LARECOMP_TEX_HD_FLIP=<frame> switches the setting at that frame, as F1 would)
     if (flip_at == -2) { const char *e = ENV("LARECOMP_TEX_HD_FLIP"); flip_at = e ? atol(e) : -1; }
@@ -864,8 +866,82 @@ static void hd_queue_dump(NvnTexture *t, uint64_t h) {
     hd_q[hd_qn++] = (HdDump){t, h};
 }
 
+// ================================================================== lightmap smoothing
+// Pokémon Z-A bakes the light of some interiors into block-compressed lightmaps (a Pokémon Center's: 1024 x 1024,
+// tiled sampling). Where one is stretched over a large wall, its 4x4 blocks show as square patches of light and shade,
+// in the original game too. The lightmaps listed here are filtered once on the GPU after their upload (exec.c
+// vk_lightmap_smooth_pass: an edge-preserving filter that keeps the edges between the atlas's regions) and drawn from
+// that image instead, as an HD pack's (b->hd; a pack's own image for one comes first). LARECOMP_LIGHTMAP_SMOOTH=0: off.
+static const uint64_t lm_list[] = {
+    0x6e0df9ffdf98f824ull,  // Pokémon Center interior
+};
+static bool lm_listed(uint64_t h) {
+    static int on = -1;
+    if (on < 0) { const char *e = ENV("LARECOMP_LIGHTMAP_SMOOTH"); on = !e || atoi(e) != 0; }
+    if (!on) return false;
+    for (size_t i = 0; i < sizeof lm_list / sizeof *lm_list; i++) if (lm_list[i] == h) return true;
+    return false;
+}
+typedef struct { NvnTexture *t; uint64_t h; } LmJob;
+static LmJob lm_q[16];  // (queued at upload, filtered between frames: lm_process)
+static int lm_qn;
+static void lm_queue(NvnTexture *t, uint64_t h) {
+    for (int i = 0; i < lm_qn; i++) if (lm_q[i].t == t) { lm_q[i].h = h; return; }
+    if (lm_qn < 16) lm_q[lm_qn++] = (LmJob){t, h};
+}
+
+void vk_lightmap_smooth_pass(TexBackend *src, TexBackend *dst, float sigma_s, float sigma_r);
+static void lm_smooth(NvnTexture *t, TexBackend *b, uint64_t h) {
+    uint32_t w = b->width, hh = b->height, levels = 1;
+    for (uint32_t m = w > hh ? w : hh; m > 1; m >>= 1) levels++;
+    VkFormat vf = vk_format_is_srgb(b->format) ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
+                            .imageType = VK_IMAGE_TYPE_2D, .format = vf, .extent = {w, hh, 1}, .mipLevels = levels,
+                            .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    TexBackend nb = {.format = vf, .width = w, .height = hh, .depth = 1, .layers = 1, .levels = levels, .samples = 1,
+                     .aspect = VK_IMAGE_ASPECT_COLOR_BIT, .base_type = VK_IMAGE_VIEW_TYPE_2D};
+    if (vmaCreateImage(g_vk.vma, &ci, &ai, &nb.image, &nb.mem, NULL) != VK_SUCCESS) return;
+    VkCommandBuffer cb = vk_cmd();
+    vk_image_init_layout(cb, nb.image, VK_IMAGE_ASPECT_COLOR_BIT);
+    vk_lightmap_smooth_pass(b, &nb, 3.5f, 28.0f / 255.0f);
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    for (uint32_t lv = 1; lv < levels; lv++) {  // each level a linear downsample of the one above
+        rec_CmdPipelineBarrier2(cb, &di);
+        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv - 1, 0, 1},
+                          .srcOffsets = {{0, 0, 0}, {(int32_t)level_w(&nb, lv - 1), (int32_t)level_h(&nb, lv - 1), 1}},
+                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, 0, 1},
+                          .dstOffsets = {{0, 0, 0}, {(int32_t)level_w(&nb, lv), (int32_t)level_h(&nb, lv), 1}}};
+        rec_CmdBlitImage(cb, nb.image, VK_IMAGE_LAYOUT_GENERAL, nb.image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+    }
+    rec_CmdPipelineBarrier2(cb, &di);
+    vk_views_forget(&nb);  // (the pass's view of the new image: b makes its own)
+    destroy_image(b);      // (the game's image: freed once the GPU is done with it, the pass above included)
+    b->image = nb.image, b->mem = nb.mem, b->format = vf, b->levels = levels, b->astc_bw = b->astc_bh = 0;
+    b->hd = true, b->sx = 1.0f, b->sy = 1.0f;
+    static int n;
+    if (n++ < 20) LOG("[tex] lightmap %016llx smoothed (%ux%u)\n", (unsigned long long)h, w, hh);
+    (void)t;
+}
+
+static void lm_process(void) {
+    for (int i = 0; i < lm_qn; i++) {
+        NvnTexture *t = lm_q[i].t;
+        TexBackend *b = t ? t->backend : NULL;
+        if (b && b->image && !b->hd && b->data_hash == lm_q[i].h) lm_smooth(t, b, lm_q[i].h);
+    }
+    lm_qn = 0;
+}
+
 static void hd_forget(NvnTexture *t) {
     for (int i = 0; i < hd_qn; i++) if (hd_q[i].t == t) hd_q[i].t = NULL;
+    for (int i = 0; i < lm_qn; i++) if (lm_q[i].t == t) lm_q[i].t = NULL;
 }
 
 void renderer_save_texture_tex(TexBackend *b, const char *path);
@@ -1102,7 +1178,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     b->data_hash = h;
     b->uploaded = true;
     hd_init();
-    if (b->hd && (b->dynamic || !hd_has(h))) {  // an HD-replaced texture the game rewrote: back to its own image
+    if (b->hd && (b->dynamic || !(hd_has(h) || lm_listed(h)))) {  // an HD-replaced texture the game rewrote: back to its own image
         destroy_image(b);
         b->hd = false;
         create_image(t, b);
@@ -1112,6 +1188,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (hd_candidate(t, b)) {
         if (hd_has(h) && hd_replace(t, b, h)) return;
         if (hd_dump) hd_queue_dump(t, h);
+        if (lm_listed(h)) lm_queue(t, h);
     }
     if (b->format != mf.vf && !b->astc_bw) return;  // unsupported format: nothing sensible to copy
     slow_note_upload(total);

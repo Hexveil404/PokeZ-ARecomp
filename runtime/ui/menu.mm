@@ -48,6 +48,8 @@ bool controls_ui_took_back(void);
 bool rando_tab_took_back(void);  // rando_tab.mm: B went back from the Triforce hunt's count
 #include "../input_bind.h"
 #include "../paths.h"
+extern "C" bool vk_dlaa_wanted(void);  // (runtime/nvn/vulkan/dlaa.c: F1 > Temporal anti-aliasing DLAA)
+extern "C" bool vk_dlaa_available(void);
 }
 
 #define TR(en, pt) UI_TR(en, pt)  // (runtime/settings.h: English, or Portuguese as the start screen's PT | EN)
@@ -776,16 +778,25 @@ static void tab_display(bool in_game) {
                   "fácil de ver em lugares escuros. Desligado: as cores do próprio jogo. Muda na hora."));
 #ifndef __APPLE__
     if (!la) {  // (runtime/nvn/vulkan/exec.c fsr2_copy: applies at once)
-        int t = g_settings.taa ? 1 : 0;
-        const char *taa[] = {TR("Game's", "Do jogo"), "AMD FSR 2"};
-        if (opt_choice(TR("Temporal anti-aliasing", "Anti-aliasing temporal"), &t, taa, 2, 0,
-                       TR("AMD FSR 2 in place of the game's own edge smoothing: it combines several frames, so fences, "
-                          "railings, leaves and thin lines stay smooth and stop flickering as you move. Uses a little GPU "
-                          "time. With it on, Anti-aliasing (SMAA) above isn't needed.",
-                          "AMD FSR 2 no lugar da suavização de bordas do próprio jogo: ele combina vários quadros, então "
-                          "grades, corrimões, folhas e linhas finas ficam lisos e param de tremular quando você anda. Usa um "
-                          "pouco da GPU. Com ele ligado, o Anti-aliasing (SMAA) acima não é necessário.")))
-            g_settings.taa = t == 1;
+        int t = g_settings.taa;
+        const char *taa[] = {TR("Game's", "Do jogo"), "AMD FSR 2", "NVIDIA DLAA"};
+        if (opt_choice(TR("Temporal anti-aliasing", "Anti-aliasing temporal"), &t, taa, 3, 0,
+                       TR("AMD FSR 2 or NVIDIA DLAA in place of the game's own edge smoothing: they combine several frames, "
+                          "so fences, railings, leaves and thin lines stay smooth and stop flickering as you move. Uses a "
+                          "little GPU time. With either on, Anti-aliasing (SMAA) above isn't needed. DLAA: NVIDIA RTX GPUs, "
+                          "with nvngx_dlss.dll next to lasrecomp.exe; it applies from the next start.",
+                          "AMD FSR 2 ou NVIDIA DLAA no lugar da suavização de bordas do próprio jogo: eles combinam vários "
+                          "quadros, então grades, corrimões, folhas e linhas finas ficam lisos e param de tremular quando "
+                          "você anda. Usa um pouco da GPU. Com um deles ligado, o Anti-aliasing (SMAA) acima não é "
+                          "necessário. DLAA: GPUs NVIDIA RTX, com o nvngx_dlss.dll ao lado do lasrecomp.exe; vale a partir "
+                          "do próximo início.")))
+            g_settings.taa = t;
+        if (g_settings.taa == TAA_DLAA && !vk_dlaa_available())
+            ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s",
+                               vk_dlaa_wanted() ? TR("DLAA isn't available: an NVIDIA RTX GPU and nvngx_dlss.dll are needed.",
+                                                     "O DLAA não está disponível: são necessários uma GPU NVIDIA RTX e o nvngx_dlss.dll.")
+                                                : TR("DLAA starts with the next start of the game.",
+                                                     "O DLAA começa no próximo início do jogo."));
     }
 #endif
 #ifndef __APPLE__

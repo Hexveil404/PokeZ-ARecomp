@@ -31,6 +31,7 @@ enum { GPU_DYN_VERTEX = 0 /* LARECOMP_VK_DYN_VERTEX */, GPU_OVERLAP /* LARECOMP_
 extern unsigned g_gpu_vendor;
 bool gpu_feature_on(int feature, const char *env);
 enum { GPU_AUTO = 0, GPU_ON = 1, GPU_OFF = 2 };
+enum { TAA_GAME = 0, TAA_FSR2 = 1, TAA_DLAA = 2 };  // (Settings.taa)
 enum { TIMER_POS_LEFT = 0, TIMER_POS_RIGHT = 1 };  // the run timer's corner (bottom left / right)
 enum { CHAOS_LETTERS_OFF = 0, CHAOS_LETTERS_EXPLORED = 1, CHAOS_LETTERS_MAP = 2 /* explored, all with the Map */ };
 // System language served to the game (runtime/services/am.c GetDesiredLanguage, services/hid_set.c GetLanguageCode):
@@ -49,7 +50,8 @@ typedef struct {
     bool upscaler_auto;  // never chosen: the default for this GPU (settings_resolve_defaults); saved as "auto"
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     int sharpen;         // SHARPEN_*: sharpening of the image in the window (Vulkan)
-    bool taa;            // Pokémon Z-A: AMD FSR 2's temporal anti-aliasing in place of the game's own (vulkan/exec.c fsr2_copy)
+    int taa;             // Pokémon Z-A: TAA_*: AMD FSR 2's or NVIDIA DLAA's temporal anti-aliasing in place of the game's
+                         // own (vulkan/exec.c fsr2_copy, vulkan/dlaa.c)
     int gpu_compat[GPU_COMPAT_N];  // GPU_AUTO / GPU_ON / GPU_OFF per GPU_* feature (Compatibility)
     float volume;        // master volume, 1 = 100%
     bool reverb;         // room reverb effect

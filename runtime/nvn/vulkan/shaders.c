@@ -718,9 +718,14 @@ static const char *builtin_src(const char *name, int *stage) {
     // (cos-weighted: the band between the old and the new horizon, cos a_old - cos a_new) - one bounce of the game's
     // light from what is on screen. Sky (no depth) and things past the reach give nothing: the game's own ambient
     // light covers them. Out .rgb: the cos-weighted mean incoming light (x the albedo: the light it reflects).
-    if (!strcmp(name, "ssgi.frag")) {
+    // ssgi_h.frag: the march's taps from ssgi_down.frag's half-size image (t2: rgb the lit colour, a the depth) - one
+    // fetch per tap, from a 4x smaller image, instead of two from the full-size depth and lit image (exec.c ssgi_apply,
+    // LARECOMP_SSGI_HALF). The point itself and its normal still read the full-size depth.
+    if (!strcmp(name, "ssgi.frag") || !strcmp(name, "ssgi_h.frag")) {
         *stage = STAGE_FRAGMENT;
-        static char *src;
+        bool half = name[5] == 'h';
+        static char *srcs[2];
+        char *src = srcs[half];
         if (!src) {
             static const char body[] =
                 "vec3 pos_at(vec2 uv) { return wpos(uv, depth_at(t0, uv)); }\n"
@@ -758,8 +763,16 @@ static const char *builtin_src(const char *name, int *stage) {
                 "        t = t * t;\n"
                 "        vec2 su = uv + float(side) * dir * (rUV * t + 2.0 / pc.sz.xy);\n"
                 "        if (any(lessThan(su, vec2(0.0))) || any(greaterThan(su, vec2(1.0)))) break;\n"
+                "#ifdef SSGI_HALF\n"
+                "        if (su.x > pc.prm.w || su.y > pc.prj.z) break;\n"  // (past the frame's part: ssgi_down left it unwritten)
+                "        ivec2 ip = clamp(ivec2(su * pc.sz.xy), ivec2(0), ivec2(pc.sz.xy) - 1);\n"
+                "        vec4 hq = texelFetch(t2, ip, 0);\n"
+                "        float sd = hq.a;\n"
+                "        vec4 Q4 = wpos4((vec2(ip) * 2.0 + 0.5) / pc.sz.zw, sd);\n"  // (the full-size texel it holds)
+                "#else\n"
                 "        float sd = depth_at(t0, su);\n"
                 "        vec4 Q4 = wpos4(su, sd);\n"
+                "#endif\n"
                 "        if (abs(Q4.w) < 1e-7) continue;\n"
                 "        vec3 dq = Q4.xyz / Q4.w - P;\n"
                 "        float l = length(dq);\n"
@@ -768,12 +781,35 @@ static const char *builtin_src(const char *name, int *stage) {
                 "        if (e <= hs) continue;\n"
                 "        float band = sqrt(max(1.0 - hs * hs, 0.0)) - sqrt(max(1.0 - e * e, 0.0));\n"
                 "        float fall = 1.0 - l / radius;\n"
+                "#ifdef SSGI_HALF\n"
+                "        sum += hq.rgb * band * fall;\n"
+                "#else\n"
                 "        sum += textureLod(t1, su, 0.0).rgb * band * fall;\n"
+                "#endif\n"
                 "        hs = e;\n"
                 "      }\n"
                 "    }\n"
                 "  }\n"
                 "  o = vec4(sum / float(2 * SLICES), 1.0);\n"
+                "}\n";
+            static const char half_defs[] = "#define SSGI_HALF 1\nlayout(set = 0, binding = 2) uniform sampler2D t2;\n";
+            size_t n = strlen(gtao_common) + strlen(half_defs) + strlen(body) + 1;
+            src = malloc(n);
+            snprintf(src, n, "%s%s%s", gtao_common, half ? half_defs : "", body);
+            srcs[half] = src;
+        }
+        return src;
+    }
+    if (!strcmp(name, "ssgi_down.frag")) {  // t0 = the scene depth, t1 = the lit image: half size, rgb colour (2x2 mean) + a depth
+        *stage = STAGE_FRAGMENT;
+        static char *src;
+        if (!src) {
+            static const char body[] =
+                "void main() {\n"
+                "  ivec2 ip = ivec2(gl_FragCoord.xy);\n"
+                "  float d = texelFetch(t0, clamp(ip * 2, ivec2(0), ivec2(pc.sz.zw) - 1), 0).r;\n"
+                "  vec3 c = textureLod(t1, (vec2(ip) * 2.0 + 1.0) / pc.sz.zw, 0.0).rgb;\n"  // (bilinear at the 2x2's corner: their mean)
+                "  o = vec4(c, d);\n"
                 "}\n";
             size_t n = strlen(gtao_common) + strlen(body) + 1;
             src = malloc(n);

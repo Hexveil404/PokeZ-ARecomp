@@ -8852,9 +8852,10 @@ static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt, V
 
 // Post image `i` at w x h (RGBA8, kept until the size changes). 0, 1: SMAA edges / weights, 2: SMAA output,
 // 3, 4: FSR EASU / RCAS (also the sharpening after the box downscale), 5: box downscale, 6: the sharpening at the
-// image's own size, 7, 8: GTAO raw / filtered. (f: its format - 9, 10, the indirect light: RGBA16F)
+// image's own size, 7, 8: GTAO raw / filtered. (f: its format - 9, 10, the indirect light: RGBA16F; 11, its march's
+// packed half-size colour + depth: RGBA32F)
 static TexBackend *post_image_f(int i, uint32_t w, uint32_t h, VkFormat f) {
-    static TexBackend img[11];
+    static TexBackend img[16];
     TexBackend *d = &img[i];
     if (d->image && (d->width != w || d->height != h || d->format != f)) {
         vk_views_forget(d);
@@ -9459,6 +9460,7 @@ static void gtao_apply_pending(void) {
 
 // SSGI, when the lighting pass has ended (its image tb is the bounce light's source and its target): the bounce light
 // at half size from the depth and the lit image, a depth-aware filter, then x the albedo, added onto the lit image
+static int g_ssgi_half = -1;  // (ssgi_apply: LARECOMP_SSGI_HALF; -1 not read yet)
 static void ssgi_apply(TexBackend *tb) {
     float pc[32];
     memcpy(pc, gtao.pc, sizeof pc);  // (the camera: gtao_before_lighting)
@@ -9475,12 +9477,26 @@ static void ssgi_apply(TexBackend *tb) {
     VkCommandBuffer cb = vk_cmd();
     TexBackend *raw = post_image_f(9, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT), *filt = post_image_f(10, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT);
     post_pc_big = pc;
-    VkImageView in[2] = {gtao.depth, lit};
+    VkImageView in[3] = {gtao.depth, lit};
     // (gtao_before_lighting's region - the lighting's viewport - as GTAO's passes, with the same margins: the filter
     // reads 2 texels around, the upsample 1. Steam Deck handheld, Lumiose: ~6 ms over the whole image)
     bool part = gtao.fx < 1 || gtao.fy < 1;
     if (part) post_area_w = (uint32_t)ceilf(hw * gtao.fx) + 4, post_area_h = (uint32_t)ceilf(hh * gtao.fy) + 4;
-    post_pass(cb, "ssgi.frag", in, 2, raw, NULL, false);
+    // The march's taps (6 x slices^2 a pixel) each read the full-size depth and lit image at scattered places: cache
+    // misses, not pixels, were its cost (Steam Deck, Lumiose: 4.0 ms at 960x540, 3.75 at the 644x364 part). Half size
+    // in one RGBA32F image (ssgi_down: the colour's 2x2 mean, the depth) - one fetch a tap from a 4x smaller image.
+    // The bounce light is soft and filtered after: the same look. Its taps stop at the frame's part (pc prm.w / prj.z:
+    // unused by the march), where the half image ends. LARECOMP_SSGI_HALF=0: full size
+    if (g_ssgi_half < 0) g_ssgi_half = !ENV("LARECOMP_SSGI_HALF") || atoi(ENV("LARECOMP_SSGI_HALF")) != 0;
+    if (g_ssgi_half) {
+        TexBackend *packed = post_image_f(11, hw, hh, VK_FORMAT_R32G32B32A32_SFLOAT);
+        post_pass(cb, "ssgi_down.frag", in, 2, packed, NULL, false);
+        in[2] = post_view(packed);
+        float dbg = pc[30];
+        pc[23] = gtao.fx, pc[30] = gtao.fy;
+        post_pass(cb, "ssgi_h.frag", in, 3, raw, NULL, false);
+        pc[30] = dbg;
+    } else post_pass(cb, "ssgi.frag", in, 2, raw, NULL, false);
     VkImageView bin[2] = {post_view(raw), gtao.depth};
     if (part) post_area_w -= 2, post_area_h -= 2;
     post_pass(cb, "ssgi_blur.frag", bin, 2, filt, NULL, false);

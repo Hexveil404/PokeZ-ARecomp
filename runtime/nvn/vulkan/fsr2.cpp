@@ -23,7 +23,7 @@ static void LOG(const char *fmt, ...) {  // (as runtime/rt.h rt_log: one write p
 static FfxFsr2Context ctx;
 static bool have;
 static void *scratch;
-static uint32_t cur_w, cur_h, cur_ow, cur_oh;
+static uint32_t cur_iw, cur_ih, cur_ow, cur_oh;  // (the context's sizes: a render size up to iw x ih needs no new one)
 static bool failed;  // (the context couldn't be made: not tried again until the sizes change)
 
 static void message(FfxFsr2MsgType type, const wchar_t *m) {
@@ -50,11 +50,11 @@ void vk_fsr2_jitter(uint32_t index, uint32_t render_w, uint32_t out_w, float *jx
 }
 
 bool vk_fsr2_record(VkPhysicalDevice phys, VkDevice dev, VkCommandBuffer cmd, const VkFsr2Frame *f) {
-    bool sizes = f->w != cur_w || f->h != cur_h || f->ow != cur_ow || f->oh != cur_oh;
+    bool sizes = f->iw != cur_iw || f->ih != cur_ih || f->ow != cur_ow || f->oh != cur_oh;
     if (failed && !sizes) return false;
     if (!have || sizes) {
         vk_fsr2_destroy(dev);
-        cur_w = f->w, cur_h = f->h, cur_ow = f->ow, cur_oh = f->oh;
+        cur_iw = f->iw, cur_ih = f->ih, cur_ow = f->ow, cur_oh = f->oh;
         failed = true;
         size_t sz = ffxFsr2GetScratchMemorySizeVK(phys);
         free(scratch);
@@ -65,19 +65,19 @@ bool vk_fsr2_record(VkPhysicalDevice phys, VkDevice dev, VkCommandBuffer cmd, co
             return false;
         }
         d.flags = FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_DEPTH_INFINITE;
-        d.maxRenderSize = {f->w, f->h};
+        d.maxRenderSize = {f->iw, f->ih};
         d.displaySize = {f->ow, f->oh};
         d.device = ffxGetDeviceVK(dev);
         d.fpMessage = message;
         FfxErrorCode e = ffxFsr2ContextCreate(&ctx, &d);
         if (e != FFX_OK) { LOG("[fsr2] context failed: %d\n", (int)e); return false; }
         have = true, failed = false;
-        LOG("[fsr2] context %ux%u -> %ux%u\n", f->w, f->h, f->ow, f->oh);
+        LOG("[fsr2] context up to %ux%u -> %ux%u\n", f->iw, f->ih, f->ow, f->oh);
     }
     FfxFsr2DispatchDescription d = {};
     d.commandList = ffxGetCommandListVK(cmd);
-    d.color = ffxGetTextureResourceVK(&ctx, f->color, f->color_view, f->w, f->h, f->color_format, L"FSR2_InputColor");
-    d.depth = ffxGetTextureResourceVK(&ctx, f->depth, f->depth_view, f->w, f->h, f->depth_format, L"FSR2_InputDepth");
+    d.color = ffxGetTextureResourceVK(&ctx, f->color, f->color_view, f->iw, f->ih, f->color_format, L"FSR2_InputColor");
+    d.depth = ffxGetTextureResourceVK(&ctx, f->depth, f->depth_view, f->iw, f->ih, f->depth_format, L"FSR2_InputDepth");
     d.motionVectors = ffxGetTextureResourceVK(&ctx, f->mv, f->mv_view, f->w, f->h, VK_FORMAT_R16G16_SFLOAT, L"FSR2_InputMotionVectors");
     d.reactive = ffxGetTextureResourceVK(&ctx, f->reactive, f->reactive_view, f->w, f->h, VK_FORMAT_R8_UNORM, L"FSR2_InputReactiveMap");
     d.output = ffxGetTextureResourceVK(&ctx, f->out, f->out_view, f->ow, f->oh, f->out_format, L"FSR2_OutputUpscaledColor",

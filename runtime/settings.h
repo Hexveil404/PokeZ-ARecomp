@@ -53,6 +53,7 @@ typedef struct {
     int sharpen;         // SHARPEN_*: sharpening of the image in the window (Vulkan)
     int taa;             // Pokémon Z-A: TAA_*: AMD FSR 2's or NVIDIA DLAA's temporal anti-aliasing in place of the game's
                          // own (vulkan/exec.c fsr2_copy, vulkan/dlaa.c)
+    int taa_render;      // with it: the scene's share of the resolution in percent (67: FSR 2 upscales it; 100: anti-aliasing only)
     int gpu_compat[GPU_COMPAT_N];  // GPU_AUTO / GPU_ON / GPU_OFF per GPU_* feature (Compatibility)
     char gpu_name[256];  // Graphics card: the Vulkan device to run on, by name ("": Auto; vulkan/device.c pick_device)
     bool dx12;           // Graphics API (Windows): DirectX 12 through the shipped Dozen (Mesa's Vulkan on Direct3D 12,

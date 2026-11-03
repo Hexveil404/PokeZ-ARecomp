@@ -9,13 +9,15 @@ extern "C" {
 #endif
 
 // One frame: the game's jittered picture (color), its depth, our motion vectors (RG16F, pixels, current -> previous)
-// and reactive mask (R8) at the render size w x h, and the output image (a storage image) at ow x oh. Images in
-// VK_IMAGE_LAYOUT_GENERAL. jx, jy: the jitter the frame was drawn with, in render pixels.
+// and reactive mask (R8) at the render size w x h, and the output image (a storage image) at ow x oh. The picture and
+// depth are images of iw x ih (the most the render size can be) drawn in their top-left w x h. Images in
+// VK_IMAGE_LAYOUT_GENERAL. jx, jy: the jitter the frame was drawn with, in render pixels. (The inputs any temporal
+// upscaler takes - FSR 3.1's upscaler, DLSS: the same set; only vk_fsr2_record / vk_fsr2_jitter are FSR 2's own.)
 typedef struct {
     VkImage color, depth, mv, reactive, out;
     VkImageView color_view, depth_view, mv_view, reactive_view, out_view;
     VkFormat color_format, depth_format, out_format;
-    uint32_t w, h, ow, oh;
+    uint32_t w, h, iw, ih, ow, oh;
     float jx, jy, dt_ms, near_z, fov_y, sharpness;
     bool reset;
 } VkFsr2Frame;

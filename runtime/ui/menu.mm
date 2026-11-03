@@ -838,6 +838,22 @@ static void tab_display(bool in_game) {
                                                      "O DLAA não está disponível: são necessários uma GPU NVIDIA RTX e o nvngx_dlss.dll.")
                                                 : TR("DLAA starts with the next start of the game.",
                                                      "O DLAA começa no próximo início do jogo."));
+        if (g_settings.taa == TAA_FSR2) {  // (exec.c vk_taa_render_share: applies at once)
+            int r = g_settings.taa_render < 100 ? 1 : 0;
+            const char *rs[] = {"100%", TR("67% (upscaled)", "67% (ampliada)")};
+            ImGui::BeginDisabled(g_settings.res_mode == RES_DYNAMIC);
+            if (opt_choice(TR("FSR 2 render resolution", "Resolução de render do FSR 2"), &r, rs, 2, 0,
+                           TR("67%: the world is drawn at two thirds of the resolution above and FSR 2 rebuilds it at the "
+                              "full one from several frames - less than half the pixels for the GPU, close to the full "
+                              "resolution's look. The HUD and text stay sharp. 100%: smoothing only. Not with Dynamic "
+                              "resolution.",
+                              "67%: o mundo é desenhado a dois terços da resolução acima e o FSR 2 o reconstrói na "
+                              "resolução cheia a partir de vários quadros - menos da metade dos pixels para a GPU, perto do "
+                              "visual da resolução cheia. O HUD e os textos ficam nítidos. 100%: só suavização. Não com a "
+                              "Resolução dinâmica.")))
+                if (r != (g_settings.taa_render < 100)) g_settings.taa_render = r ? 67 : 100;
+            ImGui::EndDisabled();
+        }
     }
 #endif
 #ifndef __APPLE__

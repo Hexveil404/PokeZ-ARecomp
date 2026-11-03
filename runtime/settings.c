@@ -59,6 +59,7 @@ Settings g_settings = {
     .fps60_lock = true,  // ("Drop to 30 fps when needed" off unless the player turns it on)
     .frame_dt = true,    // (Pokémon Z-A: the world step from a wall-clock accumulator - the same speed at any frame rate)
     .tex_hd = true,
+    .taa_render = 100,
     .shadow_res = 1,
     .shadow_sharp = 1,
     .gtao_strength = 100,
@@ -347,6 +348,7 @@ void settings_load(void) {
             for (int i = 0; i < SHARPEN_N; i++) if (!strcmp(val, sharpen_names[i])) g_settings.sharpen = i;
         }
         else if (!strcmp(key, "temporal_aa")) g_settings.taa = !strcmp(val, "fsr2") ? TAA_FSR2 : !strcmp(val, "dlaa") ? TAA_DLAA : TAA_GAME;
+        else if (!strcmp(key, "temporal_aa_render")) { int v = atoi(val); g_settings.taa_render = v >= 50 && v <= 100 ? v : 100; }
         else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;
         else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
         else if (!strcmp(key, "rumble")) g_settings.rumble = atoi(val) != 0;
@@ -471,6 +473,7 @@ void settings_save(void) {
     fprintf(f, "antialias = %s\n", g_settings.antialias == AA_SMAA ? "smaa" : "off");
     fprintf(f, "sharpening = %s\n", sharpen_names[g_settings.sharpen >= 0 && g_settings.sharpen < SHARPEN_N ? g_settings.sharpen : 0]);
     fprintf(f, "temporal_aa = %s\n", g_settings.taa == TAA_FSR2 ? "fsr2" : g_settings.taa == TAA_DLAA ? "dlaa" : "game");
+    fprintf(f, "temporal_aa_render = %d\n", g_settings.taa_render);
     fprintf(f, "resolution = %s\n", g_settings.res_auto ? "auto" : res_name(g_settings.res_mode));
     fprintf(f, "inv_keys = %d\n", g_settings.inv_keys);
     fprintf(f, "dpad_move = %d\n", g_settings.dpad_move);

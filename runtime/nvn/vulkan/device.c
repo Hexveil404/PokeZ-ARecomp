@@ -1959,7 +1959,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     if (pp_on < 0) pp_on = getenv("LARECOMP_VK_PROF") != NULL;
     if (pp_on) pp_t = SDL_GetTicksNS();
     TexBackend *b = vk_tex(t, true);
-    b->presented = true;
+    b->presented = b->shown = true;
     vk_end_pass();
     // the HD texture switch (F1 > Textures, applied while playing) and the texture dumps (tex_dump): between frames,
     // on the thread that uploads the textures (the render thread when it is on)
@@ -2013,6 +2013,13 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         }
         OutScale os;
         output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, game_ms, win_ms, &os);
+        {   // F1 > FSR 2 render resolution: the scene drawn smaller, FSR 2 upscaling it (exec.c vk_taa_render_share)
+            extern float vk_taa_render_share(void);
+            extern void renderer_set_present_full(bool on);
+            float k = vk_taa_render_share();
+            if (k < 1) os.sx *= k, os.sy *= k, os.lines *= k * 0.5f;  // (the textures' mip bias: log2(render / display) - 1, as AMD advises)
+            renderer_set_present_full(k < 1);
+        }
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
         output_scale_log((unsigned long long)frame, dw, dh, &os);  // (diagnostics: [scale] on a change)
         // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen

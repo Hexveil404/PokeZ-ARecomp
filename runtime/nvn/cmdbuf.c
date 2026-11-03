@@ -354,22 +354,24 @@ NVN(nvnCommandBufferSetProgramSubroutines) { (void)c; static int seen_; if (!see
 NVN(nvnCommandBufferSaveZCullData) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSaveZCullData\n"); }
 NVN(nvnCommandBufferRestoreZCullData) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferRestoreZCullData\n"); }
 
-static uint64_t copy_row_stride, copy_image_stride;
-RT_ON_RESET(cmdbuf_reset) { copy_row_stride = copy_image_stride = 0; }
+// The strides are each command buffer's own state (one global pair let buffer B's row stride into buffer A's next
+// record: A's copies then used B's pitch). Each record carries both, so the executor needs no recording-time state.
 NVN(nvnCommandBufferSetCopyRowStride) {
     Snap s = snap(c);
-    copy_row_stride = s.x[1];
+    NvnCmdBuf *cb = cb_of(s.x[0]);
+    cb->copy_row_stride = s.x[1];
     CmdRec *r = record(c, CMD_SET_COPY_STRIDES, 0, &s);
-    r->x[0] = copy_row_stride; r->x[1] = copy_image_stride;
+    r->x[0] = cb->copy_row_stride; r->x[1] = cb->copy_image_stride;
 }
 NVN(nvnCommandBufferSetCopyImageStride) {
     Snap s = snap(c);
-    copy_image_stride = s.x[1];
+    NvnCmdBuf *cb = cb_of(s.x[0]);
+    cb->copy_image_stride = s.x[1];
     CmdRec *r = record(c, CMD_SET_COPY_STRIDES, 0, &s);
-    r->x[0] = copy_row_stride; r->x[1] = copy_image_stride;
+    r->x[0] = cb->copy_row_stride; r->x[1] = cb->copy_image_stride;
 }
-NVN(nvnCommandBufferGetCopyRowStride) { RET(copy_row_stride); }
-NVN(nvnCommandBufferGetCopyImageStride) { RET(copy_image_stride); }
+NVN(nvnCommandBufferGetCopyRowStride) { NvnCmdBuf *cb = cb_of(A(0)); RET(cb ? cb->copy_row_stride : 0); }
+NVN(nvnCommandBufferGetCopyImageStride) { NvnCmdBuf *cb = cb_of(A(0)); RET(cb ? cb->copy_image_stride : 0); }
 
 // ---- clears
 NVN(nvnCommandBufferClearColor) { record_copy(c, CMD_CLEAR_COLOR, 2, 16); }

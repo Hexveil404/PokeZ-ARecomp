@@ -8301,6 +8301,19 @@ static bool ib_overrun(CmdRec *r, const uint32_t *p, uint64_t pa) {
     uint64_t count = p[0], first = p[2], ib = r->x[2];
     if (!count || count > (1u << 22) || !ib || ib < GUEST_LO) return false;
     uint32_t restart = st.prim_restart ? st.restart_index : 0xFFFFFFFFu, mx = 0;
+    // (the first index is the block's, and a block holding other data gave one far past the guest memory window: this
+    // scan read unmapped memory and the render thread crashed - #122, Iris Xe, 0x78a841c5a4 against a window ending
+    // at 0x7740000000. The GPU can't read there either: skipped)
+    if (ib + first * isz < gwin_base || ib + (first + count) * isz > gwin_base + gwin_max) {
+        static int nlog;
+        if (nlog++ < 20)
+            LOG("[ibguard] frame %llu: skipped draw: indices %llx+%llu (first %u) outside guest memory %llx+%llx, args %llx\n",
+                (unsigned long long)renderer_present_count(), (unsigned long long)(ib + first * isz),
+                (unsigned long long)(count * isz), p[2], (unsigned long long)gwin_base, (unsigned long long)gwin_max,
+                (unsigned long long)pa);
+        stat_skipped_here();
+        return true;
+    }
     const uint8_t *ip = (const uint8_t *)(uintptr_t)(ib + first * isz);
     for (uint64_t i = 0; i < count; i++) {
         uint32_t v = isz == 1 ? ip[i] : isz == 2 ? ((const uint16_t *)ip)[i] : ((const uint32_t *)ip)[i];

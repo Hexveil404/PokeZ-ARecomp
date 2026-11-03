@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "../rqueue.h"
 #include "vk.h"
@@ -633,29 +634,68 @@ void vk_textures_reset(void) {
 // The same way, whatever the HD setting: the game's own button icons relabelled for the prompts' style
 // (textures/prompts/<style>, runtime/hle/pl.c pl_prompt_set; made by tools/za/prompt_textures.py), ahead of the pack.
 static int hd_on = -1, hd_dump = -1;
-typedef struct { uint64_t *h; int n; char dir[48]; } HdSet;  // sorted hashes of <dir>/*.png, *.dds
+// sorted hashes of <dir>/**/*.png, *.dds; f[i]: the folder (fold[f[i]]) the texture h[i] is in. Subfolders count,
+// four deep: a pack unzipped as it was downloaded sits in a folder of its own (textures/hd/<pack>/...), and was
+// silently ignored (#139: "turning it on nothing changes")
+typedef struct { uint64_t *h; uint16_t *f; int n; char dir[48]; char (*fold)[400]; int nfold; } HdSet;
 static HdSet hd_sets[2];  // [0] button prompts, [1] HD pack
 static int hd_cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
+typedef struct { uint64_t h; uint16_t f; } HdEnt;
+static int hd_ent_cmp(const void *a, const void *b) {
+    const HdEnt *x = a, *y = b;
+    return x->h != y->h ? (x->h < y->h ? -1 : 1) : (x->f > y->f) - (x->f < y->f);  // (a hash in two folders: the first found)
+}
 
-static void hd_scan(HdSet *s, const char *dir) {
-    snprintf(s->dir, sizeof s->dir, "%s", dir);
+static void hd_scan_dir(HdSet *s, const char *dir, int depth, HdEnt **e, int *cap) {
     DIR *d = opendir(dir);
     if (!d) return;
-    int cap = 0;
+    if (s->nfold >= 4096) { closedir(d); return; }
+    s->fold = realloc(s->fold, (s->nfold + 1) * sizeof *s->fold);
+    uint16_t me = (uint16_t)s->nfold++;
+    snprintf(s->fold[me], sizeof s->fold[me], "%s", dir);
+    char (*sub)[400] = malloc(64 * sizeof *sub);  // (heap: the render thread's stack is small)
+    int nsub = 0;
     for (struct dirent *de; (de = readdir(d));) {
         unsigned long long h;
         char ext[8] = "";
-        if (strlen(de->d_name) != 20 || sscanf(de->d_name, "%16llx.%4s", &h, ext) != 2 || (strcmp(ext, "png") && strcmp(ext, "dds")))
+        if (strlen(de->d_name) == 20 && sscanf(de->d_name, "%16llx.%4s", &h, ext) == 2 && (!strcmp(ext, "png") || !strcmp(ext, "dds"))) {
+            if (s->n == *cap) { *cap = *cap ? *cap * 2 : 1024; *e = realloc(*e, *cap * sizeof **e); }
+            (*e)[s->n++] = (HdEnt){h, me};
             continue;
-        if (s->n == cap) { cap = cap ? cap * 2 : 1024; s->h = realloc(s->h, cap * sizeof *s->h); }
-        s->h[s->n++] = h;
+        }
+        if (!sub || de->d_name[0] == '.' || depth >= 4 || nsub == 64) continue;
+        char p[400];
+        struct stat st;
+        if (snprintf(p, sizeof p, "%s/%s", dir, de->d_name) < (int)sizeof p && !stat(p, &st) && S_ISDIR(st.st_mode))
+            snprintf(sub[nsub++], sizeof sub[0], "%s", p);
     }
     closedir(d);
-    qsort(s->h, s->n, sizeof *s->h, hd_cmp);
-    int k = 0;  // (a texture there as both .png and .dds: once)
-    for (int i = 0; i < s->n; i++) if (!k || s->h[i] != s->h[k - 1]) s->h[k++] = s->h[i];
+    for (int i = 0; i < nsub; i++) hd_scan_dir(s, sub[i], depth + 1, e, cap);
+    free(sub);
+}
+
+static void hd_scan(HdSet *s, const char *dir) {
+    snprintf(s->dir, sizeof s->dir, "%s", dir);
+    free(s->h), free(s->f), free(s->fold);
+    s->h = NULL, s->f = NULL, s->fold = NULL, s->n = s->nfold = 0;
+    HdEnt *e = NULL;
+    int cap = 0;
+    hd_scan_dir(s, dir, 0, &e, &cap);
+    if (!s->n) { free(e); return; }
+    qsort(e, s->n, sizeof *e, hd_ent_cmp);
+    s->h = malloc(s->n * sizeof *s->h), s->f = malloc(s->n * sizeof *s->f);
+    int k = 0;  // (a texture there as both .png and .dds, or in two folders: once)
+    for (int i = 0; i < s->n; i++)
+        if (!k || e[i].h != s->h[k - 1]) s->h[k] = e[i].h, s->f[k] = e[i].f, k++;
+    free(e);
     s->n = k;
-    LOG("[tex] %d textures in %s\n", s->n, dir);
+    LOG("[tex] %d textures in %s (%d folders)\n", s->n, dir, s->nfold);
+}
+
+// The folder pack texture h is in (hd_find's set)
+static const char *hd_folder(const HdSet *s, uint64_t h) {
+    const uint64_t *p = bsearch(&h, s->h, s->n, sizeof h, hd_cmp);
+    return p ? s->fold[s->f[p - s->h]] : s->dir;
 }
 
 static void hd_init(void) {
@@ -690,10 +730,11 @@ static bool hd_candidate(const NvnTexture *t, const TexBackend *b) {
 static bool hd_load_dds(NvnTexture *t, TexBackend *b, uint64_t h, const char *path);
 
 static bool hd_replace(NvnTexture *t, TexBackend *b, uint64_t h) {
-    char path[80];
-    snprintf(path, sizeof path, "%s/%016llx.dds", hd_find(h)->dir, (unsigned long long)h);
+    char path[440];
+    const char *folder = hd_folder(hd_find(h), h);
+    snprintf(path, sizeof path, "%s/%016llx.dds", folder, (unsigned long long)h);
     if (hd_load_dds(t, b, h, path)) return true;
-    snprintf(path, sizeof path, "%s/%016llx.png", hd_find(h)->dir, (unsigned long long)h);
+    snprintf(path, sizeof path, "%s/%016llx.png", folder, (unsigned long long)h);
     SDL_Surface *s0 = SDL_LoadPNG(path);
     if (!s0) { LOG("[tex] %s: %s\n", path, SDL_GetError()); return false; }
     SDL_Surface *s = SDL_ConvertSurface(s0, SDL_PIXELFORMAT_ABGR8888);  // (R, G, B, A bytes)

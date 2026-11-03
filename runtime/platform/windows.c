@@ -15,6 +15,14 @@
 
 #include "../platform.h"
 
+// The Direct3D 12 Agility SDK: with these two exported, d3d12.dll loads D3D12Core.dll from the D3D12 folder next to
+// the exe (Microsoft's redistributable, 1.620.1) when it's there, the system's when not. DirectX 12 through Mesa's
+// Dozen needs it on Windows 10: Dozen offers the guest memory import (VK_EXT_external_memory_host) only with
+// ID3D12Device13's OpenExistingHeapFromAddress1, which Windows 10's own D3D12Core lacks - without it the world was black.
+// Vulkan drivers don't go through d3d12.dll: nothing changes for them.
+__declspec(dllexport) const unsigned int D3D12SDKVersion = 620;
+__declspec(dllexport) const char *D3D12SDKPath = ".\\D3D12\\";
+
 void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
 void rt_launcher_log(const char *fmt, ...);  // runtime/launcher_log.c
 

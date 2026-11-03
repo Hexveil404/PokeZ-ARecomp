@@ -4511,9 +4511,17 @@ static VkResult host_import_ptr(void *host, uint64_t size, VkBuffer *out_buf, Vk
     VkMemoryAllocateFlagsInfo fl = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .pNext = &imp, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
     VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = bda ? (void *)&fl : (void *)&imp, .allocationSize = size,
                                .memoryTypeIndex = (uint32_t)__builtin_ctz(mp.memoryTypeBits)};
+    // (Dozen rounds a heap of 4 MB or more up to 4 MB and opens that much at the pointer: the guest window's 3285 MB
+    // asked Direct3D 12 for 3288, the last 3 uncommitted - refused, VK_ERROR_INVALID_EXTERNAL_HANDLE, and the world drew
+    // nothing. The tail is committed and the size rounded the same way; the buffer stays the window's size)
+    if (g_vk.dozen && size >= (4u << 20) && (size & ((4u << 20) - 1))) {
+        uint64_t up = (size + (4u << 20) - 1) & ~(uint64_t)((4u << 20) - 1);
+        plat_commit((uint64_t)(uintptr_t)host + size, up - size);
+        ai.allocationSize = up;
+    }
     VkDeviceMemory mem;
     VkResult r = vkAllocateMemory(g_vk.dev, &ai, NULL, &mem);
-    if (r != VK_SUCCESS) return r;
+    if (r != VK_SUCCESS) { LOG("[vk] host import: vkAllocateMemory %d (%llu MB, type %u)\n", r, (unsigned long long)(ai.allocationSize >> 20), ai.memoryTypeIndex); return r; }
     VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
                                            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = size,
@@ -4522,9 +4530,9 @@ static VkResult host_import_ptr(void *host, uint64_t size, VkBuffer *out_buf, Vk
                                       VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | (bda ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0)};
     VkBuffer buf;
     r = vkCreateBuffer(g_vk.dev, &bi, NULL, &buf);
-    if (r != VK_SUCCESS) { vkFreeMemory(g_vk.dev, mem, NULL); return r; }
+    if (r != VK_SUCCESS) { LOG("[vk] host import: vkCreateBuffer %d\n", r); vkFreeMemory(g_vk.dev, mem, NULL); return r; }
     r = vkBindBufferMemory(g_vk.dev, buf, mem, 0);
-    if (r != VK_SUCCESS) { vkDestroyBuffer(g_vk.dev, buf, NULL); vkFreeMemory(g_vk.dev, mem, NULL); return r; }
+    if (r != VK_SUCCESS) { LOG("[vk] host import: vkBindBufferMemory %d\n", r); vkDestroyBuffer(g_vk.dev, buf, NULL); vkFreeMemory(g_vk.dev, mem, NULL); return r; }
     *out_buf = buf;
     *out_mem = mem;
     return VK_SUCCESS;

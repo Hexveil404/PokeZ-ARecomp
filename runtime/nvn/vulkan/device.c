@@ -16,6 +16,7 @@
 #include "../rqueue.h"
 #include "vk.h"
 #include "record.h"
+#include "vk_dlaa.h"
 #include "../output_scale.h"
 #include "../renderer.h"
 #include "../pace.h"
@@ -178,6 +179,7 @@ static void create_instance(void) {
         free(av);
     }
     if (ab_inst_ext && !validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    vk_dlaa_instance_exts(ext, &n_ext, 19);  // (DLAA: what NGX needs; one place kept for the validation layer's)
     if (validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;  // (last: dropped below when the layer is missing)
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
@@ -765,6 +767,7 @@ static void create_device(void) {
     // Whether the window really shows the frames presented (present_watch). LARECOMP_NO_PRESENT_WATCH=1: not checked
     bool x_pw = !ENV("LARECOMP_NO_PRESENT_WATCH") && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
                 has_ext(ep, ne, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+    vk_dlaa_device_exts(ep, ne, ext, &n_ext, 28);  // (DLAA: what NGX needs; room left for the ones added below)
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
@@ -2292,6 +2295,7 @@ void ui_window_init(void) {
     if (chosen[0]) { g_settings.gpu_name[0] = 0; settings_save(); snprintf(g_settings.gpu_name, sizeof g_settings.gpu_name, "%s", chosen); }
     pick_device();
     create_device();
+    vk_dlaa_init(g_vk.inst, g_vk.phys, g_vk.dev);
     create_swapchain();
     vk_exec_init();
     vk_shaders_init();

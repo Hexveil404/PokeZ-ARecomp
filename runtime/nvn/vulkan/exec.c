@@ -3294,7 +3294,7 @@ static void snapshots_invalidate(NvnTexture *t) {
     for (int i = 0; i < 8; i++) if ((!t || snap_tex[i] == t) && snap_ok[i]) { snap_ok[i] = false; snap_why[i] = snap_reason; }
 }
 
-typedef struct { NvnTexture *key; TexBackend copy; } Snap;
+typedef struct { NvnTexture *key; TexBackend copy; uint32_t reg_w, reg_h; } Snap;  // (reg: the area copied so far, SNAP_REGION)
 static Snap snaps[16];
 static int nsnaps;
 
@@ -3337,6 +3337,7 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
         d->format = src->format; d->width = src->width; d->height = src->height; d->depth = 1; d->layers = 1; d->levels = 1;
         d->samples = src->samples; d->aspect = src->aspect; d->base_type = VK_IMAGE_VIEW_TYPE_2D;
         vk_image_init_layout(vk_cmd(), d->image, d->aspect);
+        s->reg_w = s->reg_h = 0;
     }
     return d;
 }
@@ -3683,9 +3684,43 @@ static void resolve_feedback(Prog *pr) {
             TexBackend *dst = snapshot_image(t, src);
             VkCommandBuffer cb = vk_cmd();
             vk_full_barrier(cb);
-            gp_mark(cb, "feedback snapshot %ux%u fmt %d", src->width, src->height, src->format);
+            // The area copied: the whole texture, or (LARECOMP_SNAP_REGION=1) only as far as the game has drawn into it.
+            // Pokémon Z-A in handheld mode draws 1280x720 into targets made 1920x1080 (its docked size): a depth +
+            // stencil snapshot of the whole target took 7 ms of a 16 ms frame on the Steam Deck (RADV, [gpuprof]).
+            // The extent is the largest viewport / scissor seen at this texture's snapshots (it only grows, so a later
+            // bigger draw is still covered; a new size resets it). LARECOMP_LOG_SNAP=1: each snapshot's area, logged.
+            uint32_t cw = src->width, ch = src->height;
+            {
+                static int region = -1, lg = -1;
+                if (region < 0) region = ENV("LARECOMP_SNAP_REGION") && atoi(ENV("LARECOMP_SNAP_REGION")) != 0;
+                if (lg < 0) lg = ENV("LARECOMP_LOG_SNAP") != NULL;
+                const float *v = st.viewport[0];
+                float vx1 = v[0] + v[2], vy1 = v[3] < 0 ? v[1] : v[1] + v[3];
+                int sx1 = st.scissor[0][0] + st.scissor[0][2], sy1 = st.scissor[0][1] + st.scissor[0][3];
+                uint32_t ew = (uint32_t)ceilf(vx1 > 0 ? vx1 : 0), eh = (uint32_t)ceilf(vy1 > 0 ? vy1 : 0);
+                if (sx1 > 0 && (uint32_t)sx1 < ew) ew = (uint32_t)sx1;  // (a scissor inside the viewport bounds it)
+                if (sy1 > 0 && (uint32_t)sy1 < eh) eh = (uint32_t)sy1;
+                // (the viewport is in the game's units: our render scale applied, as the image is)
+                if (t->width && t->height) ew = (uint32_t)ceilf(ew * (float)src->width / t->width), eh = (uint32_t)ceilf(eh * (float)src->height / t->height);
+                Snap *sp = NULL;
+                for (int k = 0; k < nsnaps; k++) if (snaps[k].key == t) sp = &snaps[k];
+                if (region && sp && ew && eh) {
+                    if (ew > sp->reg_w) sp->reg_w = ew;
+                    if (eh > sp->reg_h) sp->reg_h = eh;
+                    if (sp->reg_w < cw) cw = sp->reg_w;
+                    if (sp->reg_h < ch) ch = sp->reg_h;
+                }
+                if (lg) {
+                    static int nlog;
+                    if (nlog++ < 60 || nlog % 600 == 0)
+                        LOG("[snap] %ux%u fmt %d: viewport %.0f,%.0f %.0fx%.0f scissor %d,%d %dx%d -> copy %ux%u%s\n", src->width,
+                            src->height, src->format, v[0], v[1], v[2], v[3], st.scissor[0][0], st.scissor[0][1], st.scissor[0][2],
+                            st.scissor[0][3], cw, ch, region ? "" : " (whole: LARECOMP_SNAP_REGION off)");
+                }
+            }
+            gp_mark(cb, "feedback snapshot %ux%u fmt %d (copied %ux%u)", src->width, src->height, src->format, cw, ch);
             VkImageCopy rg = {.srcSubresource = {src->aspect, 0, 0, 1}, .dstSubresource = {src->aspect, 0, 0, 1},
-                              .extent = {src->width, src->height, 1}};
+                              .extent = {cw, ch, 1}};
             rec_CmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
             if (g_debug_frame && (src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
                 static int nd;

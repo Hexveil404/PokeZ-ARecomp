@@ -1220,6 +1220,36 @@ static const char *builtin_src(const char *name, int *stage) {
                "  if (v != w && (pc.cpu_wins == 0u || h[pc.dst + i] == w)) h[pc.dst + i] = v;\n"
                "}\n";
     }
+    // (exec.c ia_refresh) GPU-filled indirect draw parameters copied out of the guest heap (g) into private records, the
+    // draw size bounded. s holds pc.cap slots: pc.cap records of 5 words, then pc.cap source word offsets into the heap,
+    // then pc.cap caps {count, instances} the draws' translation writes; the first pc.n slots are in use. pc.work bounds
+    // count x instances - a block the game had already rewritten (GPU overlap) asked for a billion instances and the
+    // Steam Deck's ring timed out (5 s) with no page fault.
+    if (!strcmp(name, "ind_private.comp")) {  // (exec.c ia_refresh) sn: the submit-time snapshot of the first snap_n slots
+        *stage = STAGE_COMPUTE;
+        return "#version 450\n"
+               "layout(local_size_x = 64) in;\n"
+               "layout(std430, set = 0, binding = 0) readonly buffer G { uint g[]; };\n"
+               "layout(std430, set = 0, binding = 1) buffer S { uint s[]; };\n"
+               "layout(std430, set = 0, binding = 2) readonly buffer N { uint sn[]; };\n"
+               "layout(push_constant) uniform P { uint n; uint work; uint cap; uint flags; uint snap_n; } pc;\n"
+               "void main() {\n"
+               "  uint i = gl_GlobalInvocationID.x;\n"
+               "  if (i >= pc.n) return;\n"
+               "  uint src = s[pc.cap * 5u + i], d = i * 5u, c = pc.cap * 6u + i * 2u;\n"
+               "  uint v[5] = uint[5](g[src], g[src + 1u], g[src + 2u], g[src + 3u], g[src + 4u]);\n"
+               "  if (i < pc.snap_n) {\n"
+               "    uint dg = pc.cap * 8u;\n"  // (diagnostics: words the GPU sees other than the game had at submission)
+               "    for (uint w = 0u; w < 5u; w++) if (v[w] != sn[i * 5u + w]) atomicAdd(s[dg + w], 1u);\n"
+               "    atomicAdd(s[dg + 5u], 1u);\n"
+               "    if ((pc.flags & 1u) != 0u) { v[0] = sn[i * 5u]; v[2] = sn[i * 5u + 2u]; v[3] = sn[i * 5u + 3u]; v[4] = sn[i * 5u + 4u]; }\n"
+               "  }\n"
+               "  uint count = min(v[0], s[c]), inst = min(v[1], s[c + 1u]);\n"
+               "  if (count > 0u && inst > pc.work / count) inst = pc.work / count;\n"
+               "  s[d] = count; s[d + 1u] = inst;\n"
+               "  s[d + 2u] = v[2]; s[d + 3u] = v[3]; s[d + 4u] = v[4];\n"
+               "}\n";
+    }
     return NULL;
 }
 

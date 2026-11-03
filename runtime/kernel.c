@@ -132,6 +132,25 @@ uint64_t kernel_phys_largest(uint64_t *addr) {
     pthread_mutex_unlock(&g_mlock);
     return best;
 }
+// Guest memory the runtime keeps for itself right after a physical memory region: the Vulkan backend's storage copies
+// (64 MB; exec.c gwin_pick: Pokémon Z-A has no heap for the ring to follow, and shaders reach a copy only inside the window
+// they address). Z-A's pool ends at 0x7740000000 and nothing of its own is ever mapped above it (2600 mappings over a
+// session on the Deck, 2026-11-01: all at 0x7400000000-0x7485000000); a physical mapping into the range is refused
+// all the same (LimitReached, which the game expects when memory runs out).
+static uint64_t phys_ring_lo, phys_ring_hi;
+uint64_t kernel_phys_ring(uint64_t after, uint64_t size) {
+    pthread_mutex_lock(&g_mlock);
+    bool ok = after >= ALIAS_BASE && after + size <= ALIAS_BASE + ALIAS_SIZE && !phys_ring_hi;
+    for (int i = 0; i < nregions && ok; i++)
+        if (regions[i].addr < after + size && after < regions[i].addr + regions[i].size) ok = false;
+    if (ok) {
+        plat_commit(after, size);
+        phys_ring_lo = after, phys_ring_hi = after + size;
+    }
+    pthread_mutex_unlock(&g_mlock);
+    return ok ? after : 0;
+}
+
 // Writable guest data regions (heap, mapped/physical memory, module .data): for debug/runtime memory scans.
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {
     int n = 0;
@@ -1020,6 +1039,13 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
             static int nlog;
             if (nlog++ < 4) LOG("[kernel] MapPhysicalMemory %llx +%llx: LimitReached (used %llu MB)\n", x[0], x[1],
                                 (unsigned long long)(used_memory() >> 20));
+            x[0] = R_LIMIT_REACHED;
+            break;
+        }
+        if (phys_ring_hi && x[0] < phys_ring_hi && phys_ring_lo < x[0] + x[1]) {  // (kernel_phys_ring: the runtime's)
+            pthread_mutex_unlock(&g_mlock);
+            static int nlog;
+            if (nlog++ < 4) LOG("[kernel] MapPhysicalMemory %llx +%llx: into the runtime's storage copies - LimitReached\n", x[0], x[1]);
             x[0] = R_LIMIT_REACHED;
             break;
         }

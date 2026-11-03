@@ -98,12 +98,16 @@ static int passes_in_sub;  // render passes in the submission being recorded (LA
 
 // CPU / GPU overlap (as renderer.m: the Metal backend, metal-overlap). The game's frame loop submits a frame, presents
 // it, and at once waits on that frame's fence (every SyncWait is on the newest submission), so it builds frame N+1
-// only once the GPU has finished frame N: a frame costs CPU + GPU time in series. Here the wait is taken one fence
-// late: SyncWait(fence N) waits for fence N-1's submission and returns, and the next SyncWait waits for N. The CPU
-// builds frame N+1 while the GPU draws N; at most two frames of GPU work are queued; a fence already complete is never
-// waited for. Everything this backend recycles is keyed on the timeline (sub(), vk_transient, the set pools after the
-// slot's wait, readbacks and screenshots wait on their own submission), not on the game's fence, so only the game
-// thread's wait changes. What the game may touch in that frame while the GPU still reads it: its per-frame vertex /
+// only once the GPU has finished frame N: a frame costs CPU + GPU time in series. Here the wait is taken one frame
+// late: SyncWait(a fence of frame N) waits for frame N-1's last submission (its present) and returns. The CPU builds
+// frame N+1 while the GPU draws N; at most two frames of GPU work are queued; a fence already complete is never
+// waited for. One frame, not one fence: Pokémon Z-A waits on two fences a frame (one mid-frame, one after the
+// present), and with the wait one fence late the second waited for the first - the same frame's. That held only while
+// the GPU had finished the mid-frame fence by then: one slow frame (a 44 ms hitch) and every frame after waited on
+// it, the GPU idling while the CPU built, for good (Steam Deck: 54 -> 31 fps until a restart, 2026-10-29).
+// Everything this backend recycles is keyed on the timeline (sub(), vk_transient, the set pools after the slot's
+// wait, readbacks and screenshots wait on their own submission), not on the game's fence, so only the game thread's
+// wait changes. What the game may touch in that frame while the GPU still reads it: its per-frame vertex /
 // index data in the guest heap (bound in place; an engine built to overlap double-buffers it anyway), uniform data is
 // copied at translation (guest_copy), GPU results the CPU reads (texture / buffer copies) are flushed synchronously,
 // and the storage buffers it rewrites one frame ahead get copies (snap_storage). The timing counters are read a frame
@@ -111,7 +115,8 @@ static int passes_in_sub;  // render passes in the submission being recorded (LA
 // (cq_resolve keeps it host side and no longer writes the game's memory late - the game may have reused the slot).
 // LARECOMP_GPU_OVERLAP=0: off (the wait on the fence's own submission, as before); =1: on.
 #define VK_OVERLAP_DEFAULT 1  // on where the write watch can run (overlap_on: off by itself without page write tracking)
-static uint64_t deferred_seq;   // (seq_lock) the fence the game was told is done but whose submission wasn't waited for
+static uint64_t deferred_seq[2];  // (seq_lock) the latest two fences the game waited on, newest first (overlap_defer)
+static uint64_t present_seq[2];   // (seq_lock) the game's latest two presents' submissions, newest first: frames' ends
 static uint64_t stat_deferred;  // SyncWaits returned without waiting (stats)
 static uint64_t stat_snap_bytes, stat_snap_copies;  // storage copies made (snap_storage; stats, per period)
 // The overlap needs the storage write watch (snap_storage: the OS's page write tracking), the only thing that catches
@@ -461,6 +466,7 @@ static void begin_cb(VkCommandBuffer *cb, bool *begun) {
 }
 
 static void gp_mark(VkCommandBuffer cb, const char *fmt, ...);
+static void ia_refresh(VkCommandBuffer cb);  // (the GPU-filled indirect parameters' private records, below)
 VkCommandBuffer vk_cmd(void) {
     Sub *s = sub();
     if (!s->main_begun) {
@@ -485,6 +491,7 @@ VkCommandBuffer vk_cmd(void) {
             rec_CmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_NONE, prof_qp, (uint32_t)cur_sub * 3);
             s->ts = true;
         }
+        ia_refresh(s->main);  // (the CPU's parameter writes before this submission; under the overlap only)
     }
     return s->main;
 }
@@ -706,9 +713,18 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
 
 void renderer_submit(void) { vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
 
+// (overlap_defer) The game's frame was just presented (device.c, at the end of its present item): the latest
+// submission is a frame's end. Once per game frame, at the item's end: the fence the game places right after
+// presenting resolves to the present item's last submission.
+void vk_overlap_frame_end(void) {
+    pthread_mutex_lock(&seq_lock);
+    present_seq[1] = present_seq[0], present_seq[0] = submit_seq;
+    pthread_mutex_unlock(&seq_lock);
+}
+
 static void overlap_clear(void) {  // (a full wait was made: everything queued so far is done)
     pthread_mutex_lock(&seq_lock);
-    deferred_seq = 0;
+    deferred_seq[0] = deferred_seq[1] = 0;
     pthread_mutex_unlock(&seq_lock);
 }
 
@@ -740,22 +756,21 @@ void renderer_sync(void) {
     overlap_clear();
 }
 
-// (overlap) The game's SyncWait on submission seq: done is the latest complete submission, *deferred the one a previous
-// call returned early for (0: none). Returns the submission to wait for now (0: none); updates *deferred. A fence
-// that is complete is never waited for; a newer fence than the deferred one waits for the deferred one and takes its
-// place; the deferred fence itself, or an older one, is waited for. (tools/test_vulkan_overlap.py)
-static uint64_t overlap_defer(uint64_t seq, uint64_t done, uint64_t *deferred) {
-    uint64_t prev = *deferred;
-    if (seq <= done) {  // complete (in order: a deferred one no newer than it is complete too)
-        if (seq >= prev) *deferred = 0;
-        return 0;
+// (overlap) The game's SyncWait on submission seq: done is the latest complete submission, pres the latest two presents'
+// submissions (newest first: the frames' ends), *hist the latest two fences waited on (newest first). Returns the
+// submission to wait for now (0: none); updates *hist. A fence of the newest presented frame or later waits for the
+// frame before its own - the newest present older than it - never for a fence of its own frame; and for the fence two
+// waits back, which bounds the queue where nothing presents (loading). A fence of an earlier frame, or the same
+// fence again: a real wait on it. A complete submission is never waited for. (tools/test_vulkan_overlap.py)
+static uint64_t overlap_defer(uint64_t seq, uint64_t done, const uint64_t pres[2], uint64_t hist[2]) {
+    uint64_t w;
+    if (seq <= pres[1] || seq == hist[0]) w = seq;
+    else {
+        w = seq <= pres[0] ? pres[1] : pres[0];  // (seq up to the newest present: the game waits after presenting)
+        if (hist[1] > w && hist[1] < seq) w = hist[1];
     }
-    if (seq > prev) {  // a newer fence: the deferred one is waited for now, this one at the next call
-        *deferred = seq;
-        return prev > done ? prev : 0;
-    }
-    if (seq == prev) *deferred = 0;  // the deferred fence again, or an older one: a real wait on it
-    return seq;
+    if (seq > hist[0]) hist[1] = hist[0], hist[0] = seq;
+    return w > done ? w : 0;
 }
 
 uint64_t renderer_fence_seq(void) {
@@ -786,10 +801,10 @@ void renderer_wait_seq(uint64_t seq) {
     pthread_mutex_unlock(&seq_lock);
     wait_why = seq > s ? "SyncWait (fence not submitted yet)" : "SyncWait";
     if (seq > s) seq = s;  // not queued yet (other thread): everything queued so far (vk_wait_seq: the recorder, then the GPU)
-    if (overlap_on()) {  // (see deferred_seq) wait for the fence deferred last time, defer this one
+    if (overlap_on()) {  // (see deferred_seq) wait for the frame before this fence's, defer the rest
         uint64_t done = vk_completed_seq();  // (the timeline's value: a submission the recorder hasn't made yet isn't done)
         pthread_mutex_lock(&seq_lock);
-        uint64_t w = overlap_defer(seq, done, &deferred_seq);
+        uint64_t w = overlap_defer(seq, done, present_seq, deferred_seq);
         pthread_mutex_unlock(&seq_lock);
         static int store_wait = -1;
         if (store_wait < 0) store_wait = !ENV("LARECOMP_GPU_STORE_WAIT") || atoi(ENV("LARECOMP_GPU_STORE_WAIT")) != 0;
@@ -1599,6 +1614,8 @@ static int debug_pass_no;
 static bool g_ind_gpu;
 static VkDeviceSize g_ind_off;
 static uint32_t g_ind_stride;
+static VkBuffer g_ind_buf;  // (VK_NULL_HANDLE: the window's buffer; else ia_claim's private record there)
+static uint64_t g_ind_pa;   // (the guest block's address, for the device-lost trace)
 // Transform feedback state (Begin/EndTransformFeedback, the bound buffers) and rasterizer discard
 static bool xfb_on, raster_discard;
 // SetRenderEnable / SetRenderEnableConditional: while off, the game's draws and clears do nothing (the game turns
@@ -2485,9 +2502,13 @@ static void compile_program(void *arg) {
 // The guest memory window that shader global memory, the vertex cache and the texture upload checks cover: the heap
 // (SetHeapSize), or for a game on the SDK's virtual address memory, which has no heap (Pokémon Legends Z-A), its
 // largest physical memory region (svcMapPhysicalMemory, at most HEAP_MAX). Picked once, at first use: shaders bake
-// the base in.
-typedef struct { uint64_t base, max; bool phys; } GWin;
-static GWin gwin_ = {HEAP_BASE, HEAP_MAX, false};
+// the base in. Under the overlap a physical window also takes the storage copies' ring right after the region
+// (kernel_phys_ring; snap_on): the copies must be guest addresses inside what shaders address, and with no heap
+// there was no ring - Z-A's overlap ran without storage copies ("snap 0KB/0"), the CPU's rewrite of what its culling
+// compute reads landing while the GPU read it: garbage indirect draws, a ring timeout at a big scene change on the Deck.
+typedef struct { uint64_t base, max, ring; bool phys; } GWin;  // (ring: the copies' offset in the window, 0: none)
+static GWin gwin_ = {HEAP_BASE, HEAP_MAX, 0, false};
+#define GWIN_RING (64ull << 20)  // (= SNAP_RING, below)
 static atomic_bool gwin_done;
 static void gwin_pick(void) {
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -2498,15 +2519,22 @@ static void gwin_pick(void) {
         if (force) {
             unsigned long long fb = 0, fs = 0;
             sscanf(force, "%llx:%llx", &fb, &fs);
-            gwin_ = (GWin){fb, fs, true};
+            gwin_ = (GWin){fb, fs, 0, true};
             plat_commit(fb, fs);  // (the host import needs every page committed)
             LOG("[vk] guest memory window forced: %llx +%llx\n", fb, fs);
             atomic_store(&gwin_done, true);
         } else if (kernel_heap_size()) atomic_store(&gwin_done, true);
         else if (sz >= (64ull << 20)) {
-            gwin_ = (GWin){a, sz < HEAP_MAX ? sz : HEAP_MAX, true};
-            LOG("[vk] guest memory window: physical memory %llx +%llx (no heap)\n", (unsigned long long)a,
-                (unsigned long long)gwin_.max);
+            gwin_ = (GWin){a, sz < HEAP_MAX ? sz : HEAP_MAX, 0, true};
+            uint64_t roff = (gwin_.max + 0xFFFF) & ~0xFFFFull;  // (minImportedHostPointerAlignment: 64 KB at most)
+            // (reserved unless the overlap or the copies are turned off: overlap_on would look at the page tables,
+            // which ask the window - this. Unused, it costs only addresses the game never maps)
+            const char *e = getenv("LARECOMP_OVERLAP_SNAP"), *ov = getenv("LARECOMP_GPU_OVERLAP");
+            if (sz <= HEAP_MAX && (!e || atoi(e) != 0) && (!ov || atoi(ov) != 0) && roff + GWIN_RING <= HEAP_MAX &&
+                kernel_phys_ring(a + roff, GWIN_RING))
+                gwin_.ring = roff, gwin_.max = roff + GWIN_RING;
+            LOG("[vk] guest memory window: physical memory %llx +%llx (no heap)%s\n", (unsigned long long)a,
+                (unsigned long long)sz, gwin_.ring ? ", the storage copies' ring right after it" : "");
             atomic_store(&gwin_done, true);
         }
     }
@@ -3782,12 +3810,17 @@ static VkSpan rscale_dedupe(int sg, const float rs[66][4], int nt) {
 // into a copy survive; a copy unused for 10 s is released. At ~100 KB a frame that wait is long satisfied; a half
 // filling within one submission (not a real case) binds the original for that draw.
 // LARECOMP_OVERLAP_SNAP=0: off (everything in place, as before: shows the race).
-#define SNAP_HALF (8ull << 20)
+#define SNAP_HALF (32ull << 20)  // (8 MB until Z-A: its 4 MB culling input, with its pristine image, filled a half alone - "copy ring full")
 #define SNAP_RING (2 * SNAP_HALF)
+_Static_assert(SNAP_RING == GWIN_RING, "gwin_pick reserves the ring");
 enum { RS_PROBE, RS_COPY, RS_PLACE };
 typedef struct { uint64_t addr, size, copy, pristine, hash, frame; uint32_t gen, level, wgen; uint8_t mode; bool cs_bound, draw_bound; } RangeState;  // (wgen: watch_check; pristine: rs_copy_make)
-static RangeState rs_tab[512];
-static uint64_t rs_store_frame[512];  // (watch: the frame of the previous CPU write seen on a range's own pages)
+// 2048 entries (512 until Z-A: its royale zones bind more small per-object ranges than that, and the table evicted
+// every frame - an evicted range is probed again, and the GPU's writes during a probe frame go to a copy the draws
+// don't read: textures flickering). rs_find's cache keeps the lookup off a scan of the whole table.
+#define RS_MAX 2048
+static RangeState rs_tab[RS_MAX];
+static uint64_t rs_store_frame[RS_MAX];  // (watch: the frame of the previous CPU write seen on a range's own pages)
 static int nrs;
 static int snap_state = -1;        // -1 not decided (the heap not set up yet), 0 off, 1 on
 static uint64_t snap_base;         // heap offset of the ring (on)
@@ -3815,19 +3848,25 @@ static void snap_ring_import_tail(void);  // (with the lazy chunks below)
 // Decided once the game's heap is set up (SetHeapSize), which is before anything is drawn: the ring follows the heap.
 static bool snap_on(void) {
     if (snap_state >= 0) return snap_state;
-    uint64_t heap = kernel_heap_size();
+    bool phys = gwin()->phys;  // (a physical-memory window: the ring gwin_pick reserved after it, or none)
+    uint64_t heap = phys ? gwin_.ring : kernel_heap_size();
+    if (phys && !heap) {
+        snap_state = 0;
+        if (overlap_on()) LOG("[vk] storage snapshots off: no room for the ring after the guest memory window\n");
+        return false;
+    }
     if (!heap) return false;  // (not decided yet)
     const char *e = getenv("LARECOMP_OVERLAP_SNAP");
     snap_state = (!e || atoi(e) != 0) && overlap_on();
     if (snap_state) {
         snap_base = (heap + 0xFFFF) & ~0xFFFFull;  // (minImportedHostPointerAlignment: 64 KB at most)
-        if (snap_base + SNAP_RING > HEAP_MAX) {
+        if (snap_base + SNAP_RING > (phys ? gwin_max : HEAP_MAX)) {
             snap_state = 0;
             LOG("[vk] storage snapshots off: the game's heap fills the range\n");
         } else {
-            plat_commit(HEAP_BASE + snap_base, SNAP_RING);  // (Windows: backed before the import pins it)
-            LOG("[vk] storage buffers the CPU rewrites: copies at %llx (%llu MB ring after the game's heap)\n",
-                (unsigned long long)(HEAP_BASE + snap_base), (unsigned long long)(SNAP_RING >> 20));
+            plat_commit(gwin_base + snap_base, SNAP_RING);  // (Windows: backed before the import pins it)
+            LOG("[vk] storage buffers the CPU rewrites: copies at %llx (%llu MB ring after the game's %s)\n",
+                (unsigned long long)(gwin_base + snap_base), (unsigned long long)(SNAP_RING >> 20), phys ? "physical memory" : "heap");
             snap_ring_import_tail();  // (lazy chunks: one imported short of the ring already is imported again over it)
         }
     }
@@ -3862,7 +3901,7 @@ static void rs_log(RangeState *e, const char *what, bool cs_slot, uint64_t f) { 
 // The offset in the current half where `need` bytes fit from `at` on, skipping live copies (with their pristine
 // images); ~0 when none
 static uint64_t rs_ring_fit(uint64_t at, uint64_t need) {
-    uint64_t half_lo = HEAP_BASE + snap_base + (uint64_t)snap_half * SNAP_HALF;
+    uint64_t half_lo = gwin_base + snap_base + (uint64_t)snap_half * SNAP_HALF;
     for (bool moved = true; moved && at + need <= SNAP_HALF;) {
         moved = false;
         for (int i = 0; i < nrs; i++) {
@@ -3890,14 +3929,14 @@ static uint64_t ring_take(uint64_t need) {
         snap_half = other;
         snap_off = 0;
         at = rs_ring_fit(0, need);
-        if (at == ~0ull) {  // (the half is all live copies: not in practice - 512 entries, most far smaller)
+        if (at == ~0ull) {  // (the half is all live copies: not in practice - most entries far smaller than a half)
             static int warned;
             if (warned++ < 3) LOG("[snap] copy ring full: %llu bytes in place\n", (unsigned long long)need);
             return 0;
         }
     }
     snap_off = at + need;
-    return HEAP_BASE + snap_base + (uint64_t)snap_half * SNAP_HALF + at;
+    return gwin_base + snap_base + (uint64_t)snap_half * SNAP_HALF + at;
 }
 // A copy a compute dispatch binds carries the GPU's own writes into it (the exposure program 72a8da6000 keeps its
 // adaptation state in the 2040-byte exposure list it reads and writes; the lists' tile data beside it is the CPU's).
@@ -4003,15 +4042,66 @@ static int watch_check(RangeState *e) {
     return 0;  // (only pages shared with small parameter blocks were written: theirs)
 }
 
+// Pages holding GPU-filled indirect draw parameters (draw_indirect notes them): the culling compute that writes the
+// instance counts binds them as storage, and a copy took its writes away from where the draws read them - the first
+// Z-A run with the copies (2026-11-01: no instance count the GPU read differed from the submission's any more). Kept
+// in place: the CPU's words there have their own submit-time snapshot (ia_snap_submit).
+#define IP_HASH 4096
+static uint64_t ip_page[IP_HASH];  // (page number + 1; 0: empty)
+static void ind_page_note(uint64_t pa) {
+    for (uint64_t pg = pa >> 12; pg <= (pa + 19) >> 12; pg++) {
+        uint32_t h = (uint32_t)(pg * 0x9E3779B97F4A7C15ull >> 52) & (IP_HASH - 1);
+        while (ip_page[h] && ip_page[h] != pg + 1) h = (h + 1) & (IP_HASH - 1);
+        if (!ip_page[h]) {
+            static int n;
+            if (n++ >= IP_HASH / 2) return;  // (full enough: no more pages - none seen in Z-A beyond a few)
+            ip_page[h] = pg + 1;
+        }
+    }
+}
+// By page, not by the blocks' own bytes: Z-A's 4 MB buffer right after its 256 KB of parameter records only shares a
+// page with them, and copied (an exact byte test, b68 on the Deck) the player character didn't appear and textures
+// flickered from the start - it holds GPU outputs the draws read in place. In place (b66) it ran 1 h 45 through four
+// night transitions at 60 fps.
+static bool ind_pages_hit(uint64_t addr, uint64_t size) {
+    for (uint64_t pg = addr >> 12; pg <= (addr + size - 1) >> 12; pg++) {
+        uint32_t h = (uint32_t)(pg * 0x9E3779B97F4A7C15ull >> 52) & (IP_HASH - 1);
+        for (; ip_page[h]; h = (h + 1) & (IP_HASH - 1))
+            if (ip_page[h] == pg + 1) return true;
+    }
+    return false;
+}
+
 // The address a binder of [addr, addr+size) uses: the original or its copy (cs_slot: bound by a compute dispatch)
 static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
-    if (!snap_on() || !addr || !size || addr < HEAP_BASE || addr - HEAP_BASE + size > snap_base) return addr;
+    if (!snap_on() || !addr || !size || addr < gwin_base || addr - gwin_base + size > snap_base) return addr;
+    if (ind_pages_hit(addr, size)) {  // (indirect draw parameters: in place, see above)
+        static int logged;
+        if (logged < 8) {
+            logged++;
+            LOG("[snap] %llx+%llu in place: holds GPU-filled indirect draw parameters (%s bind)\n", (unsigned long long)addr,
+                (unsigned long long)size, cs_slot ? "compute" : "draw");
+        }
+        return addr;
+    }
+    // Pokémon Z-A (a physical-memory window): a range over 128 KB stays in place. Its big storage ranges (256 KB, 1 MB,
+    // 4 MB next to the indirect parameter records) are the culling's own GPU working buffers, which draws also read in
+    // place (vertex streams aren't redirected to copies), and the one-frame hash probe can't tell the GPU's in-flight
+    // writes (the overlap) from the CPU's. Copied (b68 on the Deck: a 64 MB ring had room for them) the GPU's wait
+    // grew to 875 ms within 20 s and the player character didn't appear; with the old 16 MB ring they mostly found no
+    // room and stayed in place (b66: 1 h 45 through four night transitions). What the CPU rewrites there is small: the
+    // light / exposure lists and the per-object blocks, all under 64 KB.
+    if (gwin_.phys && size > (128u << 10)) {
+        static int logged;
+        if (logged++ < 8) LOG("[snap] %llx+%llu in place: a GPU working buffer (over 128 KB, Pokémon Z-A)\n", (unsigned long long)addr, (unsigned long long)size);
+        return addr;
+    }
     if (size > SNAP_HALF / 2) {  // (the tile lists grow with the render resolution: ~1.2 MB at 7680x4320; a half holds two of these)
         static int logged;
         if (logged++ < 4) LOG("[vk] storage range %llx+%llu too large for a snapshot: read in place\n", (unsigned long long)addr, (unsigned long long)size);
         return addr;
     }
-    if (kernel_heap_size() > snap_base) {  // (the game grew its heap into the ring: off from now on)
+    if (!gwin_.phys && kernel_heap_size() > snap_base) {  // (the game grew its heap into the ring: off from now on)
         static bool logged;
         if (!logged) { logged = true; LOG("[vk] storage snapshots off: the game's heap grew into the ring\n"); }
         snap_state = 0;
@@ -4038,11 +4128,20 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         return at;
     }
     RangeState *e = NULL;
-    for (int i = 0; i < nrs; i++) if (rs_tab[i].addr == addr && rs_tab[i].size == size) { e = &rs_tab[i]; break; }
+    {   // (a direct-mapped cache of the last index per address and size, checked - entries move when one is dropped)
+        static int16_t rs_cache[4096];
+        uint32_t h = (uint32_t)(((addr >> 4) ^ (size * 0x9E3779B1u)) * 0x9E3779B97F4A7C15ull >> 52) & 4095;
+        int c = rs_cache[h] - 1;
+        if (c >= 0 && c < nrs && rs_tab[c].addr == addr && rs_tab[c].size == size) e = &rs_tab[c];
+        else {
+            for (int i = 0; i < nrs; i++) if (rs_tab[i].addr == addr && rs_tab[i].size == size) { e = &rs_tab[i]; break; }
+            if (e) rs_cache[h] = (int16_t)(e - rs_tab + 1);
+        }
+    }
     uint64_t c;
     if (!e) {
         int k = nrs;
-        if (nrs == 512) {  // table full: the entry bound longest ago makes room (never the whole table at once)
+        if (nrs == RS_MAX) {  // table full: the entry bound longest ago makes room (never the whole table at once)
             k = 0;
             for (int i = 1; i < nrs; i++) if (rs_tab[i].frame < rs_tab[k].frame) k = i;
             rs_log(&rs_tab[k], "evicted (table full, bound longest ago)", cs_slot, f);
@@ -4342,7 +4441,11 @@ static void gmem_window_get(uint64_t *lo, uint64_t *len) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;  // (the translator and the render thread - run_queued_now - both ask)
     pthread_once(&once, gmem_window_init);
     if (!gmem_window || !gwin()->phys || gwin_max <= gmem_window) { *lo = 0; *len = gwin_max; return; }
-    *lo = (gwin_max - gmem_window) & ~0xFFFFFull;
+    // (the window is the game's top <MB> plus the storage copies' ring above it: anchored at the window's end, the
+    // 64 MB ring pushed 48 MB of game memory out of the import - read as zero: the player character missing, vertex
+    // explosions; b69 on the Deck)
+    uint64_t top = gwin()->ring ? gwin_.ring : gwin_max;
+    *lo = top > gmem_window ? (top - gmem_window) & ~0xFFFFFull : 0;
     *len = gwin_max - *lo;
 }
 
@@ -6709,6 +6812,7 @@ static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz) {
     stat_dispatches++;
     subr_now.dispatches++, subr_now.cs = cp->code;
     if (g_debug_frame && g_fullcap) fullcap_dispatch(true, gx, gy, gz);  // (after: gfast's copy back included)
+    ia_refresh(cb);  // (the instance counts it may have written, into the private records; under the overlap only)
 }
 
 // ================================================================== draws
@@ -7742,7 +7846,7 @@ static void draw_(CmdRec *r, bool indexed) {
             ss.known &= ~SS_SC;
         }
         if (g_ind_gpu && ind_ok && nruns == 1) {  // (indirect: instance count etc. written by the GPU - culling)
-            rec_CmdDrawIndirect(cb, gmem_buf, g_ind_off, 1, g_ind_stride, indexed);
+            rec_CmdDrawIndirect(cb, g_ind_buf ? g_ind_buf : gmem_buf, g_ind_off, 1, g_ind_stride, indexed);
         } else if (!use_index) rec_CmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
         else rec_CmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);
     }
@@ -7751,8 +7855,8 @@ static void draw_(CmdRec *r, bool indexed) {
     dl_note("draw vs %llx fs %llx%s xfb %d", (unsigned long long)st.program->stages[0].code_addr,
             (unsigned long long)st.program->stages[1].code_addr, g_ind_gpu && ind_ok ? " indirect" : "", xfb_on);
     if (g_ind_gpu && ind_ok && dl_on > 0) {
-        dl_args[(dl_n - 1) & (DL_N - 1)] = gwin_base + gmem_lo + g_ind_off;
-        memcpy(dl_snap[(dl_n - 1) & (DL_N - 1)], (const void *)(uintptr_t)(gwin_base + gmem_lo + g_ind_off), 20);
+        dl_args[(dl_n - 1) & (DL_N - 1)] = g_ind_pa;  // (the guest block, also when a private record is drawn: ia_claim)
+        memcpy(dl_snap[(dl_n - 1) & (DL_N - 1)], (const void *)(uintptr_t)g_ind_pa, 20);
     }
     if (dl_on > 0) vk_checkpoint(cb, dl_n);
     if (g_debug_frame) {  // the probe (above)
@@ -8207,6 +8311,245 @@ static bool ind_args_bad(const uint32_t *p, uint64_t pa, bool elements) {
     stat_skipped_here();
     return true;
 }
+// ---- GPU-filled indirect parameters under the GPU overlap: private records. The draws whose instance count the GPU
+// writes (Pokémon Z-A's culling compute) read their parameters in the guest heap when they run - and with the overlap the
+// game builds the next frame meanwhile, in memory it reuses on the assumption that the GPU is done: the blocks held other
+// data by the time the GPU got there (Steam Deck, 2026-10-31: at frame 8800 sixty draws asked for counts in the hundreds,
+// one for 1069780133 instances - a float - and the gfx ring timed out after 5 s with no page fault: every app's GPU work
+// stopped, Steam's own included, and the GPU stayed unstable until a reboot). ind_args_bad / ib_overrun only see what
+// the CPU saw at translation. So under the overlap each such block the draws have used gets a slot in a private buffer
+// of ours, which a small dispatch (ind_private.comp) fills from the heap - the count, the instances (by the instance
+// streams' size) and count x instances bounded - at points already outside any pass: after each of the game's
+// dispatches (what writes the instance counts) and at each submission's start (the CPU's writes before it). A
+// rewritten block can make a draw wrong for a frame, not stop the GPU. Z-A's blocks stay at the same addresses (a few
+// hundred, 0x77394b8000 on), so a block is in place only on its first use. (A first version split the pass at each
+// such draw to fill its record just before: 500 splits a frame, 1.3 fps on the Deck.)
+// LARECOMP_VK_IND_PRIVATE=0: off (in place, as before); =1: on without the overlap too (tests). LARECOMP_VK_IND_WORK=
+// <vertices>: the count x instances bound (default 32M - the busiest Z-A frame draws a few million).
+#define IA_CAP 8192         // slots (blocks known)
+#define IA_HASH 16384       // (open addressing, a power of two)
+static uint64_t ia_key[IA_HASH];   // guest block address (0: empty)
+static uint32_t ia_val[IA_HASH];   // its slot
+static uint32_t ia_n, ia_ready;    // slots in use; the first ia_ready of them were filled by a refresh already recorded
+static VkBuffer ia_gm;             // the window's buffer (and gmem_lo) the source offsets were taken in: a new import resets
+static uint64_t ia_lo;
+static VkBuffer ia_buf;            // [IA_CAP records x 5 words][IA_CAP source offsets][IA_CAP caps x 2], host-visible
+static VmaAllocation ia_mem;
+static uint32_t *ia_ptr;
+static VkPipeline ia_pipe;
+static VkPipelineLayout ia_layout;
+static VkDescriptorSetLayout ia_set_layout;
+static uint64_t stat_ia_refresh, stat_ia_hits, stat_ia_place;  // (logged every ~10 s)
+#define IA_BUF_SIZE ((uint64_t)IA_CAP * 32 + 64)  // (+ the GPU's diagnostic counters at word IA_CAP * 8: ind_private.comp)
+
+// Submit-time snapshots. Under the overlap at 60 fps the blocks went bad for good on the Deck (1-4 fps after a few
+// minutes, the same blocks at 0x77394b9xxx each time; 2026-11-01): the game rewrites them for its next frame while the
+// render thread may still be items behind, and the GPU reads them later still. So on the game's thread, as each item
+// is queued (rqueue.c rq_submit_hook), the first IS_SLOTS known blocks are copied - what the game had written for that
+// item. Diagnostics (every ~10 s with the records line): words that differ from the snapshot at translation and on the
+// GPU, and how far behind the render thread ran. The records take the count, first and base words from the snapshot -
+// what ind_args_bad / ib_overrun checked (the instance count from the heap: the culling compute writes it after the
+// submission); LARECOMP_VK_IND_SNAP=0: compared only. The Deck's first 60 fps run with it: 0 count / first / base
+// words differing on the GPU after 20 s (~4000 every 10 s without it, then a ring timeout).
+#define IS_SLOTS 1024
+#define IS_RING 256
+typedef struct { _Atomic uint64_t q; uint32_t n, gen; uint32_t w[IS_SLOTS * 5]; } IaSnap;
+static uint64_t ia_pa[IS_SLOTS];         // slot -> block (published for the game's thread through ia_npub)
+static _Atomic uint32_t ia_npub, ia_gen;
+static IaSnap *is_ring;                  // IS_RING items' snapshots, by item number
+static uint64_t stat_ts_diff[5], stat_ts_n, stat_ts_miss, stat_lag_max, stat_lag_sum, stat_lag_n;
+static int ia_snap_use(void) {
+    static int v = -1;
+    if (v < 0) v = ENV("LARECOMP_VK_IND_SNAP") ? atoi(ENV("LARECOMP_VK_IND_SNAP")) != 0 : 1;
+    return v;
+}
+static void ia_snap_submit(uint64_t q) {  // (the game's thread)
+    uint32_t n = atomic_load_explicit(&ia_npub, memory_order_acquire);
+    if (!n) return;
+    IaSnap *e = &is_ring[q % IS_RING];
+    atomic_store_explicit(&e->q, 0, memory_order_relaxed);
+    atomic_thread_fence(memory_order_release);
+    for (uint32_t k = 0; k < n; k++) memcpy(&e->w[k * 5], (const void *)(uintptr_t)ia_pa[k], 20);
+    e->n = n;
+    e->gen = atomic_load_explicit(&ia_gen, memory_order_relaxed);
+    atomic_store_explicit(&e->q, q, memory_order_release);
+}
+// (the render thread) item q's snapshot: first n slots' words copied to out (n 0: none, or overwritten while read)
+static uint32_t ia_snap_get(uint64_t q, uint32_t first, uint32_t count, uint32_t *out) {
+    if (!is_ring || !q) return 0;
+    IaSnap *e = &is_ring[q % IS_RING];
+    if (atomic_load_explicit(&e->q, memory_order_acquire) != q) return 0;
+    uint32_t n = e->n;
+    if (e->gen != atomic_load_explicit(&ia_gen, memory_order_relaxed) || first >= n) return 0;
+    if (first + count > n) count = n - first;
+    memcpy(out, &e->w[first * 5], (size_t)count * 20);
+    atomic_thread_fence(memory_order_acquire);
+    return atomic_load_explicit(&e->q, memory_order_relaxed) == q ? count : 0;
+}
+
+static bool ia_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = ENV("LARECOMP_VK_IND_PRIVATE");
+        on = e ? atoi(e) : -1;
+        on = on >= 0 ? on != 0 : overlap_on();
+        LOG("[vk] GPU-filled indirect parameters: %s (LARECOMP_VK_IND_PRIVATE=%d: %s)\n",
+            on ? "private records, bounded, under the overlap" : "read in place", !on, on ? "in place" : "private");
+    }
+    return on && gmem_buf;
+}
+
+static bool ia_init(void) {
+    static int failed;
+    if (ia_pipe) return true;
+    if (failed) return false;
+    VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = IA_BUF_SIZE,
+                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT};
+    VmaAllocationCreateInfo aci = {.usage = VMA_MEMORY_USAGE_AUTO,
+                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+    VmaAllocationInfo info;
+    if (vmaCreateBuffer(g_vk.vma, &bci, &aci, &ia_buf, &ia_mem, &info) != VK_SUCCESS) { failed = 1; return false; }
+    ia_ptr = info.pMappedData;
+    memset(ia_ptr, 0, (size_t)IA_BUF_SIZE);
+    VkDescriptorSetLayoutBinding b[3];
+    for (int i = 0; i < 3; i++)
+        b[i] = (VkDescriptorSetLayoutBinding){.binding = (uint32_t)i, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
+    VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 3, .pBindings = b};
+    VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &ia_set_layout));
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 32};
+    VkPipelineLayoutCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                     .pSetLayouts = &ia_set_layout, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+    VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &pi, NULL, &ia_layout));
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = ia_layout,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                                                .module = vk_builtin_shader("ind_private.comp"), .pName = "main"}};
+    VK_CHECK(vkCreateComputePipelines(g_vk.dev, VK_NULL_HANDLE, 1, &ci, NULL, &ia_pipe));
+    extern bool rq_on(void);
+    extern void (*rq_submit_hook)(uint64_t q);
+    if (rq_on() && (is_ring = calloc(IS_RING, sizeof *is_ring))) rq_submit_hook = ia_snap_submit;
+    LOG("[vk] indirect parameters' submit-time snapshots: %s (LARECOMP_VK_IND_SNAP=%d: %s)\n",
+        !is_ring ? "off (no render thread)" : ia_snap_use() ? "used for the count, first and base words" : "compared only (diagnostics)",
+        !ia_snap_use(), ia_snap_use() ? "compared only" : "used");
+    return true;
+}
+
+// (a new import of the window: every source offset is stale) The slots are reused from 0: a refresh rewriting one comes
+// after a full barrier, so after every draw already recorded that read it
+static void ia_check_window(void) {
+    if (ia_gm == gmem_buf && ia_lo == gmem_lo) return;
+    memset(ia_key, 0, sizeof ia_key);
+    atomic_store(&ia_npub, 0);
+    atomic_fetch_add(&ia_gen, 1);  // (snapshots taken by the old slots: ignored)
+    ia_n = ia_ready = 0;
+    ia_gm = gmem_buf;
+    ia_lo = gmem_lo;
+}
+
+// Fill every known slot from the heap now (outside a pass: after a dispatch, at a submission's start)
+static void ia_refresh(VkCommandBuffer cb) {
+    if (!ia_n || !ia_on() || in_pass) return;
+    ia_check_window();
+    if (!ia_n || !ia_init()) return;
+    static uint32_t work;
+    if (!work) { const char *e = ENV("LARECOMP_VK_IND_WORK"); work = e && atol(e) > 0 ? (uint32_t)atol(e) : 32u << 20; }
+    extern uint64_t rq_current_item(void);
+    uint32_t sn_n = ia_n < IS_SLOTS ? ia_n : IS_SLOTS;
+    VkSpan sn = vk_transient((uint64_t)sn_n * 20 + 16, 256);
+    sn_n = ia_snap_get(rq_current_item(), 0, sn_n, sn.ptr);
+
+    VkDescriptorSet set = vk_alloc_set(ia_set_layout);
+    VkDescriptorBufferInfo bi[3] = {{gmem_buf, 0, gmem_size}, {ia_buf, 0, IA_BUF_SIZE}, {sn.buf, sn.off, (uint64_t)(ia_n < IS_SLOTS ? ia_n : IS_SLOTS) * 20 + 16}};
+    VkWriteDescriptorSet wr[3];  // (one descriptor a write: record.c)
+    for (uint32_t k = 0; k < 3; k++)
+        wr[k] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = k,
+                                       .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[k]};
+    rec_UpdateDescriptorSets(3, wr);
+    vk_full_barrier(cb);  // (after the dispatch's writes, and after every earlier draw that read these records)
+    rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, ia_pipe);
+    rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, ia_layout, 0, 1, &set, 0, NULL);
+    uint32_t pc[8] = {ia_n, work, IA_CAP, (uint32_t)ia_snap_use(), sn_n, 0, 0, 0};
+    rec_CmdPushConstants(cb, ia_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+    rec_CmdDispatch(cb, (ia_n + 63) / 64, 1, 1);
+    vk_full_barrier(cb);  // (the records before the draws read them as indirect parameters)
+    ss_forget();          // (a compute pipeline and set bound: the next draw sets its own again)
+    ia_ready = ia_n;
+    stat_ia_refresh++;
+    static uint64_t next_log;
+    uint64_t now = SDL_GetTicksNS();
+    if (now >= next_log) {
+        if (next_log) {
+            LOG("[vk] indirect private records: %u blocks, %llu refreshes, %llu draws from them, %llu in place (first use), frame %llu\n",
+                ia_n, (unsigned long long)stat_ia_refresh, (unsigned long long)stat_ia_hits, (unsigned long long)stat_ia_place,
+                (unsigned long long)renderer_present_count());
+            vmaInvalidateAllocation(g_vk.vma, ia_mem, (uint64_t)IA_CAP * 32, 64);
+            volatile uint32_t *dg = ia_ptr + IA_CAP * 8;  // (the GPU's counts: approximate, the GPU may be adding)
+            LOG("[iadiag] submit vs translation: %llu draws (%llu without a snapshot), differ count %llu inst %llu first %llu "
+                "base %llu binst %llu | submit vs GPU: %u reads, differ %u %u %u %u %u | render thread behind: max %llu, avg %.1f items\n",
+                (unsigned long long)stat_ts_n, (unsigned long long)stat_ts_miss, (unsigned long long)stat_ts_diff[0],
+                (unsigned long long)stat_ts_diff[1], (unsigned long long)stat_ts_diff[2], (unsigned long long)stat_ts_diff[3],
+                (unsigned long long)stat_ts_diff[4], dg[5], dg[0], dg[1], dg[2], dg[3], dg[4], (unsigned long long)stat_lag_max,
+                stat_lag_n ? (double)stat_lag_sum / stat_lag_n : 0.0);
+            for (int w = 0; w < 6; w++) dg[w] = 0;
+            vmaFlushAllocation(g_vk.vma, ia_mem, (uint64_t)IA_CAP * 32, 64);
+            memset(stat_ts_diff, 0, sizeof stat_ts_diff);
+            stat_ts_n = stat_ts_miss = stat_lag_max = stat_lag_sum = stat_lag_n = 0;
+        }
+        stat_ia_refresh = stat_ia_hits = stat_ia_place = 0;
+        next_log = now + 10000000000ull;
+    }
+}
+
+// The draw at block pa: its slot's caps written (the count as ind_args_bad allows, the instances by the per-instance
+// streams' elements: no instance reads past them) and g_ind_buf / g_ind_off pointed at its record - once a refresh
+// has filled it. false: in place this once (a block not seen before gets a slot for the next refresh).
+static int ia_find(uint64_t pa) {  // (no slot made) its slot, or -1
+    if (ia_gm != gmem_buf || ia_lo != gmem_lo) return -1;
+    uint32_t h = (uint32_t)((pa >> 2) * 0x9E3779B97F4A7C15ull >> 50) & (IA_HASH - 1);
+    while (ia_key[h] && ia_key[h] != pa) h = (h + 1) & (IA_HASH - 1);
+    return ia_key[h] ? (int)ia_val[h] : -1;
+}
+
+static bool ia_claim(uint64_t pa) {
+    if (!ia_init()) return false;
+    ia_check_window();
+    if (!GM_IN(pa, 20) || (pa & 3) || GM_OFF(pa) / 4 > 0xFFFFFFF0ull) return false;
+    uint32_t h = (uint32_t)((pa >> 2) * 0x9E3779B97F4A7C15ull >> 50) & (IA_HASH - 1);
+    while (ia_key[h] && ia_key[h] != pa) h = (h + 1) & (IA_HASH - 1);
+    uint32_t k;
+    if (ia_key[h]) k = ia_val[h];
+    else {
+        if (ia_n >= IA_CAP) { stat_ia_place++; return false; }
+        k = ia_n++;
+        ia_key[h] = pa;
+        ia_val[h] = k;
+        ia_ptr[IA_CAP * 5 + k] = (uint32_t)(GM_OFF(pa) / 4);
+        if (k < IS_SLOTS) { ia_pa[k] = pa; atomic_store_explicit(&ia_npub, k + 1, memory_order_release); }
+    }
+    uint64_t icap = 1u << 20;
+    for (int a = 0; a < st.nattrib; a++) {
+        if (!(st.attrib[a] & 0xFF)) continue;
+        uint32_t s = st.attrib[a] >> 8 & 0x1F;
+        if (s >= (uint32_t)st.nstream || !st.stream[s][1] || !st.stream[s][0] || !st.vbuf[s].size) continue;
+        uint64_t e = st.vbuf[s].size / st.stream[s][0] * st.stream[s][1];  // (elements x divisor: instances it can feed)
+        if (e < icap) icap = e;
+    }
+    ia_ptr[IA_CAP * 6 + k * 2] = 1u << 22;
+    ia_ptr[IA_CAP * 6 + k * 2 + 1] = (uint32_t)(icap ? icap : 1);
+    if (k >= ia_ready) { stat_ia_place++; return false; }
+    g_ind_buf = ia_buf;
+    g_ind_off = (VkDeviceSize)k * 20;
+    stat_ia_hits++;
+    return true;
+}
+
+// Indirect draws: the parameters (GL / Vulkan layout: arrays {count, instances, first, base instance}, elements
+// {count, instances, first index, base vertex, base instance}) read from guest memory when the list runs, each made a
+// direct draw. Arguments: DrawArraysIndirect (mode, indirect), DrawElementsIndirect (mode, index type, index buffer,
+// indirect), MultiDrawArraysIndirectCount (mode, indirect, count buffer, max draws, stride), MultiDrawElementsIndirect-
+// Count (mode, index type, index buffer, indirect, count buffer, max draws, stride). (Parameters a compute pass of the
+// same submission writes are not ready yet here: they come from the previous one.)
 static void draw_indirect(CmdRec *r) {
     bool elements = r->op == CMD_DRAW_ELEMENTS_INDIRECT || r->op == CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT;
     bool multi = r->op == CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT || r->op == CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT;
@@ -8260,9 +8603,40 @@ static void draw_indirect(CmdRec *r) {
                 LOG("[vk] gpu args %llx: count %u instances %u first %u base %d base inst %u (cpu: %u %u)\n", (unsigned long long)pa,
                     q[0], q[1], q[2], (int)q[3], q[4], p[0], p[1]);
             }
-            if (ind_args_bad(p, pa, elements) || (elements && ib_overrun(r, p, pa))) continue;
+            uint32_t pv[5], sw[5];
+            memcpy(pv, p, elements ? 20 : 16);
+            if (!elements) pv[4] = 0;
+            bool have_snap = false;
+            if (is_ring && ia_on()) {  // (submit-time snapshot: diagnostics, LARECOMP_VK_IND_SNAP=1 used)
+                extern uint64_t rq_current_item(void);
+                extern uint64_t rq_queued_relaxed(void);
+                uint64_t q = rq_current_item();
+                int k = ia_find(pa);
+                if (q && k >= 0 && k < IS_SLOTS && ia_snap_get(q, (uint32_t)k, 1, sw)) {
+                    have_snap = true;
+                    stat_ts_n++;
+                    for (int w = 0; w < 5; w++) stat_ts_diff[w] += sw[w] != pv[w];
+                    uint64_t lag = rq_queued_relaxed() - q;
+                    stat_lag_sum += lag, stat_lag_n++;
+                    if (lag > stat_lag_max) stat_lag_max = lag;
+                    if (ia_snap_use()) pv[0] = sw[0], pv[2] = sw[2], pv[3] = sw[3], pv[4] = sw[4];
+                } else if (q && k >= 0) stat_ts_miss++;
+            }
+            if (ind_args_bad(pv, pa, elements) || (elements && ib_overrun(r, pv, pa))) {
+                static int nlog;
+                if (have_snap && nlog < 40) {
+                    nlog++;
+                    LOG("[iadiag] frame %llu: guarded draw at %llx - submit-time %u %u %u %u %u, at translation %u %u %u %u %u\n",
+                        (unsigned long long)renderer_present_count(), (unsigned long long)pa, sw[0], sw[1], sw[2], sw[3], sw[4],
+                        p[0], p[1], p[2], p[3], elements ? p[4] : 0);
+                }
+                continue;
+            }
+            p = pv;
             ir_note(pa, p, st.program ? st.program->stages[0].code_addr : 0);
-            g_ind_gpu = true; g_ind_off = GM_OFF(pa); g_ind_stride = stride;
+            ind_page_note(pa);
+            g_ind_gpu = true; g_ind_off = GM_OFF(pa); g_ind_stride = stride; g_ind_pa = pa;
+            if (ia_on()) ia_claim(pa);  // (under the overlap: its private record, bounded - else in place)
             d.x[0] = r->x[0];
             if (elements) {
                 d.x[1] = r->x[1]; d.x[2] = p[0] + p[2]; d.x[3] = r->x[2];
@@ -8272,6 +8646,7 @@ static void draw_indirect(CmdRec *r) {
             }
             if (d.x[2]) draw(&d, elements);
             g_ind_gpu = false;
+            g_ind_buf = VK_NULL_HANDLE;
             continue;
         }
         if (!p[0] || !p[1]) continue;  // (no vertices or no instances)

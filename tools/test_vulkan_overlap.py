@@ -22,39 +22,57 @@ defer_harness = r'''
 #include <stdint.h>
 #include <stdio.h>
 ''' + defer + r'''
-// The game's frame loop: SyncWait on each frame's fence, each a new submission; `done` is what the GPU completed.
-static uint64_t d;  // deferred_seq
+// The game's frame loop: SyncWait on its frames' fences, each a new submission; `done` is what the GPU completed,
+// pres the latest two presents' submissions (newest first), h the latest two fences waited on.
+static uint64_t pres[2], h[2];
+static void present(uint64_t s) { pres[1] = pres[0], pres[0] = s; }
 int main(void) {
-    // frame 1 submitted, nothing done: nothing was deferred before, so return at once and defer 1
-    assert(overlap_defer(1, 0, &d) == 0 && d == 1);
-    // frame 2 submitted, 1 not done yet: wait for 1, defer 2
-    assert(overlap_defer(2, 0, &d) == 1 && d == 2);
-    // frame 3, 2 done already (a fast GPU): no wait, nothing deferred any more
-    assert(overlap_defer(3, 3, &d) == 0 && d == 0);
-    // frame 4, nothing newer done: deferred
-    assert(overlap_defer(4, 3, &d) == 0 && d == 4);
-    // frame 5, 4 done meanwhile: no wait (4 was complete: a deferred fence already complete is never waited for)
-    assert(overlap_defer(5, 4, &d) == 0 && d == 5);
-    // the same fence again (the game waits twice): a real wait, nothing deferred after it
-    assert(overlap_defer(5, 4, &d) == 5 && d == 0);
-    // an older fence than the deferred one: waited for, the deferred one stays
-    assert(overlap_defer(7, 5, &d) == 0 && d == 7);
-    assert(overlap_defer(6, 5, &d) == 6 && d == 7);
-    // the deferred one once done: cleared
-    assert(overlap_defer(7, 7, &d) == 0 && d == 0);
-    // a completed older fence while a newer one is deferred: the deferral stays (seq < prev)
-    assert(overlap_defer(9, 7, &d) == 0 && d == 9);
-    assert(overlap_defer(8, 8, &d) == 0 && d == 9);
-    assert(overlap_defer(10, 8, &d) == 9 && d == 10);
-    // at most two frames queued: with the GPU never finishing, each call waits for the previous frame
-    d = 0;
+    // before any present, one fence a call: the fence two waits back bounds the queue
+    assert(overlap_defer(1, 0, pres, h) == 0 && h[0] == 1);
+    assert(overlap_defer(2, 0, pres, h) == 0 && h[0] == 2 && h[1] == 1);
+    assert(overlap_defer(3, 0, pres, h) == 1);
+    assert(overlap_defer(4, 0, pres, h) == 2);
+    // the same fence again: a real wait; a complete one: none
+    assert(overlap_defer(4, 0, pres, h) == 4);
+    assert(overlap_defer(4, 4, pres, h) == 0);
+    // Pokémon Z-A: two fences a frame, A mid-frame and B after the present (P). Frame n: A = 10n+1, B = 10n+2,
+    // P = 10n+3. B never waits for its own frame's A, with the present translated before the wait or after it, and
+    // whatever the GPU completed: each wait is for the previous frame's present at most.
+    for (int late = 0; late < 2; late++)
+        for (uint64_t gpu_lag = 0; gpu_lag < 3; gpu_lag++) {
+            pres[0] = pres[1] = h[0] = h[1] = 0;
+            for (uint64_t n = 1; n < 30; n++) {
+                uint64_t A = 10 * n + 1, B = 10 * n + 2, P = 10 * n + 3, prevP = 10 * (n - 1) + 3;
+                uint64_t done = n > gpu_lag ? 10 * (n - gpu_lag) - 7 : 0;  // (frame n - gpu_lag + 1's A done or not)
+                uint64_t w = overlap_defer(A, done, pres, h);
+                assert(w <= prevP && w < A);
+                if (!late) present(P);
+                w = overlap_defer(B, done, pres, h);
+                assert(w != A && w <= prevP);  // (the bug: the second fence waited for the first)
+                if (n > 2 && done < prevP) assert(w == prevP);
+                if (late) present(P);
+            }
+        }
+    // at most two frames queued: with a GPU that never finishes, each frame's waits are for the frame before
+    pres[0] = pres[1] = h[0] = h[1] = 0;
     uint64_t done = 0;
-    for (uint64_t f = 20; f < 40; f++) {
-        uint64_t w = overlap_defer(f, done, &d);
-        assert(w == (f == 20 ? 0 : f - 1) && d == f);
-        if (w) done = w;  // (the wait completes it)
+    for (uint64_t n = 1; n < 30; n++) {
+        uint64_t A = 10 * n + 1, B = 10 * n + 2, P = 10 * n + 3, prevP = 10 * (n - 1) + 3;
+        uint64_t w = overlap_defer(A, done, pres, h);
+        if (n > 1) assert(w == prevP);
+        if (w) done = w;
+        present(P);
+        assert(overlap_defer(B, done, pres, h) == 0);  // (the previous frame: done at the first wait)
     }
-    puts("PASS: overlap_defer - first fence, defer / wait-previous, done fences, repeats, older fences, two in flight");
+    // a fence of an earlier frame (older than the latest two presents): a real wait on it
+    assert(overlap_defer(10 * 25 + 1, 0, pres, h) == 10 * 25 + 1);
+    // loading: fences with no presents between them - bounded by the fence two waits back
+    uint64_t last = pres[0];
+    assert(overlap_defer(last + 1, last, pres, h) == 0);
+    assert(overlap_defer(last + 2, last, pres, h) == 0);
+    assert(overlap_defer(last + 3, last, pres, h) == last + 1);
+    assert(overlap_defer(last + 4, last, pres, h) == last + 2);
+    puts("PASS: overlap_defer - one frame late (Z-A's two fences a frame: never its own frame's), presents translated before / after the wait, no presents (two fences back), repeats, earlier frames, two in flight");
 }
 '''
 
@@ -73,10 +91,16 @@ static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint3
     assert(addr == HEAP_BASE && size == 4096 && !since); *now = 1; return tracking ? 0 : -1;
 }
 static const char *heap_tracking_reason(void) { return "the guest heap is driver memory (dma-buf), which the OS can't track"; }
+// (F1 > Compatibility, settings.h: Auto here; the GPU vendor: not AMD - its own default is off, tested below)
+enum { GPU_AUTO, GPU_ON, GPU_OFF, GPU_OVERLAP = 0, GPU_COMPAT_N = 8 };
+static struct { int gpu_compat[GPU_COMPAT_N]; } g_settings;
+static struct { struct { uint32_t vendorID; } props; } g_vk;
 ''' + decide + r'''
+static bool xm_on(void) { return false; }  // (the transform feedback mirror: not part of this test)
 int main(int argc, char **argv) {
     assert(argc == 3);
-    tracking = !strcmp(argv[1], "tracked");
+    tracking = !strcmp(argv[1], "tracked") || !strcmp(argv[1], "amd");
+    if (!strcmp(argv[1], "amd")) g_vk.props.vendorID = 0x1002;
     bool want = !strcmp(argv[2], "on");
     assert(overlap_on() == want && overlap_on() == want);  // (decided once)
     printf("PASS: overlap %s, tracking %s, LARECOMP_GPU_OVERLAP=%s, LARECOMP_OVERLAP_WATCH=%s\n", want ? "on" : "off", tracking ? "yes" : "no",
@@ -96,13 +120,20 @@ snap_harness = r'''
 typedef struct { uint64_t addr, size; } Range;
 static struct { Range sbuf[6][16]; } st;
 static uint8_t *heap_mem;
-#define HEAP_MAX (64ull << 20)
+#define HEAP_MAX (256ull << 20)
 #define HEAP_BASE ((uint64_t)(uintptr_t)heap_mem)
+// The guest memory window (exec.c gwin_pick): the heap here, no physical-memory window (Pokémon Z-A's) and no ring of its own
+typedef struct { uint64_t base, max, ring; bool phys; } GWin;
+static GWin gwin_;
+static const GWin *gwin(void) { gwin_.base = HEAP_BASE, gwin_.max = HEAP_MAX; return &gwin_; }
+#define gwin_base (gwin()->base)
+#define gwin_max (gwin()->max)
+#define GWIN_RING (64ull << 20)
 #define LOG(...) fprintf(stderr, __VA_ARGS__)
-static uint64_t heap_size = 16ull << 20;  // (the test ranges below sit under 8 MB; the ring follows at 16 MB)
+static uint64_t heap_size = 48ull << 20;  // (the test ranges below sit under 24 MB; the ring follows at 48 MB)
 static uint64_t kernel_heap_size(void) { return heap_size; }
 static unsigned commits;
-static void plat_commit(uint64_t addr, uint64_t size) { assert(addr == HEAP_BASE + heap_size && size == (16ull << 20)); commits++; }
+static void plat_commit(uint64_t addr, uint64_t size) { assert(addr == HEAP_BASE + heap_size && size == (64ull << 20)); commits++; }
 // The OS's page write tracking (exec.c pages_cpu_written over plat_written_pages): 4 KB dirty bits the test sets
 // as "the CPU wrote here", reset by a look, and the shared page generations a look stamps
 static int track_off;  // (no tracking: -1)
@@ -439,12 +470,12 @@ int main(int argc, char **argv) {
     assert(!memcmp((void *)(uintptr_t)ex->pristine, x, 2048));
     // 8d. a full table evicts the entry bound longest ago (never the whole table)
     frame++;
-    for (int i = 0; nrs < 512; i++) assert(snap_storage(HEAP_BASE + (6ull << 20) + 131072 + (uint64_t)i * 256, 256, true));
+    for (int i = 0; nrs < RS_MAX; i++) assert(snap_storage(HEAP_BASE + (6ull << 20) + 131072 + (uint64_t)i * 256, 256, true));
     uint64_t a0 = rs_tab[0].addr;
     rs_tab[3].frame = 0;
     frame++;
     uint64_t Z = HEAP_BASE + (6ull << 20) + 65536 + 4096;
-    assert(snap_storage(Z, 256, true) != Z && nrs == 512 && rs_tab[3].addr == Z && rs_tab[0].addr == a0);
+    assert(snap_storage(Z, 256, true) != Z && nrs == RS_MAX && rs_tab[3].addr == Z && rs_tab[0].addr == a0);
     // 9. the game grows its heap into the ring: off, everything in place from then on
     heap_size = snap_base + 4096;
     assert(snap_storage(A, 32640, true) == A && snap_state == 0 && snap_ring_end() == 0);
@@ -474,6 +505,8 @@ with tempfile.TemporaryDirectory(prefix='vulkan-overlap-') as temporary:
             subprocess.run([str(exe), 'untracked', 'on'], check=True, timeout=10, env=dict(env, LARECOMP_GPU_OVERLAP='1'))
             subprocess.run([str(exe), 'tracked', 'off'], check=True, timeout=10, env=dict(env, LARECOMP_GPU_OVERLAP='0'))
             subprocess.run([str(exe), 'tracked', 'off'], check=True, timeout=10, env=dict(env, LARECOMP_OVERLAP_WATCH='0'))
+            subprocess.run([str(exe), 'amd', 'off'], check=True, timeout=10, env=env)  # (AMD: off by default, #39)
+            subprocess.run([str(exe), 'amd', 'on'], check=True, timeout=10, env=dict(env, LARECOMP_GPU_OVERLAP='1'))
             continue
         if name == 'snap':  # the hash probe (watch off), the write watch, no tracking
             subprocess.run([str(exe)], check=True, timeout=10, env=dict(env, LARECOMP_OVERLAP_WATCH='0'))

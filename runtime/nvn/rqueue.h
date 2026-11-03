@@ -26,6 +26,8 @@ uint64_t rq_wait_item(uint64_t q);
 uint64_t rq_fence_seq(void);  // the item a fence placed now belongs to (the last one queued)
 // (LARECOMP_LOG_PACE) item q's place: items queued after it, not translated yet; true: in the frame being recorded
 bool rq_fence_info(uint64_t q, uint64_t *behind, bool *untranslated);
+extern void (*rq_submit_hook)(uint64_t q);  // (exec.c ia_snap_submit) on the game's thread, each list item queued
+uint64_t rq_queued_relaxed(void);            // items queued (no lock: diagnostics)
 uint64_t rq_current_item(void);  // on the render thread: the item being run; elsewhere 0
 // On the render thread: the number of the frame whose work it runs (the presents it has done), as the game thread's
 // frame counter was while that work was submitted - the game thread is up to a frame ahead by then. The backends'

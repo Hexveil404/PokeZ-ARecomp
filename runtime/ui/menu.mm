@@ -27,6 +27,7 @@ extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.c
 extern "C" void *vk_overlay_begin(void *window_cmd);
 extern "C" void vk_overlay_end(void *window_cmd, void *cmd);
 extern "C" int vk_hdr_state(void);  // device.c: 0 the display isn't in HDR mode, 1 it is, 2 HDR output on
+extern "C" int vk_gpu_names(const char **names, int max);  // device.c: the Vulkan 1.2 GPUs (the Graphics card row)
 #endif
 
 extern "C" {
@@ -452,6 +453,24 @@ static void tab_display(bool in_game) {
     bool la = g_game_is_la && menu_la_tabs;  // (Link's Awakening's own rows)
     opt_begin("##video", scale);
     opt_section(TR("Display", "Tela"));
+#ifndef __APPLE__
+    {   // the GPU to run on (vulkan/device.c pick_device), saved by name; only with more than one to choose from
+        const char *gpus[9] = {"Auto"};
+        int n = 1 + vk_gpu_names(gpus + 1, 8), g = 0;
+        for (int i = 1; i < n && !g; i++) if (!strcmp(gpus[i], g_settings.gpu_name)) g = i;  // (the first: as pick_device)
+        if (n > 2 && opt_choice(TR("Graphics card", "Placa de vídeo"), &g, gpus, n, 0,
+                                TR("The graphics card the game runs on. Auto: a dedicated one before the one built "
+                                   "into the processor. On a laptop with two, pick the other one if the game crashes "
+                                   "on its choice. Applies from the next start.",
+                                   "A placa de vídeo em que o jogo roda. Auto: uma dedicada antes da integrada ao "
+                                   "processador. Num notebook com duas, escolha a outra se o jogo travar na escolha "
+                                   "dele. Vale a partir do próximo início.")))
+        {
+            snprintf(g_settings.gpu_name, sizeof g_settings.gpu_name, "%s", g ? gpus[g] : "");
+            g_settings.video_rec = VREC_ASK;  // (the next start offers the video settings recommended for that GPU)
+        }
+    }
+#endif
     const char *aspects[] = {TR("Unlocked", "Livre"), TR("Original 16:9", "16:9 original")};
     opt_choice(TR("Aspect ratio", "Proporção"), &g_settings.aspect, aspects, 2, ASPECT_UNLOCKED,
                TR("Unlocked: the view fills the window, so wider (or taller) windows show more of the world - up to "

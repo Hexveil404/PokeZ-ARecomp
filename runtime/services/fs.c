@@ -226,11 +226,14 @@ static int rom_cmp(const void *a, const void *b) {
 static void rom_dir_path(const uint8_t *dmeta, uint32_t dsize, uint32_t dir, char *out, size_t cap) {
     char parts[16][256];
     int n = 0;
-    while (dir != 0 && dir < dsize && n < 16) {  // root (offset 0) has an empty name
+    // (every read inside the table: a damaged or crafted romfs.bin - an entry near its end, a name length past it - read
+    // beyond the copy of the directory table before)
+    while (dir != 0 && dsize >= 0x18 && dir <= dsize - 0x18 && n < 16) {  // root (offset 0) has an empty name
         uint32_t parent, namelen;
         memcpy(&parent, dmeta + dir, 4);
         memcpy(&namelen, dmeta + dir + 0x14, 4);
         if (namelen > 255) namelen = 255;
+        if (namelen > dsize - dir - 0x18) namelen = dsize - dir - 0x18;
         memcpy(parts[n], dmeta + dir + 0x18, namelen);
         parts[n][namelen] = 0;
         n++;
@@ -671,8 +674,14 @@ static void rom_index(void) {
     // header: size, dir hash (off,size), dir meta (off,size), file hash (off,size), file meta (off,size), data off
     uint64_t doff = h[3], dsz = h[4], foff = h[7], fsz = h[8];
     rom_data_off = h[9];
-    uint8_t *dmeta = malloc(dsz), *fmeta = malloc(fsz);
-    if (base_pread(dmeta, dsz, doff) != (ssize_t)dsz || base_pread(fmeta, fsz, foff) != (ssize_t)fsz) return;
+    // (sizes from the file's own header: a damaged one asking for GBs fails the allocation instead of reading into NULL)
+    uint8_t *dmeta = dsz <= (256u << 20) ? malloc(dsz) : NULL, *fmeta = fsz <= (256u << 20) ? malloc(fsz) : NULL;
+    if (!dmeta || !fmeta || base_pread(dmeta, dsz, doff) != (ssize_t)dsz || base_pread(fmeta, fsz, foff) != (ssize_t)fsz) {
+        LOG("[fs] romfs.bin: unreadable directory / file tables (dir %llu bytes, files %llu bytes)\n",
+            (unsigned long long)dsz, (unsigned long long)fsz);
+        free(dmeta); free(fmeta);
+        return;
+    }
     int cap = 4096;
     rom_files = malloc(sizeof(RomFile) * cap);
     for (uint64_t o = 0; o + 0x20 <= fsz;) {
@@ -685,6 +694,7 @@ static void rom_index(void) {
         char dir[1024], name[256];
         rom_dir_path(dmeta, (uint32_t)dsz, parent, dir, sizeof dir);
         uint32_t nl = namelen > 255 ? 255 : namelen;
+        if (nl > fsz - o - 0x20) nl = (uint32_t)(fsz - o - 0x20);  // (a name past the table's end: cut at it)
         memcpy(name, fmeta + o + 0x20, nl);
         name[nl] = 0;
         if (rom_nfiles == cap) { cap *= 2; rom_files = realloc(rom_files, sizeof(RomFile) * cap); }

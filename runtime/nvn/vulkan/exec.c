@@ -2707,20 +2707,24 @@ static bool key_memo_on(void) {
 
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey);
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
-    static struct { uint64_t code[2], fp[2]; ShaderKey vkey; uint8_t rt[8]; uint32_t gen; Prog *prog; } m;
+    // (everything get_program_'s key holds of the fragment key: its render target kinds and its integer texture slots -
+    // the slots were left out, so a draw that changed only them reused the previous draw's variant and sampled a
+    // stencil / integer texture through a float sampler, or the other way round)
+    static struct { uint64_t code[2], fp[2]; ShaderKey vkey; uint8_t rt[8]; uint32_t stencil, sint, gen; Prog *prog; } m;
     bool on = key_memo_on();
     // (the code fingerprints too: other code at the same address is another program - code_fp)
     uint64_t fp0 = code_fp(&np->stages[0]), fp1 = code_fp(&np->stages[1]);
     if (on && m.prog && m.gen == key_gen && (np->stage_mask & 3) == 3 && m.code[0] == np->stages[0].code_addr &&
         m.code[1] == np->stages[1].code_addr && m.fp[0] == fp0 && m.fp[1] == fp1 && !memcmp(&m.vkey, vkey, sizeof *vkey) &&
-        !memcmp(m.rt, fkey->rt_kind, 8)) {
+        !memcmp(m.rt, fkey->rt_kind, 8) && m.stencil == fkey->stencil_slots && m.sint == fkey->sint_slots) {
         prof_prog_memo++;
         return m.prog;
     }
     Prog *p = get_program_(np, vkey, fkey);
     if (on && p) {
         m.code[0] = np->stages[0].code_addr; m.code[1] = np->stages[1].code_addr; m.fp[0] = fp0; m.fp[1] = fp1;
-        m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.gen = key_gen; m.prog = p;
+        m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.stencil = fkey->stencil_slots; m.sint = fkey->sint_slots;
+        m.gen = key_gen; m.prog = p;
     }
     return p;
 }

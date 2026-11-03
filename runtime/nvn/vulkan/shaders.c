@@ -908,6 +908,14 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  if (!(dn > db + 1e-7)) discard;\n"  // (no water here: reversed depth, the nearer the larger)
                 "  mat4 vp = inverse(mat4(pc.m0, pc.m1, pc.m2, pc.m3));\n"
                 "  vec3 P = wpos(uv, dn);\n"
+                // (window panes are drawn just like water, and being upright they'd be all mirror to the straight-up normal
+                // below: only what faces up or down gets a reflection. Each axis takes its nearer neighbour, so an edge
+                // doesn't tilt it)
+                "  vec2 px = 1.0 / pc.sz.zw, ex = vec2(px.x, 0.0), ey = vec2(0.0, px.y);\n"
+                "  vec3 Xa = P - wpos(uv - ex, depth_at(t0, uv - ex)), Xb = wpos(uv + ex, depth_at(t0, uv + ex)) - P;\n"
+                "  vec3 Ya = P - wpos(uv - ey, depth_at(t0, uv - ey)), Yb = wpos(uv + ey, depth_at(t0, uv + ey)) - P;\n"
+                "  vec3 Ng = cross(length(Xa) < length(Xb) ? Xa : Xb, length(Ya) < length(Yb) ? Ya : Yb);\n"
+                "  if (abs(Ng.y) < 0.7 * length(Ng)) discard;\n"
                 "  vec3 V = normalize(pc.cam.xyz - P);\n"
                 // (Z-A's water is level: straight up - the depth's own slope left thin lines at its triangles' seams -
                 // tilted by gentle moving ripples, prm.w the time)

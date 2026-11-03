@@ -1005,8 +1005,10 @@ static void present_pace(int interval) {
     static uint64_t next;
     if (forced == -2) forced = ENV("LARECOMP_PRESENT_INTERVAL") ? atoi(ENV("LARECOMP_PRESENT_INTERVAL")) : -1;
     if (forced >= 0) interval = forced;
+    extern bool g_za_mode_dyn, g_za_mode_dyn_interval;  // (framepace.c: the game's 30 fps mode on frames that are behind -
+    if (g_za_mode_dyn && !g_za_mode_dyn_interval && forced < 0 && interval > 1) interval = 1;  // paced as 60 unless =2)
     static int logged = -12345;
-    if (interval != logged) { logged = interval; LOG("[nvn] present interval %d\n", interval); }
+    if (interval != logged && !g_za_mode_dyn_interval) { logged = interval; LOG("[nvn] present interval %d\n", interval); }
     extern int g_out_present_interval;  // (output_scale.c: dynamic resolution's frame budget)
     g_out_present_interval = interval;
     if (interval <= 0) return;

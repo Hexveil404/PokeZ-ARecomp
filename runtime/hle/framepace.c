@@ -107,6 +107,7 @@ static bool fps60_holds(void) {
 //   LARECOMP_FRAME_DT_FORCE=<n> (test) always hand the game n (its step is n + 1 ticks)
 //   LARECOMP_FRAME_DT_LOG=1    the first 20 calls and every 60th: the time measured and the step handed on
 static uint32_t za_step_n;  // (the game thread) this frame's accumulator step (rt_za_frame_step hands it on)
+static bool za_dyn30, za_dyn30_prev;  // (rt_za_frame_cfg: this frame / the one before ran in the game's 30 fps mode)
 uint64_t rt_za_frame_dt(uint64_t real_ns) {
     static uint64_t acc, last_ns;
     static bool was_on;
@@ -191,25 +192,61 @@ uint32_t rt_za_frame_step(uint32_t game_step, uint32_t channel) {
     if (!counted && channel == 0 && last_channel > 0) counted = true, LOG("[pace] clock channels: %u\n", last_channel + 1);
     last_channel = channel;
     if (!on || !g_settings.frame_dt || (game_step == 0 && keeps_game_step(channel))) return game_step;
+    // The per-frame mode (rt_za_frame_cfg, below) brought the stuck-after-a-roll back: the player's code takes the
+    // game's frame mode a frame late, so the first frame run in the 30 fps mode after a 60 fps one handed channel 0 two
+    // ticks while that code still went by the 60 fps mode - the mismatch above. That frame keeps channel 0 on one tick
+    // (LARECOMP_DYN_CH0=2, the default). Tested on the Deck: never stuck, the banners still clear. =0: two ticks there
+    // (stuck again); =1: one tick on every frame in the 30 fps mode
+    static int ch0 = -1;
+    if (ch0 < 0) ch0 = ENV("LARECOMP_DYN_CH0") ? atoi(ENV("LARECOMP_DYN_CH0")) : 2;
+    if (channel == 0 && keeps_game_step(0) && za_dyn30 && (ch0 == 1 || (ch0 == 2 && !za_dyn30_prev))) return 0;
     return za_step_n > game_step ? za_step_n : game_step;
 }
 
+// (60 fps with frame_dt; LARECOMP_FRAME_MODE_DYN, default 1) A frame the accumulator says is behind (rt_za_frame_dt's
+// step 1+, read earlier in the same function) runs in the game's own 30 fps mode, the rest in its 60 fps mode. The
+// per-channel catch-up (rt_za_frame_step) alone gave channel 1 - the world's speed - two ticks while the game believed
+// it was in its 60 fps mode, and its UI timelines then never finished: the ambush's "ADVANTAGE / Now's your chance!"
+// stayed on screen, the Victory banner cut off without its fade (Steam Deck at ~47 fps: channel 1 by bisect; the game's
+// own 30 fps mode, two ticks on every channel, showed both right). In its 30 fps mode the game hands every channel
+// max(1, the step) itself, as it does on the Switch. Its present interval of 2 on those frames is held at 1
+// (g_za_mode_dyn: runtime/nvn/objects.c present_pace) - the accumulator, not the interval, keeps the speed.
+// LARECOMP_FRAME_MODE_DYN=0: off (the 60 fps mode on every frame); =2 keeps the game's interval on those frames (a
+// frame that moved the world two ticks stays on screen two vsyncs; no visible difference on the Deck).
+bool g_za_mode_dyn, g_za_mode_dyn_interval;
 int32_t rt_za_frame_cfg(int32_t cfg) {
     g_za_frame_hook = true;
     const char *e = ENV("LARECOMP_FPS");
     bool on = e ? atoi(e) >= 60 : fps60_holds();
+    static int dyn = -1;
+    if (dyn < 0) dyn = ENV("LARECOMP_FRAME_MODE_DYN") ? atoi(ENV("LARECOMP_FRAME_MODE_DYN")) : 1;
+    g_za_mode_dyn = dyn && on && g_settings.frame_dt && cfg > 0;
+    g_za_mode_dyn_interval = g_za_mode_dyn && dyn == 2;
     static int logged = -1;
-    if (logged != (int)on) { logged = on; LOG("[pace] game frame mode %d -> %d (%s)\n", cfg, on ? 0 : cfg, on ? "60 fps" : "as is"); }
+    if (logged != (int)on + 2 * g_za_mode_dyn) {
+        logged = (int)on + 2 * g_za_mode_dyn;
+        LOG("[pace] game frame mode %d -> %d (%s)\n", cfg, on ? 0 : cfg,
+            g_za_mode_dyn ? (g_za_mode_dyn_interval ? "60 fps, its 30 fps mode and interval on frames that are behind"
+                                                    : "60 fps, its 30 fps mode on frames that are behind")
+                          : on ? "60 fps" : "as is");
+    }
+    bool behind = g_za_mode_dyn && za_step_n >= 1;
+    za_dyn30_prev = za_dyn30, za_dyn30 = behind;
+    if (behind) {
+        static uint64_t n30;
+        if (++n30 % 600 == 1) LOG("[pace] frames in the game's 30 fps mode (behind): %llu so far\n", (unsigned long long)n30);
+    }
+    int32_t mode = behind ? cfg : on ? 0 : cfg;
     {   // the game's own time, in vsyncs: each frame it steps max(mode + 1, the vsyncs that really passed) - a replay
         // keyed by this lands its inputs on the same moment of the game on a faster or slower PC (runtime/hle/input.c)
         extern uint64_t g_game_vsyncs;
         static uint64_t last;
         uint64_t now = __atomic_load_n(&g_vsync_count, __ATOMIC_RELAXED), passed = last ? now - last : 0;
-        uint64_t step = (uint64_t)(on ? 0 : cfg) + 1;
+        uint64_t step = (uint64_t)mode + 1;
         if (passed > step) step = passed > 8 ? 8 : passed;  // (a long stall: the game caps its step too)
         last = now;
         g_game_vsyncs += step;
     }
-    return on ? 0 : cfg;
+    return mode;
 }
 uint64_t g_game_vsyncs;  // (see rt_za_frame_cfg)

@@ -8853,7 +8853,7 @@ static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt, V
 // Post image `i` at w x h (RGBA8, kept until the size changes). 0, 1: SMAA edges / weights, 2: SMAA output,
 // 3, 4: FSR EASU / RCAS (also the sharpening after the box downscale), 5: box downscale, 6: the sharpening at the
 // image's own size, 7, 8: GTAO raw / filtered. (f: its format - 9, 10, the indirect light: RGBA16F; 11, its march's
-// packed half-size colour + depth: RGBA32F)
+// packed half-size colour + depth: RGBA32F; 12, GTAO's half-size depth: R32F)
 static TexBackend *post_image_f(int i, uint32_t w, uint32_t h, VkFormat f) {
     static TexBackend img[16];
     TexBackend *d = &img[i];
@@ -9342,6 +9342,7 @@ static bool gtao_is_lighting(Prog *pr) {
 }
 
 // Before the frame's first lighting draw (outside any pass): GTAO and its filter into post images 6 / 7.
+static int g_gtao_half = -1;  // (LARECOMP_GTAO_HALF, below; -1 not read yet)
 static void gtao_before_lighting(Prog *pr) {
     extern uint64_t renderer_exec_frame(void);
     uint64_t frame = renderer_exec_frame();
@@ -9415,7 +9416,19 @@ static void gtao_before_lighting(Prog *pr) {
     VkImageView in[2] = {dv, dv};
     // (margins: the filter reads 2 texels around, the upsample 1 - raw covers both)
     if (gtao.fx < 1 || gtao.fy < 1) post_area_w = (uint32_t)ceilf(aw * gtao.fx) + 4, post_area_h = (uint32_t)ceilf(ah * gtao.fy) + 4;
-    post_pass(cb, "gtao.frag", in, 1, raw, NULL, false);
+    // The march's taps (4 x slices^2 a pixel) at scattered places in the full-size depth: cache misses, as SSGI's
+    // (ssgi_apply). A half-size copy of the depth (gtao_down, R32F) for them - the point and its normal still read
+    // the full size. pc[19] (cam.w, unused): the copy's last texel written, x * 2048 + y. LARECOMP_GTAO_HALF=0:
+    // full-size taps
+    if (g_gtao_half < 0) g_gtao_half = !ENV("LARECOMP_GTAO_HALF") || atoi(ENV("LARECOMP_GTAO_HALF")) != 0;
+    if (g_gtao_half && aw <= 2048 && ah <= 2048) {  // (that packing holds 11 bits a side: a depth over 4096 takes full-size taps)
+        TexBackend *hd = post_image_f(12, aw, ah, VK_FORMAT_R32_SFLOAT);
+        post_pass(cb, "gtao_down.frag", in, 1, hd, NULL, false);
+        uint32_t lx = (post_area_w && post_area_w < aw ? post_area_w : aw) - 1, ly = (post_area_h && post_area_h < ah ? post_area_h : ah) - 1;
+        pc[19] = (float)(lx * 2048 + ly);
+        in[1] = post_view(hd);
+        post_pass(cb, "gtao_h.frag", in, 2, raw, NULL, false);
+    } else post_pass(cb, "gtao.frag", in, 1, raw, NULL, false);
     VkImageView bin[2] = {post_view(raw), dv};
     if (gtao.fx < 1 || gtao.fy < 1) post_area_w -= 2, post_area_h -= 2;
     post_pass(cb, "gtao_blur.frag", bin, 2, filt, NULL, false);

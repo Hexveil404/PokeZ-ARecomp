@@ -569,12 +569,27 @@ static const char *builtin_src(const char *name, int *stage) {
         "  return n.x * pc.m0 + n.y * pc.m1 + d * pc.m2 + pc.m3;\n"
         "}\n"
         "vec3 wpos(vec2 uv, float d) { vec4 p = wpos4(uv, d); return p.xyz / p.w; }\n";
-    if (!strcmp(name, "gtao.frag")) {  // t0 = the scene depth; out .r = visibility (1 = open)
+    // gtao_h.frag: the march's taps from gtao_down.frag's half-size depth (t1) - a 4x smaller image for the scattered
+    // reads, the same as SSGI's (exec.c gtao_before_lighting, LARECOMP_GTAO_HALF); pc.cam.w: its last texel written
+    // (x * 2048 + y), where the frame's part ends. The point and its normal still read the full-size depth.
+    if (!strcmp(name, "gtao.frag") || !strcmp(name, "gtao_h.frag")) {  // t0 = the scene depth; out .r = visibility (1 = open)
         *stage = STAGE_FRAGMENT;
-        static char *src;
+        bool half = name[5] == 'h';
+        static char *srcs[2];
+        char *src = srcs[half];
         if (!src) {
             static const char body[] =
                 "vec3 pos_at(vec2 uv) { return wpos(uv, depth_at(t0, uv)); }\n"
+                "#ifdef GTAO_HALF\n"
+                "vec3 pos_far(vec2 u) {\n"
+                "  int v = int(pc.cam.w);\n"
+                "  ivec2 lim = min(ivec2(v >> 11, v & 2047), ivec2(pc.sz.xy) - 1);\n"
+                "  ivec2 ip = clamp(ivec2(u * pc.sz.xy), ivec2(0), lim);\n"
+                "  return wpos((vec2(ip) * 2.0 + 0.5) / pc.sz.zw, texelFetch(t1, ip, 0).r);\n"  // (the full-size texel it holds)
+                "}\n"
+                "#else\n"
+                "vec3 pos_far(vec2 u) { return pos_at(u); }\n"
+                "#endif\n"
                 "float ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }\n"
                 "float facos(float x) { float r = -0.156583 * abs(x) + HALF_PI; r *= sqrt(1.0 - abs(x)); return x >= 0.0 ? r : PI - r; }\n"
                 "void main() {\n"
@@ -625,7 +640,7 @@ static const char *builtin_src(const char *name, int *stage) {
                 "      float t = (float(j) + fract(n1 + float(j) * 0.618034)) / float(STEPS);\n"
                 "      t = t * t;\n"
                 "      vec2 off = dir * (rUV * t + 1.0 / pc.sz.xy);\n"
-                "      vec3 d0 = pos_at(uv + off) - P, d1 = pos_at(uv - off) - P;\n"
+                "      vec3 d0 = pos_far(uv + off) - P, d1 = pos_far(uv - off) - P;\n"
                 // (XeGTAO's thin occluder compensation: a sample far in front of the point - a grass blade, a railing -
                 // counts as farther away along the view axis, so it occludes less: thin things aren't solid walls)
                 "      float l0 = length(d0 + V * dot(d0, V) * 2.0), l1 = length(d1 + V * dot(d1, V) * 2.0);\n"
@@ -645,6 +660,22 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  vis = clamp(vis / float(SLICES), 0.0, 1.0);\n"
                 "  vis = pow(vis, 1.6);\n"  // (XeGTAO's final power, softened: the game's lighting is soft already)
                 "  o = vec4(vis, 0.0, 0.0, 1.0);\n"
+                "}\n";
+            const char *defs = half ? "#define GTAO_HALF 1\n" : "";
+            size_t n = strlen(gtao_common) + strlen(defs) + strlen(body) + 1;
+            src = malloc(n);
+            snprintf(src, n, "%s%s%s", gtao_common, defs, body);
+            srcs[half] = src;
+        }
+        return src;
+    }
+    if (!strcmp(name, "gtao_down.frag")) {  // t0 = the scene depth: half size, each 2x2's top-left depth (R32F)
+        *stage = STAGE_FRAGMENT;
+        static char *src;
+        if (!src) {
+            static const char body[] =
+                "void main() {\n"
+                "  o = vec4(texelFetch(t0, clamp(ivec2(gl_FragCoord.xy) * 2, ivec2(0), ivec2(pc.sz.zw) - 1), 0).r);\n"
                 "}\n";
             size_t n = strlen(gtao_common) + strlen(body) + 1;
             src = malloc(n);

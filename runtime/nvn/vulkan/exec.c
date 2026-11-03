@@ -2022,6 +2022,11 @@ static void begin_pass(void) {
                                            .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
             if (b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) { da = a; has_d = true; pass_depth = b->format; }
             if (b->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) { sa = a; has_s = true; pass_stencil = b->format; }
+            // (Dozen: a depth-only target in a combined depth + stencil image - the game's Z24 made D24S8 - is a
+            // Direct3D depth-stencil view of both planes, and Dozen moved only the depth plane to DEPTH_WRITE: the
+            // command list was refused. As the stencil attachment too, both planes go there; the pipelines test no
+            // stencil, so nothing drawn changes)
+            else if (g_vk.dozen && has_d && vkc_image_is_ds(b->image)) { sa = a; has_s = true; pass_stencil = b->format; }
             uint32_t lv = st.rt.has_dview && (st.rt.dview.setmask & 1) ? st.rt.dview.base_level : 0;
             uint32_t ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
             if (!w) { renderer_texture_scale(st.rt.depth, &pass_sx, &pass_sy); w = ew; }
@@ -2072,6 +2077,10 @@ static void begin_pass(void) {
     }
     pass_w = minw; pass_h = minh;
     pass_layers = layers == UINT32_MAX ? 1 : layers;
+    // (Dozen: a pass over several layers is one layer. Its shaders can't pick the layer (no shaderOutputLayer:
+    // translate.c drops the write), and Dozen's barriers for a 3D target's slices - Z-A draws a 64x64x6 one - name
+    // subresources Direct3D 12 doesn't have (a 3D texture's are its levels only): the command list was refused)
+    if (g_vk.dozen && !maxwell_output_layer) pass_layers = 1;
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = pass_layers,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = pass_ncolor ? ca : NULL,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};

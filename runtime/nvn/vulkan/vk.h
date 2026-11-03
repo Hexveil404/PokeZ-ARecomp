@@ -59,6 +59,9 @@ VkResult vkc_CreateGraphicsPipelines(VkDevice dev, VkPipelineCache cache, uint32
                                      const VkAllocationCallbacks *al, VkPipeline *out);
 VkResult vkc_CreateImageView(VkDevice dev, const VkImageViewCreateInfo *ci, const VkAllocationCallbacks *al, VkImageView *v);
 void vkc_DestroyImageView(VkDevice dev, VkImageView v, const VkAllocationCallbacks *al);
+bool vkc_image_is_ds(VkImage img);    // (compat_rp.c) made with a combined depth + stencil format
+void vkc_image_forget(VkImage img);   // (its destruction)
+void vkc_vmaDestroyImage(VmaAllocator a, VkImage img, VmaAllocation mem);
 VkResult vkc_vmaCreateImage(VmaAllocator a, const VkImageCreateInfo *ci, const VmaAllocationCreateInfo *ai, VkImage *img,
                             VmaAllocation *mem, VmaAllocationInfo *info);
 VkRenderPass vkc_render_pass_for(uint32_t ncolor, const VkFormat *color, VkFormat depth, VkFormat stencil,
@@ -111,6 +114,7 @@ static inline void vkc_CmdSetPrimitiveRestartEnable(VkCommandBuffer cb, VkBool32
 #define vkCreateImageView vkc_CreateImageView
 #define vkDestroyImageView vkc_DestroyImageView
 #define vmaCreateImage vkc_vmaCreateImage
+#define vmaDestroyImage vkc_vmaDestroyImage
 #define vkCmdPipelineBarrier2 vkc_CmdPipelineBarrier2
 #define vkQueueSubmit2 vkc_QueueSubmit2
 #define vkCmdWriteTimestamp2 vkc_CmdWriteTimestamp2
@@ -136,6 +140,9 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import, dmabuf;
+    // Mesa's Dozen: Vulkan on Direct3D 12 (the driver's VK_DRIVER_ID_MESA_DOZEN). Its Direct3D rules where they differ
+    // from what other drivers take (exec.c begin_pass)
+    bool dozen;
     // VK_EXT_vertex_input_dynamic_state (exec.c): the vertex layout is set per draw (vkCmdSetVertexInputEXT), not
     // baked into each pipeline - fewer pipelines. Off: no extension / feature, or LARECOMP_VK_DYN_VERTEX=0.
     bool vids;

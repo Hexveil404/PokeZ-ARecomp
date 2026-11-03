@@ -6,12 +6,14 @@
 // (vkc_CreateImageView, vkc_vmaCreateImage), and a view's framebuffers go with it (the backend destroys a view once
 // the GPU is done with it, so its framebuffers aren't in use either).
 #include <pthread.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "vk.h"
 #undef vkCreateImageView
 #undef vkDestroyImageView
 #undef vmaCreateImage
+#undef vmaDestroyImage
 #undef vkCreateGraphicsPipelines
 
 static pthread_mutex_t rp_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -29,9 +31,48 @@ static VkSampleCountFlagBits image_samples(VkImage img) {
     return VK_SAMPLE_COUNT_1_BIT;  // (not noted: single-sampled, or a swapchain image)
 }
 
+// ---- images of a combined depth + stencil format (vkc_image_is_ds): a barrier on one of their aspects must name
+// both, separateDepthStencilLayouts being off (VUID-VkImageMemoryBarrier-image-03320). The game's depth-only Z24 is
+// made D24_UNORM_S8_UINT where X8_D24 can't be a depth target, and its barriers named depth alone: NVIDIA let it be,
+// Direct3D 12 (Dozen) left the stencil plane in its old state and refused the command list (RESOURCE_BARRIER_INVALID
+// _SUBRESOURCE, then a depth write against a plane in PIXEL_SHADER_RESOURCE)
+static struct { _Atomic uint64_t key; } ds_tab[REG_TAB];
+static bool format_is_ds(VkFormat f) {
+    return f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_D32_SFLOAT_S8_UINT || f == VK_FORMAT_D16_UNORM_S8_UINT;
+}
+bool vkc_image_is_ds(VkImage img) {
+    uint64_t k = (uint64_t)img;
+    for (uint32_t i = reg_slot(k), n = 0; n < REG_TAB; i = (i + 1) & (REG_TAB - 1), n++) {
+        uint64_t v = atomic_load_explicit(&ds_tab[i].key, memory_order_acquire);
+        if (!v) return false;
+        if (v == k) return true;
+    }
+    return false;
+}
+void vkc_image_forget(VkImage img) {  // (vkc_vmaDestroyImage: a tombstone, key 1)
+    uint64_t k = (uint64_t)img;
+    pthread_mutex_lock(&rp_lock);
+    for (uint32_t i = reg_slot(k), n = 0; n < REG_TAB && atomic_load(&ds_tab[i].key); i = (i + 1) & (REG_TAB - 1), n++)
+        if (atomic_load(&ds_tab[i].key) == k) { atomic_store(&ds_tab[i].key, 1); break; }
+    pthread_mutex_unlock(&rp_lock);
+}
+
+void vkc_vmaDestroyImage(VmaAllocator a, VkImage img, VmaAllocation mem) {
+    if (img) vkc_image_forget(img);  // (before: the handle can come back for a new image right after)
+    vmaDestroyImage(a, img, mem);
+}
+
 VkResult vkc_vmaCreateImage(VmaAllocator a, const VkImageCreateInfo *ci, const VmaAllocationCreateInfo *ai, VkImage *img,
                             VmaAllocation *mem, VmaAllocationInfo *info) {
     VkResult r = vmaCreateImage(a, ci, ai, img, mem, info);
+    if (r == VK_SUCCESS && format_is_ds(ci->format)) {
+        pthread_mutex_lock(&rp_lock);
+        uint64_t k = (uint64_t)*img;
+        uint32_t i = reg_slot(k), n = 0;
+        while (atomic_load(&ds_tab[i].key) > 1 && atomic_load(&ds_tab[i].key) != k && n++ < REG_TAB) i = (i + 1) & (REG_TAB - 1);
+        atomic_store_explicit(&ds_tab[i].key, k, memory_order_release);
+        pthread_mutex_unlock(&rp_lock);
+    }
     if (r != VK_SUCCESS || !g_vkc.render_pass || ci->samples == VK_SAMPLE_COUNT_1_BIT) return r;
     pthread_mutex_lock(&rp_lock);  // (only multisampled images are noted)
     uint64_t k = (uint64_t)*img;

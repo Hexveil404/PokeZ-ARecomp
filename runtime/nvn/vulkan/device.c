@@ -805,6 +805,12 @@ static void create_device(void) {
     {   // what the driver offers for building pipelines (one line, for #92 reports)
         VkPhysicalDeviceDriverProperties drv = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
         VkPhysicalDeviceProperties2 pr = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &drv};
+        {
+            VkPhysicalDeviceDriverProperties d0 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+            VkPhysicalDeviceProperties2 p0 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &d0};
+            vkGetPhysicalDeviceProperties2(g_vk.phys, &p0);
+            g_vk.dozen = d0.driverID == VK_DRIVER_ID_MESA_DOZEN;
+        }
         char gpl[96] = "no extension", eds3[160] = "no extension";
 #ifdef VK_EXT_graphics_pipeline_library
         VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT gplp = {

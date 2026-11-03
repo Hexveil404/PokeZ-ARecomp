@@ -32,6 +32,19 @@ static VkAccessFlags access1(VkAccessFlags2 a) {
 }
 
 void vkc_CmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo *d) {
+    // (a combined depth + stencil image: both aspects, compat_rp.c vkc_image_is_ds)
+    VkImageMemoryBarrier2 fixed[32];
+    VkDependencyInfo dd;
+    for (uint32_t i = 0; i < d->imageMemoryBarrierCount && i < 32; i++) {
+        VkImageAspectFlags as = d->pImageMemoryBarriers[i].subresourceRange.aspectMask;
+        const VkImageAspectFlags ds = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+        if (!(as & ds) || (as & ds) == ds || !vkc_image_is_ds(d->pImageMemoryBarriers[i].image)) continue;
+        if (d != &dd) {
+            memcpy(fixed, d->pImageMemoryBarriers, (d->imageMemoryBarrierCount < 32 ? d->imageMemoryBarrierCount : 32) * sizeof *fixed);
+            dd = *d, dd.pImageMemoryBarriers = fixed, d = &dd;
+        }
+        fixed[i].subresourceRange.aspectMask |= ds;
+    }
     if (!g_vkc.sync1) { vkp_vkCmdPipelineBarrier2(cb, d); return; }
     VkPipelineStageFlags2 src = 0, dst = 0;
     VkMemoryBarrier mb[8];

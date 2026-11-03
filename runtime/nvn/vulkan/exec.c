@@ -10206,6 +10206,10 @@ static void gtao_forget(NvnTexture *t) {
     if (water.target == t || water.depth == t) water.pending = false, water.target = water.depth = NULL;
 }
 
+// (vk_present_draw: how far right / down the window's crop of the image reaches, as fractions - Z-A's handheld frame
+// is the top-left 1280x720 of 1920x1080 targets, 2/3. SMAA's passes stop there, LARECOMP_POST_CROP_AREA=0: the whole)
+static float post_crop_w = 1, post_crop_h = 1;
+
 // The view the present samples: the game image, or its anti-aliased / upscaled version. ow x oh: the whole image's
 // size in the window (its crop is drawn into the viewport).
 static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, float fx, float fy, double ow_d, double oh_d, bool *upscaled) {
@@ -10239,7 +10243,8 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, float fx, flo
         TexBackend *out = post_image(2, b->width, b->height);
         // Dynamic resolution: only the contents' part, and 64 pixels past it (the edge searches reach 2 x 16 pixels, so
         // the contents' pixels never read past it) - the window step's cost then scales with the factor like the game's
-        post_area_w = cw + 64, post_area_h = ch + 64;
+        // (and only the window's crop of it: post_crop_w / _h)
+        post_area_w = (uint32_t)ceilf(cw * post_crop_w) + 64, post_area_h = (uint32_t)ceilf(ch * post_crop_h) + 64;
         // (g_vk.smaa_stencil, integrated GPUs) the weights only where the edge pass found edges (its shader discards
         // the others), as SMAA's reference integration does with a stencil
         TexBackend *sten = g_vk.smaa_stencil ? smaa_stencil_image(cb, b->width, b->height) : NULL;
@@ -10309,6 +10314,10 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
         memcpy(hdr_place, g, sizeof hdr_place);
     }
     bool upscaled = false;
+    static int crop_area = -1;
+    if (crop_area < 0) crop_area = !ENV("LARECOMP_POST_CROP_AREA") || atoi(ENV("LARECOMP_POST_CROP_AREA")) != 0;
+    post_crop_w = crop_area && pv[6] > 0 ? fminf(1, fmaxf(0, pv[4]) + pv[6]) : 1;
+    post_crop_h = crop_area && pv[7] > 0 ? fminf(1, fmaxf(0, pv[5]) + pv[7]) : 1;
     VkImageView src = post_process(cb, b, fx, fy, pv[6] > 0 ? vw / pv[6] : vw, pv[7] > 0 ? vh / pv[7] : vh, &upscaled);
     float pvc[8];
     memcpy(pvc, pv, sizeof pvc);

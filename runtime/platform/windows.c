@@ -1290,6 +1290,17 @@ bool plat_remove_tree(const char *dir) {
                          (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ? fd.dwReserved0 : 0);
 }
 
+bool plat_is_link(const char *path) {
+    static __thread wchar_t w[MAX_PATH * 4];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, w, MAX_PATH * 4) <= 1) return false;
+    for (wchar_t *p = w; *p; p++) if (*p == L'/') *p = L'\\';
+    WIN32_FIND_DATAW fd;  // (the reparse tag, in dwReserved0: a OneDrive placeholder is a plain file / folder here)
+    HANDLE h = FindFirstFileExW(w, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    FindClose(h);
+    return (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !cloud_placeholder(fd.dwReserved0);
+}
+
 // ---- OneDrive
 // A folder's final path (links and junctions resolved), without the \\?\ prefix, backslashes, no trailing one
 static bool final_path(const wchar_t *p, wchar_t *out, DWORD n) {

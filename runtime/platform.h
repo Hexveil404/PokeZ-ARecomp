@@ -92,6 +92,10 @@ int plat_proc_wait(PlatProc p, bool block);  // exit code, or -1 while still run
 #define PLAT_PROC_SIGNALED 256               // + N: ended by signal N instead of exiting (not on Windows)
 void plat_proc_kill(PlatProc p);             // end it and what it started (then it's gone: no wait)
 bool plat_remove_tree(const char *dir);      // rm -rf
+// path is a link or another entry that isn't a plain file or folder: a symlink, a device, a FIFO (POSIX: lstat, not
+// followed); a junction or symlink (Windows: a reparse point, not a cloud placeholder). plat_remove_tree removes the
+// link itself, never what it points to.
+bool plat_is_link(const char *path);
 // A game file opened the way the console's file systems allow: it can be renamed or deleted while open (Windows:
 // shared delete access). flags: O_RDONLY / O_RDWR, O_CREAT, O_EXCL; errno set on failure. Rename: fails if the target
 // exists (EEXIST), as the console's does.

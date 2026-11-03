@@ -8773,8 +8773,8 @@ static VkDescriptorSetLayout post_set_layout;
 // stencil is 1 (g_vk.smaa_stencil; dsfmt: the stencil format); 3 multiplies the target's colour by the shader's output
 // (GTAO onto the game's lit image). cfmt: the colour target's format.
 static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt, VkFormat cfmt) {
-    static struct { const char *fs; int kind; VkFormat f, cf; VkPipeline p; } cache[24];
-    for (int i = 0; i < 24; i++)
+    static struct { const char *fs; int kind; VkFormat f, cf; VkPipeline p; } cache[32];
+    for (int i = 0; i < 32; i++)
         if (cache[i].p && cache[i].fs == fs && cache[i].kind == kind && cache[i].f == dsfmt && cache[i].cf == cfmt) return cache[i].p;
     if (!post_layout) {
         VkDescriptorSetLayoutBinding b[6];
@@ -8845,7 +8845,7 @@ static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt, V
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = post_layout};
     VkPipeline p;
     VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p));
-    for (int i = 0; i < 24; i++)
+    for (int i = 0; i < 32; i++)
         if (!cache[i].p) { cache[i].fs = fs; cache[i].kind = kind; cache[i].f = dsfmt; cache[i].cf = cfmt; cache[i].p = p; break; }
     return p;
 }

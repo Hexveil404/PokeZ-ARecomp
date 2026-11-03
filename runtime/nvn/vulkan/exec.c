@@ -3327,7 +3327,7 @@ static void snapshots_invalidate(NvnTexture *t) {
     for (int i = 0; i < 8; i++) if ((!t || snap_tex[i] == t) && snap_ok[i]) { snap_ok[i] = false; snap_why[i] = snap_reason; }
 }
 
-typedef struct { NvnTexture *key; TexBackend copy; } Snap;
+typedef struct { NvnTexture *key; TexBackend copy; uint32_t reg_w, reg_h; } Snap;  // (reg: the area copied so far, SNAP_REGION)
 static Snap snaps[16];
 static int nsnaps;
 
@@ -3370,6 +3370,7 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
         d->format = src->format; d->width = src->width; d->height = src->height; d->depth = 1; d->layers = 1; d->levels = 1;
         d->samples = src->samples; d->aspect = src->aspect; d->base_type = VK_IMAGE_VIEW_TYPE_2D;
         vk_image_init_layout(vk_cmd(), d->image, d->aspect);
+        s->reg_w = s->reg_h = 0;
     }
     return d;
 }
@@ -3724,9 +3725,44 @@ static void resolve_feedback(Prog *pr) {
             TexBackend *dst = snapshot_image(t, src);
             VkCommandBuffer cb = vk_cmd();
             vk_full_barrier(cb);
-            gp_mark(cb, "feedback snapshot %ux%u fmt %d", src->width, src->height, src->format);
+            // The area copied: only as far as the game has drawn into it (LARECOMP_SNAP_REGION=0: the whole texture).
+            // Pokémon Z-A in handheld mode draws 1280x720 into targets made 1920x1080 (its docked size): a depth +
+            // stencil snapshot of the whole target took 7 ms of a 16 ms frame on the Steam Deck (RADV, [gpuprof]).
+            // The extent is the largest viewport / scissor seen at this texture's snapshots (it only grows, so a later
+            // bigger draw is still covered; a new size resets it). Steam Deck, the city at night, standing still: 47.1 ->
+            // 50.7 fps, 1% low 36.7 -> 41.1 (b97, 2026-11-02). LARECOMP_LOG_SNAP=1: each snapshot's area, logged.
+            uint32_t cw = src->width, ch = src->height;
+            {
+                static int region = -1, lg = -1;
+                if (region < 0) region = !ENV("LARECOMP_SNAP_REGION") || atoi(ENV("LARECOMP_SNAP_REGION")) != 0;
+                if (lg < 0) lg = ENV("LARECOMP_LOG_SNAP") != NULL;
+                const float *v = st.viewport[0];
+                float vx1 = v[0] + v[2], vy1 = v[3] < 0 ? v[1] : v[1] + v[3];
+                int sx1 = st.scissor[0][0] + st.scissor[0][2], sy1 = st.scissor[0][1] + st.scissor[0][3];
+                uint32_t ew = (uint32_t)ceilf(vx1 > 0 ? vx1 : 0), eh = (uint32_t)ceilf(vy1 > 0 ? vy1 : 0);
+                if (sx1 > 0 && (uint32_t)sx1 < ew) ew = (uint32_t)sx1;  // (a scissor inside the viewport bounds it)
+                if (sy1 > 0 && (uint32_t)sy1 < eh) eh = (uint32_t)sy1;
+                // (the viewport is in the game's units: our render scale applied, as the image is)
+                if (t->width && t->height) ew = (uint32_t)ceilf(ew * (float)src->width / t->width), eh = (uint32_t)ceilf(eh * (float)src->height / t->height);
+                Snap *sp = NULL;
+                for (int k = 0; k < nsnaps; k++) if (snaps[k].key == t) sp = &snaps[k];
+                if (region && sp && ew && eh) {
+                    if (ew > sp->reg_w) sp->reg_w = ew;
+                    if (eh > sp->reg_h) sp->reg_h = eh;
+                    if (sp->reg_w < cw) cw = sp->reg_w;
+                    if (sp->reg_h < ch) ch = sp->reg_h;
+                }
+                if (lg) {
+                    static int nlog;
+                    if (nlog++ < 60 || nlog % 600 == 0)
+                        LOG("[snap] %ux%u fmt %d: viewport %.0f,%.0f %.0fx%.0f scissor %d,%d %dx%d -> copy %ux%u%s\n", src->width,
+                            src->height, src->format, v[0], v[1], v[2], v[3], st.scissor[0][0], st.scissor[0][1], st.scissor[0][2],
+                            st.scissor[0][3], cw, ch, region ? "" : " (whole: LARECOMP_SNAP_REGION off)");
+                }
+            }
+            gp_mark(cb, "feedback snapshot %ux%u fmt %d (copied %ux%u)", src->width, src->height, src->format, cw, ch);
             VkImageCopy rg = {.srcSubresource = {src->aspect, 0, 0, 1}, .dstSubresource = {src->aspect, 0, 0, 1},
-                              .extent = {src->width, src->height, 1}};
+                              .extent = {cw, ch, 1}};
             rec_CmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
             if (g_debug_frame && (src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
                 static int nd;
@@ -9176,8 +9212,8 @@ static VkDescriptorSetLayout post_set_layout;
 // stencil is 1 (g_vk.smaa_stencil; dsfmt: the stencil format); 3 multiplies the target's colour by the shader's output
 // (GTAO onto the game's lit image). cfmt: the colour target's format.
 static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt, VkFormat cfmt) {
-    static struct { const char *fs; int kind; VkFormat f, cf; VkPipeline p; } cache[24];
-    for (int i = 0; i < 24; i++)
+    static struct { const char *fs; int kind; VkFormat f, cf; VkPipeline p; } cache[32];
+    for (int i = 0; i < 32; i++)
         if (cache[i].p && cache[i].fs == fs && cache[i].kind == kind && cache[i].f == dsfmt && cache[i].cf == cfmt) return cache[i].p;
     if (!post_layout) {
         VkDescriptorSetLayoutBinding b[6];
@@ -9248,16 +9284,17 @@ static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt, V
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = post_layout};
     VkPipeline p;
     VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p));
-    for (int i = 0; i < 24; i++)
+    for (int i = 0; i < 32; i++)
         if (!cache[i].p) { cache[i].fs = fs; cache[i].kind = kind; cache[i].f = dsfmt; cache[i].cf = cfmt; cache[i].p = p; break; }
     return p;
 }
 
 // Post image `i` at w x h (RGBA8, kept until the size changes). 0, 1: SMAA edges / weights, 2: SMAA output,
 // 3, 4: FSR EASU / RCAS (also the sharpening after the box downscale), 5: box downscale, 6: the sharpening at the
-// image's own size, 7, 8: GTAO raw / filtered. (f: its format - 9, 10, the indirect light: RGBA16F)
+// image's own size, 7, 8: GTAO raw / filtered. (f: its format - 9, 10, the indirect light: RGBA16F; 11, its march's
+// packed half-size colour + depth: RGBA32F; 12, GTAO's half-size depth: R32F)
 static TexBackend *post_image_f(int i, uint32_t w, uint32_t h, VkFormat f) {
-    static TexBackend img[11];
+    static TexBackend img[16];
     TexBackend *d = &img[i];
     if (d->image && (d->width != w || d->height != h || d->format != f)) {
         vk_views_forget(d);
@@ -9630,6 +9667,7 @@ static void post_pass_ex(VkCommandBuffer cb, const char *fs, const VkImageView *
     VkPipeline pipe = post_pipeline_kind(fs, kind, sten ? sten->format : VK_FORMAT_UNDEFINED,
                                          dst->format == VK_FORMAT_R8G8B8A8_UNORM ? VK_FORMAT_UNDEFINED : dst->format);
     vk_full_barrier(cb);
+    if (g_gpuprof_frame) gp_mark(cb, "post %s %ux%u of %ux%u", fs, aw, ah, dst->width, dst->height);
     VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = post_view(dst),
                                     .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
                                     .loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : kind >= 3 ? VK_ATTACHMENT_LOAD_OP_LOAD
@@ -9695,7 +9733,9 @@ void vk_lightmap_smooth_pass(TexBackend *src, TexBackend *dst, float sigma_s, fl
 // Ambient occlusion). Test switches: LARECOMP_GTAO=<0-3> (the level), _RADIUS (metres, 1.5), _INTENSITY (the factor,
 // 0.85 at 100%), _FLIPY (ndc y sign, -1), _FROM=<frame> (on from that frame: A/B in one run), _DEBUG (1 the AO alone,
 // 2 the normals, 3 distance bands).
-static struct { bool pending; NvnTexture *target; VkImageView ao, depth; uint64_t frame; float pc[32]; } gtao;
+// (fx / fy: the part of the depth the lighting draws - its viewport -, as fractions of it: GTAO's passes shade only that,
+// gtao_region)
+static struct { bool pending; NvnTexture *target; VkImageView ao, depth; uint64_t frame; float pc[32], fx, fy; } gtao;
 
 static float gtao_env(const char *name, float def) {
     const char *v = getenv(name);  // (not ENV(): its cache is per call site, and this one serves several names)
@@ -9755,6 +9795,7 @@ static bool gtao_is_lighting(Prog *pr) {
 }
 
 // Before the frame's first lighting draw (outside any pass): GTAO and its filter into post images 6 / 7.
+static int g_gtao_half = -1;  // (LARECOMP_GTAO_HALF, below; -1 not read yet)
 static void gtao_before_lighting(Prog *pr) {
     extern uint64_t renderer_exec_frame(void);
     uint64_t frame = renderer_exec_frame();
@@ -9807,6 +9848,19 @@ static void gtao_before_lighting(Prog *pr) {
                 if (v) water_probe = v, best = e->tex->width;            }
         }
     }
+    // The lighting draw's viewport: the part of the depth the frame has. Z-A draws 1280x720 into its 1920x1080 targets
+    // in handheld mode, and GTAO over the whole depth shaded 2.25x the pixels (Steam Deck, Lumiose: ~2.6 ms for the AO
+    // and its filter, the apply after the lighting more). The passes keep the whole image's size and uv (the world
+    // positions come out the same); only their scissor stops there, with a margin for the filter's and the upsample's
+    // taps. LARECOMP_GTAO_REGION=0 shades the whole image
+    static int region = -1;
+    if (region < 0) region = !ENV("LARECOMP_GTAO_REGION") || atoi(ENV("LARECOMP_GTAO_REGION")) != 0;
+    gtao.fx = gtao.fy = 1;
+    const float *vp = st.viewport[0];
+    if (region && vp[0] >= 0 && vp[1] >= 0 && vp[2] > 0 && vp[3] > 0 && de->tex->width && de->tex->height) {
+        gtao.fx = fminf(1, (vp[0] + vp[2]) / (float)de->tex->width);
+        gtao.fy = fminf(1, (vp[1] + vp[3]) / (float)de->tex->height);
+    }
     if (!gtao_on()) { gtao.ao = VK_NULL_HANDLE; return; }
     // the G-buffer's normals for gtao.frag (cam.w 1): the lighting's first RGBA8 texture at the depth's size, after
     // its two depth reads. LARECOMP_GTAO_GBUF_NORMALS=0: the normals from the depth, as before
@@ -9826,9 +9880,26 @@ static void gtao_before_lighting(Prog *pr) {
     VkCommandBuffer cb = vk_cmd();
     TexBackend *raw = post_image(7, aw, ah), *filt = post_image(8, aw, ah);
     post_pc_big = pc;
-    VkImageView in[2] = {dv, nv ? nv : dv};
-    post_pass(cb, "gtao.frag", in, 2, raw, NULL, false);
+    VkImageView in[3] = {dv, nv ? nv : dv, VK_NULL_HANDLE};
+    // (margins: the filter reads 2 texels around, the upsample 1 - raw covers both)
+    if (gtao.fx < 1 || gtao.fy < 1) post_area_w = (uint32_t)ceilf(aw * gtao.fx) + 4, post_area_h = (uint32_t)ceilf(ah * gtao.fy) + 4;
+    // The march's taps (4 x slices^2 a pixel) at scattered places in the full-size depth: cache misses, as SSGI's
+    // (ssgi_apply). A half-size copy of the depth (gtao_down, R32F; t2) for them - the point and its normal still read
+    // the full size. pc[21] (prm.y, the apply's intensity, unused by the march; put back after): the copy's last texel
+    // written, x * 2048 + y. LARECOMP_GTAO_HALF=0: full-size taps
+    if (g_gtao_half < 0) g_gtao_half = !ENV("LARECOMP_GTAO_HALF") || atoi(ENV("LARECOMP_GTAO_HALF")) != 0;
+    if (g_gtao_half && aw <= 2048 && ah <= 2048) {  // (that packing holds 11 bits a side: a depth over 4096 takes full-size taps)
+        TexBackend *hd = post_image_f(12, aw, ah, VK_FORMAT_R32_SFLOAT);
+        post_pass(cb, "gtao_down.frag", in, 1, hd, NULL, false);
+        uint32_t lx = (post_area_w && post_area_w < aw ? post_area_w : aw) - 1, ly = (post_area_h && post_area_h < ah ? post_area_h : ah) - 1;
+        float intensity = pc[21];
+        pc[21] = (float)(lx * 2048 + ly);
+        in[2] = post_view(hd);
+        post_pass(cb, "gtao_h.frag", in, 3, raw, NULL, false);
+        pc[21] = intensity;
+    } else post_pass(cb, "gtao.frag", in, 2, raw, NULL, false);
     VkImageView bin[2] = {post_view(raw), dv};
+    if (gtao.fx < 1 || gtao.fy < 1) post_area_w -= 2, post_area_h -= 2;
     post_pass(cb, "gtao_blur.frag", bin, 2, filt, NULL, false);
     // a second pass of the filter (back into the raw image): the few steps of a wide radius leave blotches a single
     // 5x5 pass doesn't smooth (LARECOMP_GTAO_BLUR2=0: one pass)
@@ -9837,12 +9908,13 @@ static void gtao_before_lighting(Prog *pr) {
         VkImageView bin2[2] = {post_view(filt), dv};
         post_pass(cb, "gtao_blur.frag", bin2, 2, raw, NULL, false);
     }
+    post_area_w = post_area_h = 0;
     post_pc_big = NULL;
     gtao.ao = pc[30] >= 2 || blur2 ? post_view(raw) : post_view(filt);  // (debug views 2 / 3: unfiltered)
     gtao.depth = dv;
     static int nlog;
-    if (nlog++ < 2) LOG("[gtao] on: depth %ux%u, AO %ux%u, radius %.2f m, camera (%.1f, %.1f, %.1f)\n", db->width, db->height, aw, ah,
-                        pc[20], pc[16], pc[17], pc[18]);
+    if (nlog++ < 2) LOG("[gtao] on: depth %ux%u, AO %ux%u (shaded %.0f%% x %.0f%%), radius %.2f m, camera (%.1f, %.1f, %.1f)\n", db->width,
+                        db->height, aw, ah, gtao.fx * 100, gtao.fy * 100, pc[20], pc[16], pc[17], pc[18]);
 }
 
 // The lighting pass has begun drawing into target: its contents are multiplied when it ends
@@ -9865,7 +9937,10 @@ static void gtao_apply_pending(void) {
         VkCommandBuffer cb = vk_cmd();
         post_pc_big = pc;
         VkImageView ain[2] = {gtao.ao, gtao.depth};
+        if (gtao.fx < 1 || gtao.fy < 1)  // (gtao_before_lighting: only the part the frame has - the rest is never shown)
+            post_area_w = (uint32_t)ceilf(tb->width * gtao.fx) + 2, post_area_h = (uint32_t)ceilf(tb->height * gtao.fy) + 2;
         post_pass_ex(cb, "gtao_apply.frag", ain, 2, tb, NULL, false, NULL, pc[30] != 0 ? 0 : 3);
+        post_area_w = post_area_h = 0;
         post_pc_big = NULL;
     }
     if (ssgi_on() && ssgi.albedo) ssgi_apply(tb);
@@ -9874,6 +9949,7 @@ static void gtao_apply_pending(void) {
 
 // SSGI, when the lighting pass has ended (its image tb is the bounce light's source and its target): the bounce light
 // at half size from the depth and the lit image, a depth-aware filter, then x the albedo, added onto the lit image
+static int g_ssgi_half = -1;  // (ssgi_apply: LARECOMP_SSGI_HALF; -1 not read yet)
 static void ssgi_apply(TexBackend *tb) {
     float pc[32];
     memcpy(pc, gtao.pc, sizeof pc);  // (the camera: gtao_before_lighting)
@@ -9890,13 +9966,34 @@ static void ssgi_apply(TexBackend *tb) {
     VkCommandBuffer cb = vk_cmd();
     TexBackend *raw = post_image_f(9, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT), *filt = post_image_f(10, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT);
     post_pc_big = pc;
-    VkImageView in[2] = {gtao.depth, lit};
-    post_pass(cb, "ssgi.frag", in, 2, raw, NULL, false);
+    VkImageView in[3] = {gtao.depth, lit};
+    // (gtao_before_lighting's region - the lighting's viewport - as GTAO's passes, with the same margins: the filter
+    // reads 2 texels around, the upsample 1. Steam Deck handheld, Lumiose: ~6 ms over the whole image)
+    bool part = gtao.fx < 1 || gtao.fy < 1;
+    if (part) post_area_w = (uint32_t)ceilf(hw * gtao.fx) + 4, post_area_h = (uint32_t)ceilf(hh * gtao.fy) + 4;
+    // The march's taps (6 x slices^2 a pixel) each read the full-size depth and lit image at scattered places: cache
+    // misses, not pixels, were its cost (Steam Deck, Lumiose: 4.0 ms at 960x540, 3.75 at the 644x364 part). Half size
+    // in one RGBA32F image (ssgi_down: the colour's 2x2 mean, the depth) - one fetch a tap from a 4x smaller image.
+    // The bounce light is soft and filtered after: the same look. Its taps stop at the frame's part (pc prm.w / prj.z:
+    // unused by the march), where the half image ends. LARECOMP_SSGI_HALF=0: full size
+    if (g_ssgi_half < 0) g_ssgi_half = !ENV("LARECOMP_SSGI_HALF") || atoi(ENV("LARECOMP_SSGI_HALF")) != 0;
+    if (g_ssgi_half) {
+        TexBackend *packed = post_image_f(11, hw, hh, VK_FORMAT_R32G32B32A32_SFLOAT);
+        post_pass(cb, "ssgi_down.frag", in, 2, packed, NULL, false);
+        in[2] = post_view(packed);
+        float dbg = pc[30];
+        pc[23] = gtao.fx, pc[30] = gtao.fy;
+        post_pass(cb, "ssgi_h.frag", in, 3, raw, NULL, false);
+        pc[30] = dbg;
+    } else post_pass(cb, "ssgi.frag", in, 2, raw, NULL, false);
     VkImageView bin[2] = {post_view(raw), gtao.depth};
+    if (part) post_area_w -= 2, post_area_h -= 2;
     post_pass(cb, "ssgi_blur.frag", bin, 2, filt, NULL, false);
     pc[26] = (float)tb->width, pc[27] = (float)tb->height;
     VkImageView ain[3] = {post_view(filt), gtao.depth, ssgi.albedo};
+    if (part) post_area_w = (uint32_t)ceilf(tb->width * gtao.fx) + 2, post_area_h = (uint32_t)ceilf(tb->height * gtao.fy) + 2;
     post_pass_ex(cb, "ssgi_apply.frag", ain, 3, tb, NULL, false, NULL, pc[30] != 0 ? 0 : 4);
+    post_area_w = post_area_h = 0;
     post_pc_big = NULL;
     static int nlog;
     if (nlog++ < 2) LOG("[ssgi] on: %ux%u (bounce light %ux%u), reach %.1f m, strength %.2f\n", w, h, hw, hh, pc[20], pc[21]);
@@ -10614,6 +10711,10 @@ static void gtao_forget(NvnTexture *t) {
     if (water.target == t || water.depth == t) water.pending = false, water.target = water.depth = NULL;
 }
 
+// (vk_present_draw: how far right / down the window's crop of the image reaches, as fractions - Z-A's handheld frame
+// is the top-left 1280x720 of 1920x1080 targets, 2/3. SMAA's passes stop there, LARECOMP_POST_CROP_AREA=0: the whole)
+static float post_crop_w = 1, post_crop_h = 1;
+
 // The view the present samples: the game image, or its anti-aliased / upscaled version. ow x oh: the whole image's
 // size in the window (its crop is drawn into the viewport).
 static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, float fx, float fy, double ow_d, double oh_d, bool *upscaled) {
@@ -10647,7 +10748,8 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, float fx, flo
         TexBackend *out = post_image(2, b->width, b->height);
         // Dynamic resolution: only the contents' part, and 64 pixels past it (the edge searches reach 2 x 16 pixels, so
         // the contents' pixels never read past it) - the window step's cost then scales with the factor like the game's
-        post_area_w = cw + 64, post_area_h = ch + 64;
+        // (and only the window's crop of it: post_crop_w / _h)
+        post_area_w = (uint32_t)ceilf(cw * post_crop_w) + 64, post_area_h = (uint32_t)ceilf(ch * post_crop_h) + 64;
         // (g_vk.smaa_stencil, integrated GPUs) the weights only where the edge pass found edges (its shader discards
         // the others), as SMAA's reference integration does with a stencil
         TexBackend *sten = g_vk.smaa_stencil ? smaa_stencil_image(cb, b->width, b->height) : NULL;
@@ -10717,6 +10819,10 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
         memcpy(hdr_place, g, sizeof hdr_place);
     }
     bool upscaled = false;
+    static int crop_area = -1;
+    if (crop_area < 0) crop_area = !ENV("LARECOMP_POST_CROP_AREA") || atoi(ENV("LARECOMP_POST_CROP_AREA")) != 0;
+    post_crop_w = crop_area && pv[6] > 0 ? fminf(1, fmaxf(0, pv[4]) + pv[6]) : 1;
+    post_crop_h = crop_area && pv[7] > 0 ? fminf(1, fmaxf(0, pv[5]) + pv[7]) : 1;
     VkImageView src = post_process(cb, b, fx, fy, pv[6] > 0 ? vw / pv[6] : vw, pv[7] > 0 ? vh / pv[7] : vh, &upscaled);
     float pvc[8];
     memcpy(pvc, pv, sizeof pvc);

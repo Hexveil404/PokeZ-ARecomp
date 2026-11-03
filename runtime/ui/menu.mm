@@ -493,6 +493,14 @@ static void tab_display(bool in_game) {
                               "fica em 60 - mais fluido quando o PC acompanha, câmera lenta quando não acompanha.")))
                 g_settings.fps60_lock = !fall;
             ImGui::EndDisabled();
+            opt_toggle(TR("Constant game speed", "Velocidade constante"), &g_settings.frame_dt, true,
+                       TR("The world runs at the same speed at any frame rate: the game's step comes from the time that "
+                          "really passed, so 50 fps plays at full speed, not in slow motion. Off: the game's own step - "
+                          "below the chosen rate everything moves in slow motion. Applies from the next frame.",
+                          "O mundo roda na mesma velocidade em qualquer taxa de quadros: o passo do jogo vem do tempo que "
+                          "realmente passou, então 50 fps joga em velocidade normal, não em câmera lenta. Desligado: o "
+                          "passo do próprio jogo - abaixo da taxa escolhida tudo fica em câmera lenta. Vale a partir do "
+                          "próximo quadro."));
             if (in_game && g_settings.fps60 && g_fps60_fell_back)
                 ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s",
                                    TR("Running at 30 fps: this PC didn't keep 60 fps.", "Rodando a 30 fps: este PC não segurou 60 fps."));

@@ -20,5 +20,23 @@ def _za_frame_cfg(gen, a):
             f'  /* {a:#x}: ldrsb w20, [x9, #0x20] (frame mode) */')
 
 
+# The frame step's duration read (`ldr x8, [x1, #8]` at the function's head, 0x68 before the config read above). Its
+# result is the world step, an integer number of 1/60 s vsyncs; runtime/hle/framepace.c rt_za_frame_dt makes it track
+# wall-clock time instead of the frame rate (no slow motion below the chosen rate; F1 > Constant game speed).
+FRAME_DT = {b: a - 0x68 for b, a in ZA_BUILDS.items()}
+
+
+def _za_frame_dt(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    if w != 0xf9400428:  # (not this shape: another build's layout - the plain load, no decoupling)
+        return 'c->x[8] = LD64(c->x[1] + 8);'
+    return ('{ extern uint64_t rt_za_frame_dt(uint64_t); '
+            'c->x[8] = rt_za_frame_dt(LD64(c->x[1] + 8)); }'
+            f'  /* {a:#x}: ldr x8, [x1, #8] (frame duration -> world step, decoupled from the frame rate) */')
+
+
 def za_patches(build):
-    return {ZA_BUILDS[build]: _za_frame_cfg}
+    out = {ZA_BUILDS[build]: _za_frame_cfg}
+    if build in FRAME_DT:
+        out[FRAME_DT[build]] = _za_frame_dt
+    return out

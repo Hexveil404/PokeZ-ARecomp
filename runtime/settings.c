@@ -49,6 +49,7 @@ Settings g_settings = {
     .menu_confirm = MENU_CONFIRM_CONTROLLER,
     .show_fps = false,
     .fps60_lock = true,  // ("Drop to 30 fps when needed" off unless the player turns it on)
+    .frame_dt = true,    // (Pokémon Z-A: the world step from a wall-clock accumulator - the same speed at any frame rate)
     .tex_hd = true,
     .shadow_res = 1,
     .shadow_sharp = 1,
@@ -249,12 +250,19 @@ bool settings_video_matches_recommended(void) {
            g_settings.fps60_lock == r->fps60 && g_settings.aniso16 == r->aniso16;
 }
 
+// LARECOMP_FRAME_DT=0 / 1: a test override of the frame_dt setting. Applied to g_settings at load, so F1 shows (and can
+// change) the value it set; not read again after that.
+static void settings_env_overrides(void) {
+    const char *e = getenv("LARECOMP_FRAME_DT");
+    if (e && *e) g_settings.frame_dt = atoi(e) != 0;
+}
+
 void settings_load(void) {
     static bool loaded;
     if (loaded) return;
     loaded = true;
     FILE *f = fopen(SETTINGS_FILE, "r");
-    if (!f) return;
+    if (!f) { settings_env_overrides(); return; }
     char line[1200];
     bool tip_key = false, aspect_key = false, video_key = false;
     while (fgets(line, sizeof line, f)) {
@@ -283,6 +291,7 @@ void settings_load(void) {
         else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
         else if (!strcmp(key, "fps60")) g_settings.fps60 = atoi(val) != 0;
         else if (!strcmp(key, "fps60_lock")) g_settings.fps60_lock = atoi(val) != 0;
+        else if (!strcmp(key, "frame_dt")) g_settings.frame_dt = atoi(val) != 0;
         else if (!strcmp(key, "hdr")) g_settings.hdr = atoi(val) != 0;
         else if (!strcmp(key, "hdr_peak_nits")) { int n = atoi(val); g_settings.hdr_peak = n < 200 ? 200 : n > 10000 ? 10000 : n; }
         else if (!strcmp(key, "hdr_paper_white_nits")) { int n = atoi(val); g_settings.hdr_paper = n < 80 ? 80 : n > 500 ? 500 : n; }
@@ -402,6 +411,7 @@ void settings_load(void) {
     if (g_settings.volume > 2) g_settings.volume = 2;
     if (!(g_settings.mouse_sens >= 0.1f && g_settings.mouse_sens <= 5)) g_settings.mouse_sens = 1.0f;
     if (g_settings.rumble_strength < 25 || g_settings.rumble_strength > 100) g_settings.rumble_strength = 100;
+    settings_env_overrides();
     LOG("[settings] loaded %s\n", SETTINGS_FILE);
 }
 
@@ -417,6 +427,7 @@ void settings_save(void) {
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
     fprintf(f, "fps60 = %d\n", g_settings.fps60);
     fprintf(f, "fps60_lock = %d\n", g_settings.fps60_lock);
+    fprintf(f, "frame_dt = %d\n", g_settings.frame_dt);
     fprintf(f, "aniso16 = %d\n", g_settings.aniso16);
     fprintf(f, "hdr = %d\n", g_settings.hdr);
     fprintf(f, "hdr_peak_nits = %d\n", g_settings.hdr_peak);

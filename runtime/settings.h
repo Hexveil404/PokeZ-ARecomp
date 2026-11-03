@@ -129,6 +129,9 @@ typedef struct {
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
     char rando_options[48];  // the Randomizer tab's New seed options: a seed ID without its random part (empty = defaults)
     bool fps60_lock;  // with fps60: stays at 60 even when this PC can't hold it (slow motion below; runtime/hle/framepace.c)
+    bool frame_dt;    // Pokémon Z-A: the world's step from a wall-clock accumulator (runtime/hle/framepace.c
+                      // rt_za_frame_dt) - the same game speed at any frame rate. Off: the game's own step (slow motion
+                      // below 60 fps). On by default; LARECOMP_FRAME_DT=0 / 1 overrides it at load.
     int ui_lang;      // UI_LANG_*: the start screen's language (runtime/ui/launcher.mm); auto = the system's
     // mods/ folders (runtime/services/fs.c layers them): '|' between names. order: first wins where two replace the
     // same file (folders not listed come after, by name); off: not loaded. Edited on the start screen's Mods page.

@@ -32,6 +32,7 @@ uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; s
 bool maxwell_gmem_lazy;
 bool maxwell_flat_default = true;
 bool maxwell_quad_ops;  // (vk_exec_init: the device has quad subgroup operations in fragment shaders)
+bool maxwell_quad_deriv_default;  // (vk_exec_init: AMD; quad_deriv)
 bool maxwell_gmem_fs_miss;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
@@ -403,6 +404,34 @@ static bool quad_on(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("LARECOMP_SHADER_QUAD"); on = e ? atoi(e) != 0 : maxwell_quad_ops; }
     return on;
+}
+
+// Those derivatives (quad_on) at a triangle's edge: the quad's uncovered pixels are helper invocations, and before
+// VK_KHR_shader_quad_control it is the driver's choice whether they take part in subgroup operations. NVIDIA's do (as
+// the Switch's); on AMD a swap with one gives no value, and the eyes' iris - small triangles, a parallax march steered
+// by these derivatives - turned to grain at every edge (#74 #95 #103, still there after v0.1.14's quad fix, which
+// only fixed which lane is which). The hardware's own derivatives always have the helpers (the spec requires them for
+// derivatives): such a SHFL - one an FSWZADD reads soon after - is written as the value plus its fine derivative
+// toward that neighbour. LARECOMP_SHADER_QUAD_DERIV=1 on (default on AMD), 0 off (quad swaps, the default elsewhere),
+// 2 test: quad swaps whose helper partner gives the pixel's own value (what AMD's look like, on any GPU)
+static int quad_deriv(void) {
+    static int m = -1;
+    if (m < 0) { const char *e = getenv("LARECOMP_SHADER_QUAD_DERIV"); m = e ? atoi(e) : maxwell_quad_deriv_default; }
+    return m;
+}
+
+// Whether the SHFL at pc (into register d) is read by an FSWZADD as its first operand within the next few
+// instructions, before d is written again: the derivative pattern (quad_deriv)
+static bool shfl_feeds_fswzadd(const Ctx *c, uint32_t pc, int d) {
+    const uint64_t *code = (const uint64_t *)c->code;
+    for (size_t i = pc / 8 + 1, n = 0; i < c->ninsts && n < 48; i++) {
+        if (i % 4 == 0) continue;
+        n++;
+        uint64_t w = code[i];
+        if ((w & 0xfff8000000000000ull) == 0x50f8000000000000ull && (int)bits(w, 8, 8) == d) return true;
+        if ((int)bits(w, 0, 8) == d) return false;  // (written again - or an instruction whose bits there aren't a destination)
+    }
+    return false;
 }
 
 static bool warp_emu(void) {
@@ -1972,7 +2001,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (c->stage != STAGE_FRAGMENT) {
             sprintf(t, "as_type<uint>(%s + %s)", F(R(a)), F(R((int)bits(w, 20, 8))));
         } else {
-            bool ql = c->glsl && quad_on();
+            bool ql = c->glsl && (quad_on() || quad_deriv() == 1);  // (the pixel's own place, as the SHFL's sign)
             if (!ql) c->uses_lane = true;
             sprintf(t, "as_type<uint>(fswzadd(%s, %s, 0x%02xu, %s))", F(R(a)), F(R((int)bits(w, 20, 8))), swz, ql ? "qlane" : "lane");
         }
@@ -2035,7 +2064,14 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             const char *const *fn = warp_emu() ? fn_w : fn_s;  // (per 32-lane warp: the prelude's w* functions)
             static const char *const quad[] = {NULL, "subgroupQuadSwapHorizontal", "subgroupQuadSwapVertical", "subgroupQuadSwapDiagonal"};
             unsigned m = (unsigned)bits(w, 20, 5);
-            if (c->stage == STAGE_FRAGMENT && mode == 3 && bits(w, 28, 1) && m >= 1 && m <= 3 && quad_on())
+            bool qd = c->stage == STAGE_FRAGMENT && mode == 3 && bits(w, 28, 1) && (m == 1 || m == 2) && quad_deriv() &&
+                      shfl_feeds_fswzadd(c, pc, d);
+            if (qd && quad_deriv() == 2)  // (test: a helper partner gives nothing - this pixel's own value)
+                sprintf(t, "(%s(uint(gl_HelperInvocation)) != 0u ? %s : %s(%s))", quad[m], R(a), quad[m], R(a));
+            else if (qd)  // (the neighbour from the hardware's derivative, the helpers included: quad_deriv)
+                sprintf(t, "as_type<uint>(as_type<float>(%s) + %s(as_type<float>(%s)) * ((uint(gl_FragCoord.%c) & 1u) == 0u ? 1.0f : -1.0f))",
+                        R(a), m == 1 ? "dFdxFine" : "dFdyFine", R(a), m == 1 ? 'x' : 'y');
+            else if (c->stage == STAGE_FRAGMENT && mode == 3 && bits(w, 28, 1) && m >= 1 && m <= 3 && quad_on())
                 sprintf(t, "%s(%s)", quad[m], R(a));
             else sprintf(t, "%s(%s, uint(%s))", fn[mode], R(a), bv);
             set_reg(c, d, t);
@@ -2922,6 +2958,7 @@ static ShaderInfo *translate(const uint8_t *blob, size_t max_size, int stage, co
         c->omap_depth = (*(const uint32_t *)(sph + 0x4C) >> 1) & 1;
     }
     size_t end = code_end(blob, code, max_size);
+    c->code = code, c->ninsts = end;  // (shfl_feeds_fswzadd looks ahead)
     // collect branch targets (labels)
     uint8_t *label = calloc(end + 4, 1);
     label[1] = 1;
@@ -3224,7 +3261,7 @@ static uint64_t cache_key(const uint8_t *blob, size_t max_size, int stage, const
         if ((((const uint64_t *)code)[i] & 0xfff0000000000000ull) == 0xe250000000000000ull) return 0;  // BRX
     // (the straight-line switch is in the key: on and off translations of one shader differ, and a GPU that changes
     // the default - AMD - or a player's LARECOMP_SHADER_FLAT must not load the other form)
-    uint64_t v[6] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size, (uint64_t)maxwell_flat_on(), (uint64_t)quad_on() + 2};
+    uint64_t v[6] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size, (uint64_t)maxwell_flat_on(), (uint64_t)quad_on() + 2 + 16 * (uint64_t)quad_deriv()};
     uint64_t h = fnv(fnv(fnv(0xcbf29ce484222325ull, cache_build, sizeof cache_build), v, sizeof v), key, sizeof *key);
     h = fnv(h, blob, (size_t)(code - blob) + end * 8);
     return h ? h : 1;

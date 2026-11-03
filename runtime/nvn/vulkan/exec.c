@@ -1537,6 +1537,10 @@ void vk_exec_init(void) {
     VkPhysicalDeviceProperties2 pr2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &sg};
     vkGetPhysicalDeviceProperties2(g_vk.phys, &pr2);
     maxwell_quad_ops = (sg.supportedOperations & VK_SUBGROUP_FEATURE_QUAD_BIT) && (sg.supportedStages & VK_SHADER_STAGE_FRAGMENT_BIT);
+    maxwell_quad_deriv_default = g_vk.props.vendorID == 0x1002;  // (translate.c quad_deriv: helpers in quad swaps)
+    LOG("[vk] fragment shaders' own derivatives: %s (LARECOMP_SHADER_QUAD_DERIV)\n",
+        getenv("LARECOMP_SHADER_QUAD_DERIV") ? getenv("LARECOMP_SHADER_QUAD_DERIV")
+        : maxwell_quad_deriv_default ? "the hardware's (AMD: helpers in quad swaps)" : "quad swaps");
     LOG("[vk] subgroups: %u lanes, quad operations in fragment shaders: %s\n", sg.subgroupSize, maxwell_quad_ops ? "yes" : "no");
     if (!getenv("LARECOMP_SHADER_FLAT") && !maxwell_flat_default)
         LOG("[vk] straight-line shader form off (%s; LARECOMP_SHADER_FLAT=1: on)\n",

@@ -147,6 +147,53 @@ uint64_t rt_za_frame_dt(uint64_t real_ns) {
     return band[n];
 }
 
+// The step each clock channel is handed (the same function's update loop, `mov w2, w20`: tools/za_patches.py
+// FRAME_STEP, 2.0.2). The duration above only reaches the game in its 30 fps mode: in its 60 fps mode the frame clock
+// takes its configured step (0) and ignores the measured one, so the world stepped 1/60 s a frame and slowed down
+// below 60 fps. Here the channels get max(the game's step, the accumulator's), the frame clock's own choice and mode
+// untouched (forcing its measured-duration flag instead flipped its 60 / 30 controller and doubled the speed).
+// The loop's "subsystems" are the game's clock channels (11 in 2.0.2): each update call only stores its channel's
+// step, and what reads a channel runs later. Channel 0 keeps the game's own step in its 60 fps mode: given two ticks
+// there - which that mode never hands a channel - it left the player stuck after a roll over changing ground height,
+// roll / crouch / walk refused for good and turning still allowed (Steam Deck at ~48 fps). Found by bisecting the
+// channels on a save that got stuck within a minute: channel 0 alone on one tick - never stuck, the world at full
+// speed; channel 0 alone on two ticks - stuck, and slow (the world's speed is in the other channels). The 30 fps mode
+// hands every channel two ticks itself and keeps the catch-up on all of them. Channel 0 is the index the bisect found
+// (the channels' order isn't known from the code - the count is logged once, "[pace] clock channels: 11").
+//   LARECOMP_FRAME_STEP=0              the game's step on every channel (the 60 fps mode slows down below 60 again)
+//   LARECOMP_FRAME_STEP_KEEP=<i>,<j>.. the channels that keep the game's step (default 0; "none": every one takes the
+//                                      accumulator's)
+static bool keeps_game_step(uint32_t channel) {
+    static int init;
+    static uint64_t mask = 1;  // (channel 0)
+    if (!init) {
+        init = 1;
+        const char *e = ENV("LARECOMP_FRAME_STEP_KEEP");
+        if (e && *e) {  // (set but empty: the default)
+            mask = 0;
+            for (const char *p = e; *p;) {
+                char *end;
+                unsigned long v = strtoul(p, &end, 10);
+                if (end == p) break;
+                if (v < 64) mask |= 1ull << v;
+                p = *end ? end + 1 : end;
+            }
+            LOG("[pace] clock channels keeping the game's step: %s\n", e);
+        }
+    }
+    return channel < 64 && (mask >> channel & 1);
+}
+uint32_t rt_za_frame_step(uint32_t game_step, uint32_t channel) {
+    static int on = -1;
+    if (on < 0) { const char *e = ENV("LARECOMP_FRAME_STEP"); on = !e || atoi(e) != 0; }
+    static uint32_t last_channel;
+    static bool counted;
+    if (!counted && channel == 0 && last_channel > 0) counted = true, LOG("[pace] clock channels: %u\n", last_channel + 1);
+    last_channel = channel;
+    if (!on || !g_settings.frame_dt || (game_step == 0 && keeps_game_step(channel))) return game_step;
+    return za_step_n > game_step ? za_step_n : game_step;
+}
+
 int32_t rt_za_frame_cfg(int32_t cfg) {
     g_za_frame_hook = true;
     const char *e = ENV("LARECOMP_FPS");

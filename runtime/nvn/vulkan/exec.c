@@ -3560,6 +3560,13 @@ static void fsr2_frame_jitter(void) {
     if (!fsr2_wanted() || !fsr2_scene_w || fsr2_ok_frame + 1 != f) return;
     static uint32_t index;
     vk_fsr2_jitter(index++, fsr2_scene_w, fsr2_scene_w, &fsr2_jx, &fsr2_jy);
+    // The jitter in (0, 1) pixel, not (-0.5, 0.5): the same sample positions over the sequence, but never changing
+    // sign. Z-A fades objects near the camera with a dither pattern that rounds the pixel position at its centre, so
+    // a jitter changing sign moved the pattern of one layer against another's: through a fading umbrella, how much of
+    // the background showed changed with the frame - a flicker DLAA and FSR 2 kept. LARECOMP_TAA_JITTER_BIAS=0: as before.
+    static float bias = -9;
+    if (bias < -8) bias = ENV("LARECOMP_TAA_JITTER_BIAS") ? (float)atof(ENV("LARECOMP_TAA_JITTER_BIAS")) : 0.5f;
+    fsr2_jx += bias, fsr2_jy += bias;
 }
 // The 3D scene's passes take the jitter: those drawing with the scene's depth (a scalable, non-square depth target
 // at its level 0) - not the shadow maps, the depth pyramid's levels, the full-screen passes or the HUD

@@ -97,12 +97,16 @@ static int passes_in_sub;  // render passes in the submission being recorded (LA
 
 // CPU / GPU overlap (as renderer.m: the Metal backend, metal-overlap). The game's frame loop submits a frame, presents
 // it, and at once waits on that frame's fence (every SyncWait is on the newest submission), so it builds frame N+1
-// only once the GPU has finished frame N: a frame costs CPU + GPU time in series. Here the wait is taken one fence
-// late: SyncWait(fence N) waits for fence N-1's submission and returns, and the next SyncWait waits for N. The CPU
-// builds frame N+1 while the GPU draws N; at most two frames of GPU work are queued; a fence already complete is never
-// waited for. Everything this backend recycles is keyed on the timeline (sub(), vk_transient, the set pools after the
-// slot's wait, readbacks and screenshots wait on their own submission), not on the game's fence, so only the game
-// thread's wait changes. What the game may touch in that frame while the GPU still reads it: its per-frame vertex /
+// only once the GPU has finished frame N: a frame costs CPU + GPU time in series. Here the wait is taken one frame
+// late: SyncWait(a fence of frame N) waits for frame N-1's last submission (its present) and returns. The CPU builds
+// frame N+1 while the GPU draws N; at most two frames of GPU work are queued; a fence already complete is never
+// waited for. One frame, not one fence: Pokémon Z-A waits on two fences a frame (one mid-frame, one after the
+// present), and with the wait one fence late the second waited for the first - the same frame's. That held only while
+// the GPU had finished the mid-frame fence by then: one slow frame (a 44 ms hitch) and every frame after waited on
+// it, the GPU idling while the CPU built, for good (Steam Deck: 54 -> 31 fps until a restart, 2026-10-29).
+// Everything this backend recycles is keyed on the timeline (sub(), vk_transient, the set pools after the slot's
+// wait, readbacks and screenshots wait on their own submission), not on the game's fence, so only the game thread's
+// wait changes. What the game may touch in that frame while the GPU still reads it: its per-frame vertex /
 // index data in the guest heap (bound in place; an engine built to overlap double-buffers it anyway), uniform data is
 // copied at translation (guest_copy), GPU results the CPU reads (texture / buffer copies) are flushed synchronously,
 // and the storage buffers it rewrites one frame ahead get copies (snap_storage). The timing counters are read a frame
@@ -110,7 +114,8 @@ static int passes_in_sub;  // render passes in the submission being recorded (LA
 // (cq_resolve keeps it host side and no longer writes the game's memory late - the game may have reused the slot).
 // LARECOMP_GPU_OVERLAP=0: off (the wait on the fence's own submission, as before); =1: on.
 #define VK_OVERLAP_DEFAULT 1  // on where the write watch can run (overlap_on: off by itself without page write tracking)
-static uint64_t deferred_seq;   // (seq_lock) the fence the game was told is done but whose submission wasn't waited for
+static uint64_t deferred_seq[2];  // (seq_lock) the latest two fences the game waited on, newest first (overlap_defer)
+static uint64_t present_seq[2];   // (seq_lock) the game's latest two presents' submissions, newest first: frames' ends
 static uint64_t stat_deferred;  // SyncWaits returned without waiting (stats)
 static uint64_t stat_snap_bytes, stat_snap_copies;  // storage copies made (snap_storage; stats, per period)
 // The overlap needs the storage write watch (snap_storage: the OS's page write tracking), the only thing that catches
@@ -707,9 +712,18 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
 
 void renderer_submit(void) { vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
 
+// (overlap_defer) The game's frame was just presented (device.c, at the end of its present item): the latest
+// submission is a frame's end. Once per game frame, at the item's end: the fence the game places right after
+// presenting resolves to the present item's last submission.
+void vk_overlap_frame_end(void) {
+    pthread_mutex_lock(&seq_lock);
+    present_seq[1] = present_seq[0], present_seq[0] = submit_seq;
+    pthread_mutex_unlock(&seq_lock);
+}
+
 static void overlap_clear(void) {  // (a full wait was made: everything queued so far is done)
     pthread_mutex_lock(&seq_lock);
-    deferred_seq = 0;
+    deferred_seq[0] = deferred_seq[1] = 0;
     pthread_mutex_unlock(&seq_lock);
 }
 
@@ -741,22 +755,21 @@ void renderer_sync(void) {
     overlap_clear();
 }
 
-// (overlap) The game's SyncWait on submission seq: done is the latest complete submission, *deferred the one a previous
-// call returned early for (0: none). Returns the submission to wait for now (0: none); updates *deferred. A fence
-// that is complete is never waited for; a newer fence than the deferred one waits for the deferred one and takes its
-// place; the deferred fence itself, or an older one, is waited for. (tools/test_vulkan_overlap.py)
-static uint64_t overlap_defer(uint64_t seq, uint64_t done, uint64_t *deferred) {
-    uint64_t prev = *deferred;
-    if (seq <= done) {  // complete (in order: a deferred one no newer than it is complete too)
-        if (seq >= prev) *deferred = 0;
-        return 0;
+// (overlap) The game's SyncWait on submission seq: done is the latest complete submission, pres the latest two presents'
+// submissions (newest first: the frames' ends), *hist the latest two fences waited on (newest first). Returns the
+// submission to wait for now (0: none); updates *hist. A fence of the newest presented frame or later waits for the
+// frame before its own - the newest present older than it - never for a fence of its own frame; and for the fence two
+// waits back, which bounds the queue where nothing presents (loading). A fence of an earlier frame, or the same
+// fence again: a real wait on it. A complete submission is never waited for. (tools/test_vulkan_overlap.py)
+static uint64_t overlap_defer(uint64_t seq, uint64_t done, const uint64_t pres[2], uint64_t hist[2]) {
+    uint64_t w;
+    if (seq <= pres[1] || seq == hist[0]) w = seq;
+    else {
+        w = seq <= pres[0] ? pres[1] : pres[0];  // (seq up to the newest present: the game waits after presenting)
+        if (hist[1] > w && hist[1] < seq) w = hist[1];
     }
-    if (seq > prev) {  // a newer fence: the deferred one is waited for now, this one at the next call
-        *deferred = seq;
-        return prev > done ? prev : 0;
-    }
-    if (seq == prev) *deferred = 0;  // the deferred fence again, or an older one: a real wait on it
-    return seq;
+    if (seq > hist[0]) hist[1] = hist[0], hist[0] = seq;
+    return w > done ? w : 0;
 }
 
 uint64_t renderer_fence_seq(void) {
@@ -787,10 +800,10 @@ void renderer_wait_seq(uint64_t seq) {
     pthread_mutex_unlock(&seq_lock);
     wait_why = seq > s ? "SyncWait (fence not submitted yet)" : "SyncWait";
     if (seq > s) seq = s;  // not queued yet (other thread): everything queued so far (vk_wait_seq: the recorder, then the GPU)
-    if (overlap_on()) {  // (see deferred_seq) wait for the fence deferred last time, defer this one
+    if (overlap_on()) {  // (see deferred_seq) wait for the frame before this fence's, defer the rest
         uint64_t done = vk_completed_seq();  // (the timeline's value: a submission the recorder hasn't made yet isn't done)
         pthread_mutex_lock(&seq_lock);
-        uint64_t w = overlap_defer(seq, done, &deferred_seq);
+        uint64_t w = overlap_defer(seq, done, present_seq, deferred_seq);
         pthread_mutex_unlock(&seq_lock);
         static int store_wait = -1;
         if (store_wait < 0) store_wait = !ENV("LARECOMP_GPU_STORE_WAIT") || atoi(ENV("LARECOMP_GPU_STORE_WAIT")) != 0;

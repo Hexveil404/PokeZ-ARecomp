@@ -2029,6 +2029,10 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         bool shot = win_shot && (long)frame + 1 == win_shot;
         vk_frame_end(shot ? "build/window.png" : NULL);
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) exit_after_shot();
+        // (overlap) the game's frame ends here: a fence the game places right after presenting is this item's, so it
+        // resolves to this last submission (exec.c overlap_defer)
+        extern void vk_overlap_frame_end(void);
+        vk_overlap_frame_end();
     } else {
         renderer_submit();
     }

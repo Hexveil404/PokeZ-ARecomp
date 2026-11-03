@@ -3791,6 +3791,11 @@ static uint64_t range_hash(uint64_t addr, uint64_t size) {
     const uint64_t *w = (const uint64_t *)(uintptr_t)addr;
     uint64_t h = 1469598103934665603ull, n = size / 8;
     for (uint64_t i = 0; i < n; i++) h = (h ^ w[i]) * 1099511628211ull;
+    if (size & 7) {  // (the last 1-7 bytes too: a 4- or 12-byte range's final field changing was invisible)
+        uint64_t t = 0;
+        memcpy(&t, (const uint8_t *)(uintptr_t)addr + n * 8, size & 7);
+        h = (h ^ t ^ (size & 7) << 56) * 1099511628211ull;
+    }
     return h;
 }
 static void snap_ring_import_tail(void);  // (with the lazy chunks below)
@@ -6252,17 +6257,21 @@ static CsProg *compute_program(NvnProgram *np) {
     if (!ss->code_addr) return NULL;
     struct CsEnt *tab = g_cs_tab;
     int n = g_cs_n, at = -1;
-    uint64_t fp = code_fp(ss);
-    for (int i = 0; i < n && at < 0; i++)
-        if (tab[i].addr == ss->code_addr) {
-            if (tab[i].fp == fp) return tab[i].cp;
-            at = i;  // (other code there now: this entry gets the new program)
-        }
+    // The workgroup size is a specialization constant of the pipeline, read from the control section, not the code:
+    // it is part of the address cache's fingerprint (the same code with another local size got the first one's
+    // pipeline - a dispatch of the wrong number of invocations)
     uint32_t local[3];
     for (int i = 0; i < 3; i++) {
         local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
         if (!local[i]) local[i] = 1;
     }
+    uint64_t fp = code_fp(ss);
+    fp ^= ((uint64_t)local[0] | (uint64_t)local[1] << 21 | (uint64_t)local[2] << 42) * 0x9E3779B97F4A7C15ull;
+    for (int i = 0; i < n && at < 0; i++)
+        if (tab[i].addr == ss->code_addr) {
+            if (tab[i].fp == fp) return tab[i].cp;
+            at = i;  // (other code there now: this entry gets the new program)
+        }
     if (shader_rec_recording()) {
         ShaderRec rec = {.kind = 'C', .vs = shader_stage_hash(ss), .local = {local[0], local[1], local[2]}};
         shader_rec_note(&rec);

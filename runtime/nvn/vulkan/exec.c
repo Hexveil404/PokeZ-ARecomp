@@ -9364,7 +9364,11 @@ static void gtao_before_lighting(Prog *pr) {
             if (e && e->tex->format == 0x25 && e->tex->width == de->tex->width && e->tex->height == de->tex->height)
                 nv = vk_view(e->tex, &e->view, e->has_view, false, pr->fi->tex[i].type);
         }
-    pc[19] = nv ? 1.0f : 0.0f;
+    // cam.w: its sign says whether those normals are there; its size is the widest the AO radius gets on screen, as a
+    // fraction of the width (LARECOMP_GTAO_MAXR; 0: no limit)
+    float maxr = gtao_env("LARECOMP_GTAO_MAXR", 0.2f);
+    if (maxr <= 0) maxr = 1000.0f;
+    pc[19] = nv ? maxr : -maxr;
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     TexBackend *raw = post_image(7, aw, ah), *filt = post_image(8, aw, ah);
@@ -9373,8 +9377,15 @@ static void gtao_before_lighting(Prog *pr) {
     post_pass(cb, "gtao.frag", in, 2, raw, NULL, false);
     VkImageView bin[2] = {post_view(raw), dv};
     post_pass(cb, "gtao_blur.frag", bin, 2, filt, NULL, false);
+    // a second pass of the filter (back into the raw image): the few steps of a wide radius leave blotches a single
+    // 5x5 pass doesn't smooth (LARECOMP_GTAO_BLUR2=0: one pass)
+    bool blur2 = gtao_env("LARECOMP_GTAO_BLUR2", 1) != 0 && pc[30] < 2;
+    if (blur2) {
+        VkImageView bin2[2] = {post_view(filt), dv};
+        post_pass(cb, "gtao_blur.frag", bin2, 2, raw, NULL, false);
+    }
     post_pc_big = NULL;
-    gtao.ao = pc[30] >= 2 ? post_view(raw) : post_view(filt);  // (debug views 2 / 3: unfiltered)
+    gtao.ao = pc[30] >= 2 || blur2 ? post_view(raw) : post_view(filt);  // (debug views 2 / 3: unfiltered)
     gtao.depth = dv;
     static int nlog;
     if (nlog++ < 2) LOG("[gtao] on: depth %ux%u, AO %ux%u, radius %.2f m, camera (%.1f, %.1f, %.1f)\n", db->width, db->height, aw, ah,

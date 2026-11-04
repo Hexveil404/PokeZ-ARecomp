@@ -527,6 +527,8 @@ void vk_full_barrier(VkCommandBuffer cb) {
 static void ring_retire(void);
 void vc_flush(void);
 static void xm_copy_back(VkCommandBuffer cb);
+static void gmir_upload(void);              // (the guest window's copy in video memory, below)
+static void gmir_copy_back(VkCommandBuffer cb);
 
 // ---- LARECOMP_GPUPROF_AT=<frame>: GPU time per pass / dispatch / copy of that frame, logged as "[gpuprof]".
 // A timestamp (ALL_COMMANDS: after everything before it) at each mark; a row = the work since the previous mark.
@@ -664,8 +666,10 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     Sub *s = sub();
     if (!s->main_begun && !s->upload_begun && !wait && !signal) return;
     if (s->main_begun) xm_copy_back(s->main);  // (transform feedback output, to the heap)
+    if (s->main_begun) gmir_copy_back(s->main);  // (the copy in video memory: the GPU's writes, to guest memory)
     VkCommandBufferSubmitInfo cbs[2];
     int n = 0;
+    gmir_upload();  // (... and the CPU's, into it: first in the submission, before vc_flush's copies read it)
     vc_flush();
     if (s->upload_begun) {
         vk_full_barrier(s->upload);  // uploads complete before anything in the main buffer reads them
@@ -4612,6 +4616,184 @@ static bool whole_import_probe_oom(void) {
     return oom;
 }
 
+// ---- The guest window's copy in video memory (gmir). Direct3D 12 (Mesa's Dozen) opens the host-pointer import as a
+// cross-adapter heap, which the GPU reads uncached: measured on an RTX 4060 Ti (dx12 heaptest), loads 60x slower than
+// video memory and atomics 150x, and Z-A's crowd dispatches - loops of atomics on guest memory - took 300-500 ms each
+// (the world at ~1 fps). Here the shaders, vertex reads and indirect parameters use a device-local copy of the
+// imported range instead (gmem_buf), kept in step both ways:
+// - CPU writes: before each submission, the pages the OS write tracking saw written (every query of it marks them,
+//   gmir_dirty) are copied from the import into the copy, first thing in the submission (vk_submit_extra's upload
+//   buffer, after a full barrier: no earlier submission still reads them);
+// - GPU writes: the ranges marked GPU-written while recording (vc_mark_gpu: storage slots, transform feedback) are
+//   copied back into the import at the end of the submission. (Stores to addresses no slot names stay in the copy:
+//   GPU-only state, as the crowds' - the game's CPU doesn't read those.)
+// On by default with Dozen; LARECOMP_VK_GMEM_MIRROR=1 / 0 forces it on / off (=1 also tests it on any GPU). Needs the
+// OS write tracking (Windows: the guest window's MEM_WRITE_WATCH); without it, off.
+static uint32_t *vc_page_gen;  // (below, with the vertex cache)
+static uint32_t vc_gen;
+static bool pt_init(void);
+#define GMIR_PAGE 4096ull  // (= VC_PAGE)
+static int gmir_mode(void) {
+    static int m = -1;
+    if (m < 0) { const char *e = getenv("LARECOMP_VK_GMEM_MIRROR"); m = e ? atoi(e) != 0 : g_vk.dozen; }
+    return m;
+}
+static bool gmir_on;
+static VkBuffer gmir_host;             // the host-pointer import: the copies' source and destination
+static VkDeviceMemory gmir_host_mem;
+static uint64_t *gmir_bits;            // per window page (offset / GMIR_PAGE): dirty, in gmir_list
+static uint32_t *gmir_list, gmir_n, gmir_cap;
+static bool gmir_all;                  // every page (the first upload, or more dirty pages than the list holds)
+#define GMIR_BACK 4096
+static struct { uint64_t lo, hi; } gmir_back[GMIR_BACK];  // window offsets the GPU writes in this submission
+static int gmir_back_n;
+static uint64_t gmir_up_bytes, gmir_back_bytes, gmir_poll_ns;  // (logged every ~10 s)
+
+static void gmir_dirty(uint64_t p) {
+    if (!gmir_bits || gmir_all) return;
+    if (gmir_bits[p >> 6] >> (p & 63) & 1) return;
+    gmir_bits[p >> 6] |= 1ull << (p & 63);
+    if (gmir_n < gmir_cap) gmir_list[gmir_n++] = (uint32_t)p;
+    else gmir_all = true;
+}
+
+static void gmir_back_add(uint64_t lo, uint64_t hi) {
+    if (!gmir_on) return;
+    if (lo < gmem_lo) lo = gmem_lo;
+    if (hi > gmem_lo + gmem_size) hi = gmem_lo + gmem_size;
+    if (hi <= lo) return;
+    for (int i = gmir_back_n - 1; i >= 0 && i >= gmir_back_n - 8; i--)  // (the recent ones: slots repeat)
+        if (lo <= gmir_back[i].hi && hi >= gmir_back[i].lo) {
+            if (lo < gmir_back[i].lo) gmir_back[i].lo = lo;
+            if (hi > gmir_back[i].hi) gmir_back[i].hi = hi;
+            return;
+        }
+    if (gmir_back_n == GMIR_BACK) {  // (full: the last one grows to cover it)
+        if (lo < gmir_back[GMIR_BACK - 1].lo) gmir_back[GMIR_BACK - 1].lo = lo;
+        if (hi > gmir_back[GMIR_BACK - 1].hi) gmir_back[GMIR_BACK - 1].hi = hi;
+        return;
+    }
+    gmir_back[gmir_back_n].lo = lo, gmir_back[gmir_back_n].hi = hi;
+    gmir_back_n++;
+}
+
+static int gmir_cmp(const void *a, const void *b) { uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b; return x < y ? -1 : x > y; }
+
+// (vk_submit_extra) the CPU's writes since the last submission, into the copy
+static void gmir_upload(void) {
+    if (!gmir_on) return;
+    static uint64_t *pages;
+    enum { POLL = 1 << 18 };  // (1 GB of pages a poll; more: all)
+    if (!pages) pages = malloc(sizeof *pages * POLL);
+    uint64_t t0 = plat_now_ns(), pg = GMIR_PAGE;
+    int n = pages ? plat_written_pages(gwin_base + gmem_lo, gmem_size, pages, POLL, &pg) : -1;
+    if (n < 0) gmir_all = true;
+    else {
+        uint32_t g = ++vc_gen;
+        if (n >= POLL) {
+            for (uint64_t q = gmem_lo / GMIR_PAGE; q < (gmem_lo + gmem_size) / GMIR_PAGE; q++) vc_page_gen[q] = g;
+            gmir_all = true;
+        } else for (int k = 0; k < n; k++) {
+            uint64_t q = (pages[k] - gwin_base) / GMIR_PAGE;
+            vc_page_gen[q] = g;
+            gmir_dirty(q);
+        }
+    }
+    gmir_poll_ns += plat_now_ns() - t0;
+    if (!gmir_all && !gmir_n) return;
+    static VkBufferCopy rg[1024];
+    int nr = 0;
+    VkCommandBuffer cb = vk_upload_cmd();
+    if (gmir_all) {
+        rg[nr++] = (VkBufferCopy){0, 0, gmem_size};
+        gmir_up_bytes += gmem_size;
+        memset(gmir_bits, 0, (HEAP_MAX / GMIR_PAGE + 63) / 64 * 8);
+    } else {
+        qsort(gmir_list, gmir_n, sizeof *gmir_list, gmir_cmp);
+        for (uint32_t i = 0; i < gmir_n; i++) {
+            uint64_t q = gmir_list[i];
+            gmir_bits[q >> 6] &= ~(1ull << (q & 63));
+            uint64_t a = q * GMIR_PAGE;
+            if (a < gmem_lo || a >= gmem_lo + gmem_size) continue;
+            uint64_t off = a - gmem_lo, len = GMIR_PAGE;
+            if (off + len > gmem_size) len = gmem_size - off;
+            if (nr && rg[nr - 1].srcOffset + rg[nr - 1].size == off) { rg[nr - 1].size += len; }
+            else {
+                if (nr == 1024) { rec_CmdCopyBuffer(cb, gmir_host, gmem_buf, (uint32_t)nr, rg); nr = 0; }
+                rg[nr++] = (VkBufferCopy){off, off, len};
+            }
+            gmir_up_bytes += len;
+        }
+    }
+    if (nr) rec_CmdCopyBuffer(cb, gmir_host, gmem_buf, (uint32_t)nr, rg);
+    vk_full_barrier(cb);  // (vc_flush's copies, next in this buffer, read the copy)
+    gmir_n = 0;
+    gmir_all = false;
+}
+
+// (vk_submit_extra, at the end of the main buffer) the GPU's writes of this submission, back into guest memory
+static void gmir_copy_back(VkCommandBuffer cb) {
+    if (!gmir_on || !gmir_back_n) return;
+    static VkBufferCopy rg[GMIR_BACK];
+    for (int i = 0; i < gmir_back_n; i++) {
+        uint64_t off = gmir_back[i].lo - gmem_lo;
+        rg[i] = (VkBufferCopy){off, off, gmir_back[i].hi - gmir_back[i].lo};
+        gmir_back_bytes += rg[i].size;
+    }
+    vk_full_barrier(cb);
+    rec_CmdCopyBuffer(cb, gmem_buf, gmir_host, (uint32_t)gmir_back_n, rg);
+    vk_full_barrier(cb);
+    gmir_back_n = 0;
+    static uint64_t next;
+    uint64_t now = SDL_GetTicksNS();
+    if (now >= next) {
+        if (next) LOG("[vk] gmem copy: %.1f MB up, %.1f MB back, write tracking polls %.1f ms (last ~10 s)\n", gmir_up_bytes / 1048576.0,
+                      gmir_back_bytes / 1048576.0, gmir_poll_ns / 1e6);
+        gmir_up_bytes = gmir_back_bytes = gmir_poll_ns = 0;
+        next = now + 10000000000ull;
+    }
+}
+
+// (gmem_import) the copy in video memory of an import just made: buf / mem become it, the import is kept for the copies
+static bool gmir_make(VkBuffer *buf, VkDeviceMemory *mem, uint64_t size) {
+    if (!gmir_mode() || !pt_init()) return false;
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
+                             .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT};
+    VkBuffer b;
+    if (vkCreateBuffer(g_vk.dev, &bi, NULL, &b) != VK_SUCCESS) return false;
+    VkMemoryRequirements mr;
+    vkGetBufferMemoryRequirements(g_vk.dev, b, &mr);
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+    uint32_t type = UINT32_MAX;
+    for (uint32_t i = 0; i < mp.memoryTypeCount && type == UINT32_MAX; i++)
+        if ((mr.memoryTypeBits >> i & 1) && (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) &&
+            !(mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+            type = i;
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = type};
+    VkDeviceMemory m;
+    if (type == UINT32_MAX || vkAllocateMemory(g_vk.dev, &ai, NULL, &m) != VK_SUCCESS) {
+        vkDestroyBuffer(g_vk.dev, b, NULL);
+        LOG("[vk] gmem copy in video memory: no room for %llu MB, the import is used in place\n", (unsigned long long)(size >> 20));
+        return false;
+    }
+    if (vkBindBufferMemory(g_vk.dev, b, m, 0) != VK_SUCCESS) { vkDestroyBuffer(g_vk.dev, b, NULL); vkFreeMemory(g_vk.dev, m, NULL); return false; }
+    if (!gmir_bits) {
+        gmir_bits = calloc((HEAP_MAX / GMIR_PAGE + 63) / 64, 8);
+        gmir_cap = 1u << 20;
+        gmir_list = malloc(sizeof *gmir_list * gmir_cap);
+    }
+    if (gmir_host) vk_defer_buffer(gmir_host, gmir_host_mem);
+    gmir_host = *buf, gmir_host_mem = *mem;
+    *buf = b, *mem = m;
+    gmir_on = true;
+    gmir_all = true;  // (the first submission copies all of it)
+    LOG("[vk] gmem: the import's copy in video memory (%llu MB): shaders read it, kept in step with guest memory "
+        "(LARECOMP_VK_GMEM_MIRROR=0: the import in place)\n", (unsigned long long)(size >> 20));
+    return true;
+}
+
 // Guest window bytes [lo, lo + size) for shader global memory (gmem_info; the window: gwin - the heap, or Pokémon Z-A's
 // physical memory)
 static bool gmem_import(uint64_t lo, uint64_t size) {
@@ -4639,6 +4821,8 @@ static bool gmem_import(uint64_t lo, uint64_t size) {
         extern uint64_t g_gmem_va, g_gmem_guest, g_gmem_va_size;
         g_gmem_va = va, g_gmem_guest = gwin_base + lo, g_gmem_va_size = size;
     }
+    gmem_lo = lo, gmem_size = size;  // (gmir_make's copies use them)
+    gmir_make(&buf, &mem, size);
     if (gmem_buf) vk_defer_buffer(gmem_buf, gmem_mem);  // the heap grew: the pending submission may still use the old import
     gmem_buf = buf;
     gmem_mem = mem;
@@ -5759,6 +5943,7 @@ static bool pt_init(void) {
     vc_page_gpu = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_gpu);
     vc_page_lines = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_lines);
     vc_page_gen[0] = ++vc_gen;  // (the probe took page 0's tracking)
+    gmir_dirty(0);
     return true;
 }
 
@@ -5813,8 +5998,8 @@ static int pages_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t 
     int n = plat_written_pages(gwin_base + lo, hi - lo, pages, 4096, &pg);
     if (n < 0) return -1;
     uint32_t g = ++vc_gen;
-    if (n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_page_gen[p] = g;
-    else for (int k = 0; k < n; k++) vc_page_gen[(pages[k] - gwin_base) / VC_PAGE] = g;
+    if (n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_page_gen[p] = g, gmir_dirty(p);
+    else for (int k = 0; k < n; k++) vc_page_gen[(pages[k] - gwin_base) / VC_PAGE] = g, gmir_dirty((pages[k] - gwin_base) / VC_PAGE);
     *now = g;
     int changed = 0;
     for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) {
@@ -5842,6 +6027,7 @@ static bool vc_range_gpu(uint64_t lo, uint64_t hi, uint32_t now) {
 }
 // Heap bytes [lo, hi) (offsets) written by the GPU: not served from the cache while their mark lasts
 static void vc_mark_gpu(uint64_t lo, uint64_t hi) {
+    gmir_back_add(lo, hi);  // (the copy in video memory: these go back to guest memory at the submission's end)
     if (!pt_init()) return;
     uint32_t now = (uint32_t)vk_frame_counter() + 1;
     for (uint64_t p = lo / VC_PAGE; p < (hi + VC_PAGE - 1) / VC_PAGE && p < gwin_max / VC_PAGE; p++) {
@@ -5955,8 +6141,8 @@ void vc_flush(void) {
         uint64_t pg = VC_PAGE;
         int n = plat_written_pages(gwin_base + lo, hi - lo, pages, 4096, &pg);
         prof_vc_queries++;
-        if (n < 0 || n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_page_gen[p] = g;  // (all)
-        else for (int k = 0; k < n; k++) vc_page_gen[(pages[k] - gwin_base) / VC_PAGE] = g;
+        if (n < 0 || n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_page_gen[p] = g, gmir_dirty(p);  // (all)
+        else for (int k = 0; k < n; k++) vc_page_gen[(pages[k] - gwin_base) / VC_PAGE] = g, gmir_dirty((pages[k] - gwin_base) / VC_PAGE);
         if (n > 0) prof_vc_scan_pages += (uint64_t)n;
         i = j;
     }

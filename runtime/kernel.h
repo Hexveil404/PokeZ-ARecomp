@@ -80,3 +80,4 @@ void kernel_hang_hooks(bool (*check)(uint64_t limit_ns, char *why, size_t n), vo
 uint64_t kernel_heap_size(void);  // bytes from HEAP_BASE set by SetHeapSize
 uint64_t kernel_phys_largest(uint64_t *addr);  // largest svcMapPhysicalMemory region: size (0 if none), *addr
 uint64_t kernel_phys_ring(uint64_t after, uint64_t size);  // reserve [after, after + size) for the runtime (no game mapping there): after, or 0
+void kernel_phys_ring_recommit(void);  // (after a reboot's guest memory reset: the ring committed again, #157)

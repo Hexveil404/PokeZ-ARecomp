@@ -187,6 +187,7 @@ static void teardown(void) {
         if (*p) { (*p)(); n++; }
     kernel_reset();
     if (!plat_reset_guest(GUEST_LO, GUEST_HI)) FATAL("cannot reset guest memory\n");
+    kernel_phys_ring_recommit();
     backend_guest_memory_reset();
     g_nmodules = 0;
     g_reboot = RT_REBOOT_NONE;

@@ -150,6 +150,21 @@ uint64_t kernel_phys_ring(uint64_t after, uint64_t size) {
     pthread_mutex_unlock(&g_mlock);
     return ok ? after : 0;
 }
+// An in-place reboot decommits the whole guest range (main.c teardown) but the ring stays the runtime's: committed again
+// here. Without it the next boot's window import covered 64 MB of reserved-only pages, AMD's driver refused it
+// (VK_ERROR_INVALID_EXTERNAL_HANDLE, "guest heap import failed") and every shader read of game memory returned zero for
+// the rest of the session: characters not drawn after "return to the start screen" (#157).
+void kernel_phys_ring_recommit(void) {
+    pthread_mutex_lock(&g_mlock);
+    char st[160] = "";
+    if (phys_ring_hi) {
+        plat_page_state(phys_ring_lo, st, sizeof st);
+        plat_commit(phys_ring_lo, phys_ring_hi - phys_ring_lo);
+    }
+    pthread_mutex_unlock(&g_mlock);
+    if (phys_ring_hi) LOG("[reboot] storage copies' ring %llx +%llu MB committed again (was %s)\n", (unsigned long long)phys_ring_lo,
+                          (unsigned long long)((phys_ring_hi - phys_ring_lo) >> 20), st[0] ? st : "?");
+}
 
 // Writable guest data regions (heap, mapped/physical memory, module .data): for debug/runtime memory scans.
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {

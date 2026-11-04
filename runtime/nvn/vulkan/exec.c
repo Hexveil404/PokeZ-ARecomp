@@ -4884,7 +4884,19 @@ static bool gmem_import(uint64_t lo, uint64_t size) {
     }
 #endif
     VkResult r = host_import_ptr((void *)(uintptr_t)(gwin_base + lo), size, &buf, &mem, g_vk.gmem_addr);
-    if (r != VK_SUCCESS) { LOG("[vk] gmem import: %d (%llu MB)\n", r, (unsigned long long)(size >> 20)); return false; }
+    if (r != VK_SUCCESS) {
+        LOG("[vk] gmem import: %d (%llu MB)\n", r, (unsigned long long)(size >> 20));
+        // (#157: a driver refuses an import over pages that aren't committed - the first one found, in 1 MB steps;
+        // once, at a failure only: VirtualQuery is slow over the window)
+        char st[160];
+        for (uint64_t a = gwin_base + lo; a < gwin_base + lo + size; a += 1u << 20)
+            if (plat_page_state(a, st, sizeof st) && strncmp(st, "committed", 9)) {
+                LOG("[vk] gmem import: guest %llx (window +%llu MB) is %s\n", (unsigned long long)a,
+                    (unsigned long long)((a - gwin_base - lo) >> 20), st);
+                break;
+            }
+        return false;
+    }
     if (g_vk.gmem_addr) {  // (#39 #72: a page fault's address minus this start is the guest address base + lo + that)
         VkBufferDeviceAddressInfo ai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = buf};
         uint64_t va = vkGetBufferDeviceAddress(g_vk.dev, &ai);

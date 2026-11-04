@@ -293,7 +293,11 @@ The Pokémon Company. *Pokémon* and *Pokémon Legends: Z-A* are trademarks of t
 code, assets or fonts are included; you must provide your own legally obtained copy of the game.
 
 The code is released under the [MIT License](LICENSE) (LAS Recomp © Peiikai). Third-party components keep their own
-licenses; see [docs/LASRecomp-README.md](docs/LASRecomp-README.md#license). The NVIDIA DLAA integration
+licenses; see [docs/LASRecomp-README.md](docs/LASRecomp-README.md#license). DirectX 12 (F1 > Display >
+Graphics API) runs the same renderer through [Mesa](https://mesa3d.org)'s Dozen (Vulkan on Direct3D 12, MIT), built
+by `tools/dx12/build_dozen.sh` with the fixes in `tools/dx12/dozen-za.patch`, with Microsoft's `dxil.dll` and the
+Direct3D 12 Agility SDK's `D3D12Core.dll` (Microsoft's redistributable files, under their own licence, shipped in
+`dx12/` and `D3D12/`). The NVIDIA DLAA integration
 (`runtime/nvn/vulkan/dlaa.c`) follows [totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp)'s
 `runtime/vk_dlaa.c` (MIT). DLAA uses NVIDIA DLSS: `nvngx_dlss.dll` is NVIDIA's (NVIDIA RTX SDK license) and isn't
 included; NVIDIA, DLSS and DLAA are trademarks of NVIDIA Corporation.

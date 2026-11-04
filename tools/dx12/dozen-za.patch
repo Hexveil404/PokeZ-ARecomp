@@ -1,0 +1,85 @@
+--- a/src/microsoft/vulkan/dzn_device.c
++++ b/src/microsoft/vulkan/dzn_device.c
+@@ -3332,7 +3332,7 @@
+          desc.Flags |= mem->res_flags;
+          if (FAILED(ID3D12Device1_CreatePlacedResource(device->dev, mem->heap,
+                                                        pBindInfos[i].memoryOffset,
+-                                                       &buffer->desc,
++                                                       &desc,  /* (patched: the res_flags above - ALLOW_CROSS_ADAPTER for host-pointer heaps) */
+                                                        D3D12_RESOURCE_STATE_COMMON,
+                                                        NULL,
+                                                        &IID_ID3D12Resource,
+--- a/src/microsoft/vulkan/dzn_descriptor_set.c
++++ b/src/microsoft/vulkan/dzn_descriptor_set.c
+@@ -1185,6 +1185,23 @@
+    if (upper_bound == upper_bound_default_descriptor)
+       return false;
+ 
++   /* (ZA Recomp patch) Custom views live until their buffer is destroyed, one per distinct (offset, range): an
++    * application sub-allocating descriptors out of one long-lived ring (a new offset per draw) used up the
++    * 1M-slot bindless heap within a minute, and every later view / buffer creation failed. Storage buffers: the
++    * base view spans the buffer and the shader adds the offset - no custom view. Uniform buffers: views on 32 KB
++    * steps with a 64 KB reach, so a buffer has at most size / 32 KB of them. */
++   if (out_desc->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && info->buffer->size <= UINT32_MAX)
++      return false;
++   if (out_desc->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
++      const uint64_t step = 32 * 1024, reach = 64 * 1024;
++      uint64_t base = info->offset & ~(step - 1);
++      if (upper_bound - base <= reach) {
++         out_desc->offset = base;
++         out_desc->range = MIN2(reach, ALIGN_POT(info->buffer->size - base, size_align));
++         return true;
++      }
++   }
++
+    out_desc->range = ALIGN_POT(upper_bound, size_align);
+    if (out_desc->range <= upper_bound_default_descriptor) {
+       /* Use a larger descriptor with the hope that we'll be more likely
+--- a/src/microsoft/vulkan/dzn_private.h
++++ b/src/microsoft/vulkan/dzn_private.h
+@@ -1209,9 +1209,13 @@
+ /* This is defined as a macro so that it works for both
+  * VkImageSubresourceRange and VkImageSubresourceLayers
+  */
++/* (ZA Recomp patch) a 3D image: one "slice" (Direct3D 12 subresources are its levels only) */
+ #define dzn_get_layer_count(_image, _range) \
+-   ((_range)->layerCount == VK_REMAINING_ARRAY_LAYERS ? \
++   ((_image)->vk.image_type == VK_IMAGE_TYPE_3D ? 1u : \
++    (_range)->layerCount == VK_REMAINING_ARRAY_LAYERS ? \
+     (_image)->vk.array_layers - (_range)->baseArrayLayer : (_range)->layerCount)
++#define dzn_get_base_layer(_image, _range) \
++   ((_image)->vk.image_type == VK_IMAGE_TYPE_3D ? 0u : (_range)->baseArrayLayer)
+ 
+ #define dzn_get_level_count(_image, _range) \
+    ((_range)->levelCount == VK_REMAINING_MIP_LEVELS ? \
+--- a/src/microsoft/vulkan/dzn_image.c
++++ b/src/microsoft/vulkan/dzn_image.c
+@@ -395,6 +395,8 @@
+    int planeSlice =
+       aspect == VK_IMAGE_ASPECT_STENCIL_BIT ? 1 : 0;
+ 
++   if (image->vk.image_type == VK_IMAGE_TYPE_3D)  /* (ZA Recomp patch) no array slices: levels only */
++      return subres->baseMipLevel + level;
+    return subres->baseMipLevel + level +
+           ((subres->baseArrayLayer + layer) * image->desc.MipLevels) +
+           (planeSlice * image->desc.MipLevels * image->desc.DepthOrArraySize);
+--- a/src/microsoft/vulkan/dzn_cmd_buffer.c
++++ b/src/microsoft/vulkan/dzn_cmd_buffer.c
+@@ -319,7 +319,7 @@
+       .AccessAfter = access_after,
+       .LayoutBefore = layout_before,
+       .LayoutAfter = layout_after,
+-      .Subresources.FirstArraySlice = range->baseArrayLayer,
++      .Subresources.FirstArraySlice = dzn_get_base_layer(image, range),
+       .Subresources.NumArraySlices = dzn_get_layer_count(image, range),
+       .Subresources.IndexOrFirstMipLevel = range->baseMipLevel,
+       .Subresources.NumMipLevels = dzn_get_level_count(image, range),
+@@ -1647,7 +1647,7 @@
+ 
+          texture_barriers[tbar].SyncBefore = adjust_sync_for_access(texture_barriers[tbar].SyncBefore, texture_barriers[tbar].AccessBefore);
+          texture_barriers[tbar].SyncAfter = adjust_sync_for_access(texture_barriers[tbar].SyncAfter, texture_barriers[tbar].AccessAfter);
+-         texture_barriers[tbar].Subresources.FirstArraySlice = range->baseArrayLayer;
++         texture_barriers[tbar].Subresources.FirstArraySlice = dzn_get_base_layer(image, range);
+          texture_barriers[tbar].Subresources.NumArraySlices = dzn_get_layer_count(image, range);
+          texture_barriers[tbar].Subresources.IndexOrFirstMipLevel = range->baseMipLevel;
+          texture_barriers[tbar].Subresources.NumMipLevels = dzn_get_level_count(image, range);

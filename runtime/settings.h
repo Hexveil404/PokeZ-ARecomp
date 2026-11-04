@@ -29,6 +29,7 @@ enum { GPU_DYN_VERTEX = 0 /* LARECOMP_VK_DYN_VERTEX */, GPU_OVERLAP /* LARECOMP_
 // the GPU's PCI vendor (Vulkan: device.c, before any feature is decided; 0: not known) and a feature's state: its
 // LARECOMP_* variable, else F1 > Compatibility, else on (robust access 2: off on AMD GPUs, #39)
 extern unsigned g_gpu_vendor;
+extern bool g_gpu_dozen;  // (vulkan/device.c) the device is Dozen: DirectX 12 underneath
 bool gpu_feature_on(int feature, const char *env);
 enum { GPU_AUTO = 0, GPU_ON = 1, GPU_OFF = 2 };
 enum { TAA_GAME = 0, TAA_FSR2 = 1, TAA_DLAA = 2 };  // (Settings.taa)
@@ -54,6 +55,8 @@ typedef struct {
                          // own (vulkan/exec.c fsr2_copy, vulkan/dlaa.c)
     int gpu_compat[GPU_COMPAT_N];  // GPU_AUTO / GPU_ON / GPU_OFF per GPU_* feature (Compatibility)
     char gpu_name[256];  // Graphics card: the Vulkan device to run on, by name ("": Auto; vulkan/device.c pick_device)
+    bool dx12;           // Graphics API (Windows): DirectX 12 through the shipped Dozen (Mesa's Vulkan on Direct3D 12,
+                         // dx12/ next to the exe) instead of the GPU's Vulkan driver (vulkan/device.c ui_window_init)
     float volume;        // master volume, 1 = 100%
     bool reverb;         // room reverb effect
     bool movie_audio;

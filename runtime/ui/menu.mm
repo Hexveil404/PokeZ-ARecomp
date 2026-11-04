@@ -473,6 +473,20 @@ static void tab_display(bool in_game) {
         }
     }
 #endif
+#ifdef _WIN32
+    {   // Graphics API (vulkan/device.c ui_window_init): DirectX 12 through the shipped Dozen
+        const char *apis[2] = {"Vulkan", "DirectX 12"};
+        int a = g_settings.dx12 ? 1 : 0;
+        if (opt_choice(TR("Graphics API", "API gráfica"), &a, apis, 2, 0,
+                       TR("Vulkan: your graphics card's own Vulkan driver (the default). DirectX 12: the same renderer "
+                          "on your card's DirectX 12 driver - try it if the game crashes on Vulkan (some AMD cards). "
+                          "Applies from the next start; if DirectX 12 fails to start, the next start uses Vulkan.",
+                          "Vulkan: o driver Vulkan da sua placa de vídeo (o padrão). DirectX 12: o mesmo renderizador no "
+                          "driver DirectX 12 da placa - experimente se o jogo travar no Vulkan (algumas placas AMD). "
+                          "Vale a partir do próximo início; se o DirectX 12 não iniciar, o próximo início usa Vulkan.")))
+            g_settings.dx12 = a == 1;
+    }
+#endif
     const char *aspects[] = {TR("Unlocked", "Livre"), TR("Original 16:9", "16:9 original")};
     opt_choice(TR("Aspect ratio", "Proporção"), &g_settings.aspect, aspects, 2, ASPECT_UNLOCKED,
                TR("Unlocked: the view fills the window, so wider (or taller) windows show more of the world - up to "

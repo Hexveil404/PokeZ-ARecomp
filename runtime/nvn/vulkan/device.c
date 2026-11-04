@@ -810,6 +810,7 @@ static void create_device(void) {
             VkPhysicalDeviceProperties2 p0 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &d0};
             vkGetPhysicalDeviceProperties2(g_vk.phys, &p0);
             g_vk.dozen = d0.driverID == VK_DRIVER_ID_MESA_DOZEN;
+            g_gpu_dozen = g_vk.dozen;
         }
         char gpl[96] = "no extension", eds3[160] = "no extension";
 #ifdef VK_EXT_graphics_pipeline_library
@@ -2292,6 +2293,31 @@ void ui_window_init(void) {
                                             ENV("LARECOMP_HOST_INPUT") || ENV("LARECOMP_BIND_TEST"));
         if (scripted) SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
     }
+    // Graphics API: DirectX 12 (the setting, LARECOMP_DX12=0/1 over it): the Vulkan loader is pointed at the shipped
+    // Dozen (dx12/dzn_icd.x86_64.json next to the exe: Mesa's Vulkan on Direct3D 12, patched for this game) instead of
+    // the GPU's own Vulkan driver - for GPUs whose Vulkan driver crashes the game (AMD) while their DirectX 12 one is
+    // fine. The renderer is the same; the device says it is Dozen (g_vk.dozen) and the backend takes its paths.
+    // A choice that fails at start would fail every start (the start screen runs on it too): the settings file says
+    // Vulkan until the device and swapchain are up (ui_window_init, below), as the Graphics card does.
+    bool dx12_chosen = false;
+#ifdef _WIN32
+    {
+        const char *e = ENV("LARECOMP_DX12");
+        bool dx = e ? atoi(e) != 0 : g_settings.dx12;
+        char icd[1100];
+        if (dx && !getenv("VK_DRIVER_FILES") && !getenv("VK_ICD_FILENAMES")) {
+            if (rt_resource("dx12/dzn_icd.x86_64.json", NULL, icd, sizeof icd)) {
+                // (backslashes only: the loader finds the json's folder - where its relative library_path points - by
+                // the last backslash, and a mixed path loaded nothing: "doesn't implement VK_KHR_surface")
+                for (char *q = icd; *q; q++) if (*q == '/') *q = '\\';
+                _putenv_s("VK_DRIVER_FILES", icd);
+                LOG("[vk] graphics API: DirectX 12 (Dozen, %s)\n", icd);
+                dx12_chosen = g_settings.dx12 && !e;
+            } else LOG("[vk] graphics API: DirectX 12 chosen, but the dx12 folder isn't next to the exe: Vulkan\n");
+        }
+        if (dx12_chosen) { g_settings.dx12 = false; settings_save(); g_settings.dx12 = true; }
+    }
+#endif
     window = SDL_CreateWindow("ZA Recomp", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
@@ -2310,7 +2336,7 @@ void ui_window_init(void) {
     create_swapchain();
     vk_exec_init();
     vk_shaders_init();
-    if (chosen[0]) settings_save();
+    if (chosen[0] || dx12_chosen) settings_save();
 }
 
 SDL_Window *ui_window(void) { return window; }

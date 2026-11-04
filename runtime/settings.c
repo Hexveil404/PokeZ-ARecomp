@@ -23,6 +23,7 @@ const char *const g_screen_filters[N_SCREEN_FILTERS] = {"Off", "Game Boy", "Game
 static const char *const k_screen_filter_keys[N_SCREEN_FILTERS] = {"off", "gameboy", "gameboy_color", "grayscale"};  // (else: off)
 
 unsigned g_gpu_vendor;
+bool g_gpu_dozen;
 bool gpu_feature_on(int feature, const char *env) {
     const char *e = env ? getenv(env) : NULL;
     if (e && *e) return atoi(e) != 0;
@@ -34,6 +35,8 @@ bool gpu_feature_on(int feature, const char *env) {
     // own memory, Focus Blast on an RX 9060 XT every time: #63; #92) came from a run that prepared them, and the same
     // player's runs without them, a long one too, never faulted. (The pipelines are then built as the game first uses
     // them: a short hitch the first time an effect shows.)
+    // (DirectX 12 through Dozen: the prepared pipelines fail in its shader compiler - built as the game uses them)
+    if (g_gpu_dozen && feature == GPU_SHADER_PREP) return false;
     return !(g_gpu_vendor == 0x1002 && (feature == GPU_ROBUST2 || feature == GPU_SHADER_PREP));
 }
 
@@ -297,6 +300,7 @@ void settings_load(void) {
         else if (!strcmp(key, "hdr_paper_white_nits")) { int n = atoi(val); g_settings.hdr_paper = n < 80 ? 80 : n > 500 ? 500 : n; }
         else if (!strcmp(key, "present_mode")) g_settings.present_fifo = !strcmp(val, "fifo");
         else if (!strcmp(key, "graphics_card")) strlcpy(g_settings.gpu_name, val, sizeof g_settings.gpu_name);
+        else if (!strcmp(key, "graphics_api")) g_settings.dx12 = !strcmp(val, "dx12");
         else if (!strncmp(key, "gpu_", 4)) {  // Compatibility: gpu_dynamic_vertex / gpu_overlap / ... = auto|on|off
             static const char *const names[GPU_COMPAT_N] = {"gpu_dynamic_vertex", "gpu_overlap", "gpu_straight_shaders", "gpu_xfb_mirror",
             "gpu_robust_access", "gpu_texture_prefetch", "gpu_prepare_shaders", "gpu_pages_outside"};
@@ -435,6 +439,7 @@ void settings_save(void) {
     fprintf(f, "hdr_paper_white_nits = %d\n", g_settings.hdr_paper);
     fprintf(f, "present_mode = %s\n", g_settings.present_fifo ? "fifo" : "mailbox");
     fprintf(f, "graphics_card = %s\n", g_settings.gpu_name);  // (empty: Auto)
+    fprintf(f, "graphics_api = %s\n", g_settings.dx12 ? "dx12" : "vulkan");
     {
         static const char *const names[GPU_COMPAT_N] = {"gpu_dynamic_vertex", "gpu_overlap", "gpu_straight_shaders", "gpu_xfb_mirror",
             "gpu_robust_access", "gpu_texture_prefetch", "gpu_prepare_shaders", "gpu_pages_outside"};

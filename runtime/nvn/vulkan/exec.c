@@ -5285,6 +5285,9 @@ static void gmem_chunk_decide(void) {
         int sh = 0;
         if (e) { uint64_t b = strtoull(e, NULL, 10) << 20; if (b) sh = 63 - __builtin_clzll(b); }
         else if (g_vk.dozen) sh = 29;
+        // (AMD as well, whatever it reports: its device losses right after the crowd shaders (#154 #159 #161 #162: a TDR,
+        // no page fault) look like Dozen's endless loop. Test build; =0 above: one buffer, as before)
+        else if (g_vk.props.vendorID == 0x1002) sh = 29;
         // (also wherever one storage buffer can't reach the whole window: binding past maxStorageBufferRange is out of
         // spec, and a driver may read 0 there as Dozen did - the crowd shaders' endless loop. Intel: 1 GB, #153)
         uint64_t lim = g_vk.props.limits.maxStorageBufferRange;

@@ -63,6 +63,8 @@ para *The Legend of Zelda: Link's Awakening*.
 - Oclusão de ambiente (GTAO), luz indireta (GI em espaço de tela) e reflexos na água
 - Sombras mais nítidas (mapa de sombras em resolução maior) e filtragem de texturas de alta qualidade
 - Pacotes de texturas HD (`textures/hd/`)
+- API gráfica (Windows): Vulkan, ou DirectX 12 para placas cujo driver Vulkan trava o jogo (veja
+  [DirectX 12](#directx-12))
 
 **Controles**
 - Qualquer controle do SDL3: Xbox, PlayStation (DualShock 4 / DualSense), Switch Pro, Steam Deck e outros
@@ -82,7 +84,7 @@ para *The Legend of Zelda: Link's Awakening*.
 |---|---|
 | **Sistema** | Windows 10 (1903 ou mais novo) ou Windows 11, 64 bits. Linux x86-64: experimental, veja [Linux](#linux-experimental) |
 | **CPU** | x86-64 com AVX2 (2013 ou mais nova). CPUs mais antigas com SSE4.2 também funcionam, mas compilam e rodam mais devagar |
-| **GPU** | Vulkan 1.2 ou mais novo (1.3 recomendado), com driver atualizado |
+| **GPU** | Vulkan 1.2 ou mais novo (1.3 recomendado), com driver atualizado. Com a opção DirectX 12: uma placa DirectX 12 (feature level 11_0, shader model 6.0) |
 | **RAM** | 8 GB (16 GB recomendado) |
 | **Disco** | Cerca de 12 GB livres |
 | **Jogo** | Pokémon Legends: Z-A **1.0.0, 2.0.0 ou 2.0.2**, com ou sem a DLC *Mega Dimension* |
@@ -224,6 +226,22 @@ acima na lista.
 
 Mods que mudam o código do jogo (`exefs`, patches IPS, plugins de cheats) não funcionam num jogo recompilado.
 
+## DirectX 12
+
+O ZA Recomp normalmente roda no driver **Vulkan** da sua placa de vídeo. No Windows ele também pode rodar o mesmo
+renderizador no driver **DirectX 12** da placa, o que ajuda quando o driver Vulkan trava ou desenha o jogo errado
+(algumas placas AMD).
+
+- **Como ligar**: **F1 > Tela > API gráfica: DirectX 12** no jogo. Vale a partir do próximo início. Se o DirectX 12 não iniciar, o próximo início volta sozinho para o Vulkan.
+- **Como funciona**: usa o Dozen do [Mesa](https://mesa3d.org) (uma implementação de Vulkan sobre o Direct3D 12),
+  compilado com as correções para este jogo e incluído na pasta `dx12`, mais o Agility SDK do Direct3D 12 na pasta
+  `D3D12`. Mantenha as duas pastas ao lado do `lasrecomp.exe`.
+- **Situação**: novo e experimental. Numa RTX 4060 Ti ele desenha a mesma imagem que o Vulkan, na mesma velocidade;
+  ainda não foi testado em placas AMD nem Intel - conte pra gente como roda na sua.
+- **Diferenças**: *Preparar shaders ao iniciar* fica desligado no DirectX 12, então um efeito pode dar uma travadinha
+  na primeira vez que aparece.
+- **Logs**: o `logs/play.log` tem uma linha `graphics API: DirectX 12 (Dozen, ...)` quando ele está ligado.
+
 ## Solução de problemas
 
 - **Logs**: cada sessão grava `logs/play.log` ao lado do exe (o anterior fica como `logs/play-anterior.log`). Anexe esse
@@ -231,6 +249,8 @@ Mods que mudam o código do jogo (`exefs`, patches IPS, plugins de cheats) não 
 - **Erros do driver de vídeo** ("Your graphics driver crashed", falha de página da GPU): abra
   **Configurações > Vídeo > Compatibilidade** e desligue as opções uma de cada vez. Elas valem a partir do próximo
   início.
+- **O jogo trava no Vulkan** (comum em placas AMD): experimente **F1 > Tela > API gráfica: DirectX 12**
+  ([DirectX 12](#directx-12)).
 - **Fps baixo**: diminua a resolução interna ou ligue a resolução Dinâmica, e desligue os recursos gráficos opcionais.
 - **Relatar um bug**: [abra uma issue](https://github.com/Hexveil404/PokeZ-ARecomp/issues) com a sua GPU, a versão do
   driver, a versão do jogo e o `logs/play.log`.
@@ -240,7 +260,8 @@ Mods que mudam o código do jogo (`exefs`, patches IPS, plugins de cheats) não 
 O ZA Recomp compila no Windows com o MSYS2 (UCRT64: clang, SDL3, FFmpeg, shaderc, headers do Vulkan) e Python 3. Veja
 [docs/BUILD-windows.md](docs/BUILD-windows.md) para a configuração. `bash tools/za/dist.sh` monta a pasta da release
 (`build/dist-za/ZA Recomp/`; `ZIP=1` para o zip), que vai sem nenhum código do jogo: a tela inicial compila no PC do
-jogador.
+jogador. Ele também monta os arquivos do DirectX 12 uma vez (`tools/dx12/build_dozen.sh`: Mesa 26.2.5 com
+`tools/dx12/dozen-za.patch`; precisa de meson, ninja, python-mako, python-yaml, bison, flex, git e 7-Zip).
 
 Onde ficam as coisas: o recompilador em `tools/`, o runtime em `runtime/` (serviços HLE, a implementação do NVN em
 `runtime/nvn/`, o backend Vulkan em `runtime/nvn/vulkan/` e o tradutor de shaders Maxwell em `runtime/nvn/maxwell/`), e
@@ -289,4 +310,8 @@ arquivo, código, asset ou fonte do jogo está incluído; você precisa fornecer
 legalmente.
 
 O código é distribuído sob a [Licença MIT](LICENSE) (LAS Recomp © Peiikai). Componentes de terceiros mantêm as suas
-próprias licenças; veja [docs/LASRecomp-README.md](docs/LASRecomp-README.md#license).
+próprias licenças; veja [docs/LASRecomp-README.md](docs/LASRecomp-README.md#license). O DirectX 12 (F1 > Tela > API
+gráfica) roda o mesmo renderizador pelo Dozen do [Mesa](https://mesa3d.org) (Vulkan sobre Direct3D 12, MIT), compilado
+por `tools/dx12/build_dozen.sh` com as correções de `tools/dx12/dozen-za.patch`, com o `dxil.dll` da Microsoft e o
+`D3D12Core.dll` do Agility SDK do Direct3D 12 (arquivos redistribuíveis da Microsoft, sob a licença deles, nas pastas
+`dx12/` e `D3D12/`).

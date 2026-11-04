@@ -63,6 +63,8 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 - Ambient occlusion (GTAO), indirect light (screen-space GI) and water reflections
 - Sharper shadows (higher shadow map resolution) and high-quality texture filtering
 - HD texture packs (`textures/hd/`)
+- Graphics API (Windows): Vulkan, or DirectX 12 for cards whose Vulkan driver crashes the game (see
+  [DirectX 12](#directx-12))
 
 **Controls**
 - Any SDL3 controller: Xbox, PlayStation (DualShock 4 / DualSense), Switch Pro, Steam Deck and more
@@ -82,7 +84,7 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 |---|---|
 | **OS** | Windows 10 (1903 or newer) or Windows 11, 64-bit. Linux x86-64: experimental, see [Linux](#linux-experimental) |
 | **CPU** | x86-64 with AVX2 (2013 or newer). Older CPUs with SSE4.2 also work, but compile and run slower |
-| **GPU** | Vulkan 1.2 or newer (1.3 recommended) with an up-to-date driver |
+| **GPU** | Vulkan 1.2 or newer (1.3 recommended) with an up-to-date driver. With the DirectX 12 option: a DirectX 12 card (feature level 11_0, shader model 6.0) |
 | **RAM** | 8 GB (16 GB recommended) |
 | **Disk** | About 12 GB free |
 | **Game** | Pokémon Legends: Z-A **1.0.0, 2.0.0 or 2.0.2**, optionally with the *Mega Dimension* DLC |
@@ -229,12 +231,28 @@ list wins.
 
 Mods that change the game's code (`exefs`, IPS patches, cheat plugins) do not work with a recompiled game.
 
+## DirectX 12
+
+ZA Recomp normally runs on your graphics card's **Vulkan** driver. On Windows it can also run the same renderer on the
+card's **DirectX 12** driver, which helps where the Vulkan driver crashes or misdraws the game (some AMD cards).
+
+- **Turn it on**: **F1 > Display > Graphics API: DirectX 12** in game. It applies from the next start. If DirectX 12 fails to start, the next start uses Vulkan again by itself.
+- **How it works**: it uses [Mesa](https://mesa3d.org)'s Dozen (a Vulkan implementation on top of Direct3D 12), built
+  with this game's fixes and shipped in the `dx12` folder, plus the Direct3D 12 Agility SDK in the `D3D12` folder. Keep
+  both folders next to `lasrecomp.exe`.
+- **Status**: new and experimental. On an RTX 4060 Ti it draws the same picture as Vulkan at the same speed; it has
+  not been tested on AMD or Intel cards yet - please report how it runs on yours.
+- **Differences**: *Prepare shaders at start* is off with DirectX 12, so an effect can hitch the first time it shows.
+- **Logs**: `logs/play.log` has a `graphics API: DirectX 12 (Dozen, ...)` line when it is on.
+
 ## Troubleshooting
 
 - **Logs**: each session writes `logs/play.log` next to the exe (the previous one is kept as `logs/play-anterior.log`).
   Please attach it to any bug report.
 - **Graphics driver errors** ("Your graphics driver crashed", a GPU page fault): open
   **Settings > Video > Compatibility** and turn the options off one at a time. They apply from the next start.
+- **The game crashes on Vulkan** (often on AMD cards): try **F1 > Display > Graphics API: DirectX 12**
+  ([DirectX 12](#directx-12)).
 - **Low frame rate**: lower the internal resolution or turn on Dynamic resolution, and turn off the optional graphics
   features.
 - **Report a bug**: [open an issue](https://github.com/Hexveil404/PokeZ-ARecomp/issues) with your GPU, driver version,
@@ -245,7 +263,8 @@ Mods that change the game's code (`exefs`, IPS patches, cheat plugins) do not wo
 ZA Recomp builds on Windows with MSYS2 (UCRT64: clang, SDL3, FFmpeg, shaderc, Vulkan headers) and Python 3. See
 [docs/BUILD-windows.md](docs/BUILD-windows.md) for the setup. `bash tools/za/dist.sh` builds the release folder
 (`build/dist-za/ZA Recomp/`; `ZIP=1` for the zip), which ships without any game code: the start screen compiles it on
-the player's PC.
+the player's PC. It also builds the DirectX 12 files once (`tools/dx12/build_dozen.sh`: Mesa 26.2.5 with
+`tools/dx12/dozen-za.patch`; needs meson, ninja, python-mako, python-yaml, bison, flex, git and 7-Zip).
 
 Where things are: the recompiler is in `tools/`, the runtime in `runtime/` (HLE services, the NVN implementation in
 `runtime/nvn/`, the Vulkan backend in `runtime/nvn/vulkan/` and the Maxwell shader translator in

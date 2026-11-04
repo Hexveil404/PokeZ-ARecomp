@@ -1907,6 +1907,16 @@ static int content_extent(int e, bool scalable, float sc, float al) {
     int c = (int)lroundf(e * sc / al);
     return c < 1 ? 1 : c > e ? e : c;
 }
+// FSR 2 upscaling draws the shown image whole (textures.c renderer_present_full): so is what a pass draws with it
+static void pass_whole(NvnTexture *t) {
+    bool renderer_present_full(void);
+    if (!renderer_present_full()) return;
+    TexBackend *b0 = st.rt.ncolor && st.rt.color[0] ? st.rt.color[0]->backend : NULL, *b = t->backend;
+    if (!b0 || !b0->shown || b == b0 || !b || !b->scalable) return;
+    b->sx = b->ax, b->sy = b->ay;
+    static bool logged;  // (a HUD depth-tested against the scene's depth would find it in the corner: not seen in Z-A)
+    if (!logged && renderer_format_is_depth(t->format)) logged = true, LOG("[fsr2] a depth target is drawn with the shown image\n");
+}
 
 static bool heap_whole_userptr(void);
 static void gtao_apply_pending(void);
@@ -1977,6 +1987,7 @@ static void begin_pass(void) {
         pass_color[i] = VK_FORMAT_UNDEFINED;
         if (!t) continue;
         renderer_mark_gpu_owned(t);
+        pass_whole(t);
         uint32_t nly;
         VkImageView v = vk_render_view(t, &st.rt.cview[i], st.rt.has_cview[i], &nly);
         TexBackend *b = t->backend;
@@ -2016,6 +2027,7 @@ static void begin_pass(void) {
     bool has_d = false, has_s = false;
     if (st.rt.depth) {
         renderer_mark_gpu_owned(st.rt.depth);
+        pass_whole(st.rt.depth);
         uint32_t nly;
         VkImageView v = vk_render_view(st.rt.depth, &st.rt.dview, st.rt.has_dview, &nly);
         TexBackend *b = st.rt.depth->backend;
@@ -3631,22 +3643,56 @@ static float mv_vp[2][16];
 // resolved the frame before (a frame it doesn't resolve is never shown jittered: at most the first one)
 static float fsr2_jx, fsr2_jy;
 static uint64_t fsr2_jit_frame = ~0ull, fsr2_ok_frame = ~0ull;
-static uint32_t fsr2_scene_w, fsr2_scene_h;  // (the scene depth's size: mv_note_draw)
-static bool fsr2_wanted(void) {  // (F1 > Video > Temporal anti-aliasing; LARECOMP_FSR2=0 / 1 overrides it)
+static uint32_t fsr2_scene_w, fsr2_scene_h;  // (this frame's render size: fsr2_frame_jitter)
+static bool fsr2_up_broken;  // (fsr2_copy: the picture and its depth weren't drawn at the same size while upscaling)
+// The temporal anti-aliasing that runs (TAA_*): F1 > Video > Temporal anti-aliasing (LARECOMP_FSR2=0 / 1 overrides it:
+// the game's / FSR 2). DLAA when it came up at the start - chosen but not up, a change waiting for the restart or no
+// RTX GPU: the game's; FSR 3.1 while its DLL loads and its context works, else FSR 2.
+static int taa_kind(void) {
     static int env = -2;
     if (env == -2) env = ENV("LARECOMP_FSR2") ? atoi(ENV("LARECOMP_FSR2")) != 0 : -1;
-    // (DLAA when it came up at the start; chosen but not up - a change waiting for the restart, no RTX GPU: the game's)
-    return env >= 0 ? env : g_settings.taa == TAA_FSR2 || (g_settings.taa == TAA_DLAA && vk_dlaa_available());
+    if (env >= 0) return env ? TAA_FSR2 : TAA_GAME;
+    switch (g_settings.taa) {
+    case TAA_FSR2: return TAA_FSR2;
+    case TAA_FSR3: return vk_fsr3_available() ? TAA_FSR3 : TAA_FSR2;
+    case TAA_DLAA: return vk_dlaa_available() ? TAA_DLAA : TAA_GAME;
+    default: return TAA_GAME;
+    }
+}
+// The scene's share of the resolution (device.c, each frame, for the next one's render scale): F1 > FSR 2 render
+// resolution (LARECOMP_TAA_RENDER=<percent> overrides it, 50-100). Below 1 the scene is drawn into the top-left part of
+// its images, as with Dynamic resolution, and FSR 2 upscales it to the whole of the shown image, the HUD drawn over it
+// at the full resolution (textures.c renderer_set_present_full). Only while FSR 2 resolves the frames (it did in the
+// last 30): a scene it can't resolve - its context failed, a frame without the game's copy - is shown through the
+// game's own copy (stretched) for those 30 frames, then drawn whole. Not with Dynamic resolution (its own share of the
+// images), and off for the session once its picture and depth came out at different sizes (fsr2_up_broken, logged):
+// that would only flip between the two every 30 frames.
+float vk_taa_render_share(void) {
+    static int env = -2;
+    if (env == -2) env = ENV("LARECOMP_TAA_RENDER") ? atoi(ENV("LARECOMP_TAA_RENDER")) : -1;
+    int pct = env > 0 ? env : g_settings.taa_render;
+    pct = pct < 50 ? 50 : pct > 100 ? 100 : pct;
+    int kind = taa_kind();
+    if (pct == 100 || kind == TAA_GAME || kind == TAA_DLAA || fsr2_up_broken ||  // (DLAA: anti-aliasing only)
+        g_settings.res_mode == RES_DYNAMIC || fsr2_ok_frame == ~0ull || fsr2_ok_frame + 30 < vk_frame_counter())
+        return 1;
+    return pct / 100.0f;
 }
 static void fsr2_frame_jitter(void) {
-    extern uint64_t vk_frame_counter(void);
     uint64_t f = vk_frame_counter();
     if (f == fsr2_jit_frame) return;
     fsr2_jit_frame = f;
     fsr2_jx = fsr2_jy = 0;
-    if (!fsr2_wanted() || !fsr2_scene_w || fsr2_ok_frame + 1 != f) return;
+    TexBackend *db = mv_depth ? mv_depth->backend : NULL;  // (the scene's depth: mv_note_draw, the frame before)
+    if (taa_kind() == TAA_GAME || !db || fsr2_ok_frame + 1 != f) return;
+    // this frame's render size: the scale device.c set for it (it can change between frames)
+    void renderer_get_scale(float *sx, float *sy);
+    float rx, ry;
+    renderer_get_scale(&rx, &ry);
+    fsr2_scene_w = (uint32_t)content_extent((int)db->width, db->scalable, rx, db->ax);
+    fsr2_scene_h = (uint32_t)content_extent((int)db->height, db->scalable, ry, db->ay);
     static uint32_t index;
-    vk_fsr2_jitter(index++, fsr2_scene_w, fsr2_scene_w, &fsr2_jx, &fsr2_jy);
+    vk_fsr2_jitter(index++, fsr2_scene_w, db->width, &fsr2_jx, &fsr2_jy);
     // The jitter in (0, 1) pixel, not (-0.5, 0.5): the same sample positions over the sequence, but never changing
     // sign. Z-A fades objects near the camera with a dither pattern that rounds the pixel position at its centre, so
     // a jitter changing sign moved the pattern of one layer against another's: through a fading umbrella, how much of
@@ -3706,7 +3752,6 @@ static void mv_note_draw(Prog *pr) {
     mv_frame[1] = mv_frame[0], memcpy(mv_vp[1], mv_vp[0], sizeof mv_vp[0]);
     mv_frame[0] = f, memcpy(mv_vp[0], m, sizeof mv_vp[0]);
     mv_depth = st.rt.depth;
-    if (mv_depth->backend) fsr2_scene_w = ((TexBackend *)mv_depth->backend)->width, fsr2_scene_h = ((TexBackend *)mv_depth->backend)->height;
 }
 
 // (renderer_stats, once per stats interval) copies made aliases / renamed / partly or fully copied later
@@ -7796,7 +7841,7 @@ static void draw_(CmdRec *r, bool indexed) {
         if (st.ubuf[0][5].addr) widescreen_scene_ubo((const float *)(uintptr_t)st.ubuf[0][5].addr, st.ubuf[0][5].size);
     }
     mv_note_draw(pr);
-    if (fsr2_wanted() && fsr2_copy(pr)) return;  // (FSR 2 resolved the frame in place of the game's copy)
+    if (taa_kind() != TAA_GAME && fsr2_copy(pr)) return;  // (FSR 2 resolved the frame in place of the game's copy)
     if (g_debug_frame) debug_draw(pr, r, indexed);
     if (ct_on()) ct_draw(pr, "draw");
     alias_draw_check();
@@ -9791,7 +9836,8 @@ static VkImageView post_view(TexBackend *d) {
 // shows; the HUD is drawn over it. With FSR 2 that copy is replaced: the scene was drawn jittered (fsr2_frame_jitter),
 // its camera motion vectors and reactive mask are made from the depth and stencil (fsr2_mv.frag, with the view-
 // projections of this frame and the last: mv_note_draw), FSR 2 resolves the picture with its history, and the result
-// is copied into the shown image. Only at the scene's own size for now (no upscaling), not with Dynamic resolution.
+// is copied into the shown image. The scene can be drawn smaller, in the top-left part of its images (F1 > FSR 2 render
+// resolution, vk_taa_render_share): FSR 2 then upscales it to the whole shown image. Not with Dynamic resolution.
 
 // Its images (kept until the size changes): 0 motion vectors (RG16F), 1 reactive mask (R8), 2 FSR 2's output (RGBA8)
 static TexBackend *fsr2_image(int i, VkFormat f, uint32_t w, uint32_t h, VkImageUsageFlags usage) {
@@ -9891,12 +9937,20 @@ static bool fsr2_copy(Prog *pr) {
     if (!sb || !sb->image || src == dst || sb->width != db->width || sb->height != db->height || sb->width != zb->width ||
         sb->height != zb->height || (sb->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT))
         return false;
-    if (sb->scalable && (sb->ax != sb->sx || sb->ay != sb->sy)) return false;  // (Dynamic: the picture in part of the image)
-    uint32_t w = sb->width, h = sb->height;
+    // (the shown image drawn in a part too - Dynamic resolution: the game's own copy. The picture and its depth drawn
+    // in a part - upscaling: their render size, FSR 2's output the whole shown image.)
+    if (db->scalable && (db->ax != db->sx || db->ay != db->sy)) return false;
+    uint32_t w = (uint32_t)content_extent((int)sb->width, sb->scalable, sb->sx, sb->ax), h = (uint32_t)content_extent((int)sb->height, sb->scalable, sb->sy, sb->ay);
+    if (w != (uint32_t)content_extent((int)zb->width, zb->scalable, zb->sx, zb->ax) || h != (uint32_t)content_extent((int)zb->height, zb->scalable, zb->sy, zb->ay)) {
+        if (!fsr2_up_broken && (w != sb->width || zb->sx != zb->ax))
+            fsr2_up_broken = true, LOG("[fsr2] picture %ux%u and depth drawn at different sizes: upscaling off\n", w, h);
+        return false;
+    }
+    uint32_t ow = db->width, oh = db->height;
     vk_end_pass();
     TexBackend *mvb = fsr2_image(0, VK_FORMAT_R16G16_SFLOAT, w, h, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
     TexBackend *rb = fsr2_image(1, VK_FORMAT_R8_UNORM, w, h, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
-    TexBackend *ob = fsr2_image(2, VK_FORMAT_R8G8B8A8_UNORM, w, h, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    TexBackend *ob = fsr2_image(2, VK_FORMAT_R8G8B8A8_UNORM, ow, oh, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     if (!mvb || !rb || !ob) return false;
     static const VkComponentMapping id = {0};
     VkImageView zv = vk_image_view(zb, VK_IMAGE_VIEW_TYPE_2D, zb->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -10005,11 +10059,15 @@ static bool fsr2_copy(Prog *pr) {
     VkFsr2Frame fr = {.color = sb->image, .depth = zb->image, .mv = mvb->image, .reactive = rb->image, .out = ob->image,
                       .color_view = cv, .depth_view = zv, .mv_view = post_view(mvb), .reactive_view = post_view(rb), .out_view = post_view(ob),
                       .color_format = sb->format, .depth_format = zb->format, .out_format = VK_FORMAT_R8G8B8A8_UNORM,
-                      .w = w, .h = h, .ow = w, .oh = h, .jx = fsr2_jx, .jy = fsr2_jy, .dt_ms = fminf(fmaxf(dt, 1), 100),
+                      .w = w, .h = h, .ow = ow, .oh = oh, .jx = fsr2_jx, .jy = fsr2_jy, .dt_ms = fminf(fmaxf(dt, 1), 100),
                       .near_z = m[14] > 0 ? m[14] : 0.1f, .fov_y = p11 > 0 ? 2 * atanf(1 / p11) : 1.0f, .sharpness = 0, .reset = reset};
+    // DLAA, FSR 3.1 when chosen and its DLL loads, else FSR 2; a switch between them starts the history again (each has its own)
+    int kind = taa_kind();
+    static int last_kind;
+    if (kind != last_kind) fr.reset = true, last_kind = kind;
     VkCommandBuffer sec = fsr2_cmd();
-    bool ok = g_settings.taa == TAA_DLAA && vk_dlaa_available() ? vk_dlaa_record(g_vk.dev, sec, &fr)
-                                                                : vk_fsr2_record(g_vk.phys, g_vk.dev, sec, &fr);
+    bool ok = kind == TAA_DLAA ? vk_dlaa_record(g_vk.dev, sec, &fr)
+              : kind == TAA_FSR3 ? vk_fsr3_record(g_vk.phys, g_vk.dev, sec, &fr) : vk_fsr2_record(g_vk.phys, g_vk.dev, sec, &fr);
     VK_CHECK(vkEndCommandBuffer(sec));
     if (!ok) return false;
     // (the shown image's first pass this frame is now the HUD's: a target's first pass in a frame clears it -
@@ -10018,7 +10076,7 @@ static bool fsr2_copy(Prog *pr) {
     rec_CmdExecuteCommands(cb, 1, &sec);
     vk_full_barrier(cb);
     VkImageCopy c = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                     .extent = {w, h, 1}};
+                     .extent = {ow, oh, 1}};
     rec_CmdCopyImage(cb, ob->image, VK_IMAGE_LAYOUT_GENERAL, db->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
     vk_full_barrier(cb);
     {   // (debug) LARECOMP_FSR2_DUMP=<frame>: its inputs and output that frame -> build/fsr2_*.png
@@ -10032,7 +10090,11 @@ static bool fsr2_copy(Prog *pr) {
         }
     }
     static int nlog;
-    if (nlog++ < 3) LOG("[fsr2] frame %llu: %ux%u, jitter %.3f %.3f%s\n", (unsigned long long)f, w, h, fsr2_jx, fsr2_jy, reset ? ", reset" : "");
+    static uint32_t last_w;  // (and each change of the render size)
+    if (nlog++ < 3 || w != last_w)
+        LOG("[%s] frame %llu: %ux%u -> %ux%u, jitter %.3f %.3f%s\n", kind == TAA_DLAA ? "dlaa" : kind == TAA_FSR3 ? "fsr3" : "fsr2",
+            (unsigned long long)f, w, h, ow, oh, fsr2_jx, fsr2_jy, fr.reset ? ", reset" : "");
+    last_w = w;
     fsr2_ok_frame = f;
     return true;
 }

@@ -194,6 +194,11 @@ static float g_al_x = 1, g_al_y = 1;   // the allocation scale: the size of scal
 void renderer_get_scale(float *sx, float *sy) { *sx = g_rs_x; *sy = g_rs_y; }
 void renderer_set_scale(float sx, float sy) { g_rs_x = sx; g_rs_y = sy; }
 void renderer_set_alloc_scale(float ax, float ay) { g_al_x = ax; g_al_y = ay; }
+// FSR 2 upscaling (exec.c vk_taa_render_share): the scene is drawn into a part of its images, as with Dynamic, but the
+// shown image whole - FSR 2's output and the HUD over it at the full resolution (and what a pass draws with it: exec.c)
+static bool g_present_full;
+void renderer_set_present_full(bool on) { g_present_full = on; }
+bool renderer_present_full(void) { return g_present_full; }
 // The part of a scalable texture its contents occupy (Dynamic: the render scale over the allocation scale; 1 otherwise).
 void renderer_texture_fraction(NvnTexture *t, float *fx, float *fy) {
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
@@ -1336,7 +1341,7 @@ void backend_prefetch_texture(NvnTexture *t) {
 void renderer_mark_gpu_owned(NvnTexture *t) {
     TexBackend *b = tex_backend(t);
     b->gpu_owned = true;
-    if (b->scalable) { b->sx = g_rs_x; b->sy = g_rs_y; }
+    if (b->scalable) { bool whole = g_present_full && b->shown; b->sx = whole ? b->ax : g_rs_x; b->sy = whole ? b->ay : g_rs_y; }
 }
 bool renderer_is_gpu_owned(NvnTexture *t) { return tex_backend(t)->gpu_owned; }
 void backend_pool_written(uint64_t addr, uint64_t size) { (void)addr; (void)size; }

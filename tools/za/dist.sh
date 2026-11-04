@@ -81,6 +81,20 @@ cp tools/za/za-default.ini "$D/za-default.ini"  # (not larecomp.ini: the first r
 PATH="$PWD/build/deps-win/bin:$PATH" ldd $B/lasrecomp.exe | awk 'tolower($3) !~ /^\/c\/windows\// && !/vulkan-1/ {print $3}' | sort -u |
     while read -r f; do cp "$f" "$D/"; done
 ! ls "$D" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
+# AMD FSR 3.1 (runtime/nvn/vulkan/fsr3.cpp, loaded at run time; third_party/ffx_api/README.ZARecomp.md): AMD's signed
+# DLLs from the SDK's v2.4.0 tag, downloaded once, hash checked, with the SDK's licence (it asks for its notice)
+FFX=build/ext/ffx-2.4.0
+for p in "amd_fidelityfx_loader_vk.dll 38a56a01fb3565c0757d9f5c1e4e69de4b65e5f2e5769b323b200dc1f142bab9" \
+         "amd_fidelityfx_upscaler_vk.dll 4a7e895af6e0b615d40a84d59eb8c2b1054ad91cdd0c739567940270d51bdab7"; do
+    set -- $p
+    mkdir -p $FFX
+    [ -f $FFX/$1 ] || { /c/Windows/System32/curl.exe -fsSL -o $FFX/$1.part \
+        "https://media.githubusercontent.com/media/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v2.4.0/Kits/FidelityFX/signedbin/$1" &&
+        mv $FFX/$1.part $FFX/$1; }  # (.part: a cut download isn't taken for the file)
+    echo "$2 *$FFX/$1" | sha256sum -c --quiet
+    cp $FFX/$1 "$D/"
+done
+cp third_party/ffx_api/LICENSE.md "$D/AMD-FSR-LICENSE.md"
 du -sh "$D"
 if [ "${ZIP:-0}" = 1 ]; then
     (cd build/dist-za && /c/Windows/System32/tar.exe -a -cf ZA-Recomp-windows.zip "ZA Recomp")

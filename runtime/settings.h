@@ -32,7 +32,7 @@ extern unsigned g_gpu_vendor;
 extern bool g_gpu_dozen;  // (vulkan/device.c) the device is Dozen: DirectX 12 underneath
 bool gpu_feature_on(int feature, const char *env);
 enum { GPU_AUTO = 0, GPU_ON = 1, GPU_OFF = 2 };
-enum { TAA_GAME = 0, TAA_FSR2 = 1, TAA_DLAA = 2 };  // (Settings.taa)
+enum { TAA_GAME = 0, TAA_FSR2 = 1, TAA_DLAA = 2, TAA_FSR3 = 3 };  // (Settings.taa)
 enum { TIMER_POS_LEFT = 0, TIMER_POS_RIGHT = 1 };  // the run timer's corner (bottom left / right)
 enum { CHAOS_LETTERS_OFF = 0, CHAOS_LETTERS_EXPLORED = 1, CHAOS_LETTERS_MAP = 2 /* explored, all with the Map */ };
 // System language served to the game (runtime/services/am.c GetDesiredLanguage, services/hid_set.c GetLanguageCode):
@@ -51,8 +51,9 @@ typedef struct {
     bool upscaler_auto;  // never chosen: the default for this GPU (settings_resolve_defaults); saved as "auto"
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     int sharpen;         // SHARPEN_*: sharpening of the image in the window (Vulkan)
-    int taa;             // Pokémon Z-A: TAA_*: AMD FSR 2's or NVIDIA DLAA's temporal anti-aliasing in place of the game's
-                         // own (vulkan/exec.c fsr2_copy, vulkan/dlaa.c)
+    int taa;             // Pokémon Z-A: TAA_*: AMD FSR 2's, FSR 3.1's or NVIDIA DLAA's temporal anti-aliasing in place of the game's
+                         // own (vulkan/exec.c fsr2_copy, vulkan/fsr3.cpp, vulkan/dlaa.c)
+    int taa_render;      // with it: the scene's share of the resolution in percent (67: FSR 2 upscales it; 100: anti-aliasing only)
     int gpu_compat[GPU_COMPAT_N];  // GPU_AUTO / GPU_ON / GPU_OFF per GPU_* feature (Compatibility)
     char gpu_name[256];  // Graphics card: the Vulkan device to run on, by name ("": Auto; vulkan/device.c pick_device)
     bool dx12;           // Graphics API (Windows): DirectX 12 through the shipped Dozen (Mesa's Vulkan on Direct3D 12,

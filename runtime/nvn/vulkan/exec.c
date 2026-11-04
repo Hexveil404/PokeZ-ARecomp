@@ -6301,7 +6301,7 @@ static bool guest_direct(int kind, uint64_t addr, uint64_t size, VkBuffer *buf, 
     return true;
 }
 
-static int g_cs_n;  // (compute program table below)
+static KvTab cs_kv, cs_content_kv;  // (compute programs by code address / by content: compute_program below)
 
 // In-place reboot (device.c backend_reset; GPU idle): drop what is keyed by guest addresses - programs by code
 // address (the old Prog / Pipe objects are leaked, so pipeline keys holding their pointers can't collide), compute
@@ -6311,7 +6311,8 @@ void vk_exec_reset(void) {
     kv_clear(&pipe_kv);
     key_gen++;  // (the key memo: the tables' answers are gone)
     ds_gen++;   // (set reuse: the heap import below is destroyed at once)
-    g_cs_n = 0;
+    kv_clear(&cs_kv);
+    kv_clear(&cs_content_kv);  // (their translations hold the old guest window)
     gcopy_gen++;
     if (gmem_buf) {
 #ifdef __linux__
@@ -6700,7 +6701,6 @@ static void build_compute(void *arg) {
     slow_build(t0, "pipeline cs", cp->code, 0);
 }
 
-static struct CsEnt { uint64_t addr, fp; CsProg *cp; } g_cs_tab[256];  // compute programs by code address (code_fp)
 
 static uint64_t cs_content_key(uint64_t code_hash, const uint32_t local[3]) {
     uint64_t h = code_hash;
@@ -6734,17 +6734,16 @@ static bool translate_compute(CsProg *cp, const uint8_t *code, size_t max, uint6
     return true;
 }
 
-// The table's entry for this code address: the one it had (other code there now: it gets the new program) or a new one
-static void cs_tab_put(int at, uint64_t addr, uint64_t fp, CsProg *cp) {
-    if (at < 0 && g_cs_n < 256) at = g_cs_n++;
-    if (at >= 0) g_cs_tab[at] = (struct CsEnt){addr, fp, cp};
-}
-
+// Compute programs by code address and fingerprint (cs_kv), and by content - code hash and workgroup size
+// (cs_content_kv). The address table was 256 fixed entries, and Z-A loads the same few compute shaders at new
+// addresses as areas stream in (12 programs, over 256 addresses in a 24-minute session): once full, a new address
+// was never kept, so each of its dispatches made a new program, translated it and built another pipeline (skipped
+// while building, never freed) - "compile 228, 228 skipped" a second, ~1 GB more process memory a minute, the game
+// hitching then slowing down after an hour or so (#70: 7.5 -> 26 GB). Now the tables grow, and a known shader at a
+// new address takes the program it already has (a failed one too: not translated again). (Render thread only.)
 static CsProg *compute_program(NvnProgram *np) {
     NvnShaderStage *ss = &np->stages[5];
     if (!ss->code_addr) return NULL;
-    struct CsEnt *tab = g_cs_tab;
-    int n = g_cs_n, at = -1;
     // The workgroup size is a specialization constant of the pipeline, read from the control section, not the code:
     // it is part of the address cache's fingerprint (the same code with another local size got the first one's
     // pipeline - a dispatch of the wrong number of invocations)
@@ -6755,29 +6754,38 @@ static CsProg *compute_program(NvnProgram *np) {
     }
     uint64_t fp = code_fp(ss);
     fp ^= ((uint64_t)local[0] | (uint64_t)local[1] << 21 | (uint64_t)local[2] << 42) * 0x9E3779B97F4A7C15ull;
-    for (int i = 0; i < n && at < 0; i++)
-        if (tab[i].addr == ss->code_addr) {
-            if (tab[i].fp == fp) return tab[i].cp;
-            at = i;  // (other code there now: this entry gets the new program)
-        }
+    uint64_t ak = (ss->code_addr * 0xff51afd7ed558ccdull) ^ fp;
+    if (!ak) ak = 1;
+    KvEnt *ae = kv_find(&cs_kv, ak);
+    if (ae->key) return ae->val;
+    static bool logged;  // (what the old 256-entry table could not hold)
+    if (cs_kv.n >= 256 && !logged) {
+        logged = true;
+        LOG("[compute] 256 code addresses for %u compute programs (the same shaders loaded again elsewhere)\n", cs_content_kv.n);
+    }
     if (shader_rec_recording()) {
         ShaderRec rec = {.kind = 'C', .vs = shader_stage_hash(ss), .local = {local[0], local[1], local[2]}};
         shader_rec_note(&rec);
         shader_seen_code(rec.vs, ss);  // (its code for the next start's preparation: shader_prep.h)
     }
     uint64_t ch = shader_stage_hash(ss);
-    CsProg *cp = ch && prep_cs_n ? PREP_GET(prep_cs, cs_content_key(ch, local)) : NULL;  // prepared before the game
+    uint64_t ck = ch ? cs_content_key(ch, local) : 0;
+    KvEnt *ce = ck ? kv_find(&cs_content_kv, ck) : NULL;
+    CsProg *cp = ce && ce->key ? ce->val : NULL;  // (this shader, already met at another address)
+    if (!cp && ch && prep_cs_n) cp = PREP_GET(prep_cs, ck);  // prepared before the game
     if (cp) {
-        cs_tab_put(at, ss->code_addr, fp, cp);
+        if (ce && !ce->key) kv_set(&cs_content_kv, ce, ck, cp);
+        kv_set(&cs_kv, kv_find(&cs_kv, ak), ak, cp);  // (found again: the set above may have moved the table)
         shader_fp_check(&cp->p.fp[0], ss, "cs");
         return cp;
     }
-    shader_first_visit("compute", ch, 0, cs_content_key(ch, local));
+    shader_first_visit("compute", ch, 0, ck);
     cp = calloc(1, sizeof *cp);
     shader_fp_check(&cp->p.fp[0], ss, "cs");  // (takes the fingerprint)
     cp->code = ss->code_addr;  // (for the build logs)
     note_code(ss, fp, "cs");
-    cs_tab_put(at, ss->code_addr, fp, cp);
+    kv_set(&cs_kv, ae, ak, cp);
+    if (ck) kv_set(&cs_content_kv, kv_find(&cs_content_kv, ck), ck, cp);
     memcpy(cp->local, local, sizeof local);
     if (!translate_compute(cp, (const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, ss->code_addr))
         return cp;
@@ -11766,7 +11774,7 @@ const char *vk_exec_buffer_kind(uint64_t handle) {
 }
 
 // The [mem] line's counts (device.c): what grows over a long session shows next to the process size (#70).
-void vk_exec_counts(uint32_t *progs, uint32_t *pipes) { *progs = prog_kv.n; *pipes = pipe_kv.n; }
+void vk_exec_counts(uint32_t *progs, uint32_t *pipes, uint32_t *cs) { *progs = prog_kv.n; *pipes = pipe_kv.n; *cs = cs_content_kv.n; }
 
 // nvnTextureReadTexels[Strided] (objects.c, on the translating thread): copy_texture_to_buffer with the call's strides
 // in place of the command buffer's (nvnCommandBufferSetCopyStrides) - the GPU's copy, waited for, into data.

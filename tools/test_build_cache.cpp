@@ -5,6 +5,9 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 namespace fs = std::filesystem;
 static void write(const fs::path &p, const std::string &s) {
     fs::create_directories(p.parent_path());
@@ -137,6 +140,14 @@ int main(int argc, char **argv) {
     write(fs::u8path(fresh) / ".zigcache" / "temporary", "legacy compiler cache");
     assert(build_cache_present(fresh.c_str()) && build_cache_clear(fresh.c_str(), why, sizeof why));
     assert(!fs::exists(fs::u8path(fresh) / ".zigcache") && !fs::exists(fs::u8path(fresh) / ".gamebuild"));
+#ifdef _WIN32
+    // #141: read-only entries (OneDrive / copied folders) made every rebuild fail with "cannot remove: access denied".
+    write(work / "sdk" / "sdk_000.c", "generated");
+    SetFileAttributesW((work / "sdk" / "sdk_000.c").c_str(), FILE_ATTRIBUTE_READONLY);
+    SetFileAttributesW((work / "sdk").c_str(), FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY);
+    assert(build_cache_clear(game.c_str(), why, sizeof why));
+    assert(!fs::exists(work / "sdk"));
+#endif
     std::error_code ec;
     fs::create_directory_symlink(root / "extracted", root / "linked", ec);
     if (!ec) {

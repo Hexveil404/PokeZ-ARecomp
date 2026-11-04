@@ -181,9 +181,63 @@ void recover(BuildCache *c) {
     }
     fs::remove(journal);
 }
+// fs::remove_all, but one a Windows player's folder can't stop (#141: every retry "cannot remove: Acesso negado
+// [...\.gamebuild\sdk]", the game code never rebuilt after an update, also after moving the folder out of OneDrive).
+// Windows refuses to delete read-only entries (OneDrive / copied folders keep the attribute) and anything an
+// antivirus or the search indexer holds open for a moment: drop the attributes, retry for ~4 s, and as a last resort
+// move the entry aside under .gamebuild (a "discard-*" name: the next cleanup tries it again, and failing on one of
+// those is never an error). Only a path that can be neither removed nor moved fails, naming the Windows error.
+void remove_tree(const fs::path &p) {
+    std::error_code ec;
+    if (!fs::exists(fs::symlink_status(p, ec))) return;
+#ifdef _WIN32
+    auto writable = [](const fs::path &q) {
+        DWORD a = GetFileAttributesW(q.c_str());
+        if (a != INVALID_FILE_ATTRIBUTES && (a & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)))
+            SetFileAttributesW(q.c_str(), a & ~(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM));
+    };
+    DWORD last = 0;
+    std::string what;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        writable(p);
+        if (fs::is_directory(fs::symlink_status(p, ec)) && !is_link(p))
+            for (auto it = fs::recursive_directory_iterator(p, ec); !ec && it != fs::recursive_directory_iterator();
+                 it.increment(ec))
+                writable(it->path());
+        ec.clear();
+        fs::remove_all(p, ec);
+        if (!ec) return;
+        last = GetLastError();
+        what = ec.message();
+        Sleep(50u << (attempt < 4 ? attempt : 4)); // (50 ms, doubling up to 800: ~4 s in all)
+    }
+    auto name = p.filename().u8string();
+    if (name.rfind("discard-", 0) == 0) return; // (an earlier leftover: tried again next time)
+    for (auto dir = p.parent_path(); !dir.empty(); dir = dir.parent_path())
+        if (dir.filename() == ".gamebuild") {
+            auto aside = dir / ("discard-" + std::to_string(GetTickCount64()) + "-" + name);
+            if (MoveFileExW(p.c_str(), aside.c_str(), 0)) {
+                fprintf(stderr, "[gamebuild] %s could not be deleted (%s, error %lu); moved aside as %s\n",
+                        p.u8string().c_str(), what.c_str(), (unsigned long)last,
+                        aside.filename().u8string().c_str());
+                return;
+            }
+            break;
+        }
+    char why[1024];
+    snprintf(why, sizeof why,
+             "Windows does not let the game delete %s (%s, error %lu). Close other programs using this folder "
+             "(an antivirus scan, OneDrive or another ZA Recomp window) or move the ZA Recomp folder somewhere "
+             "outside OneDrive, then try again.",
+             p.u8string().c_str(), what.c_str(), (unsigned long)last);
+    throw std::runtime_error(why);
+#else
+    fs::remove_all(p);
+#endif
+}
 void clear_old_zig_cache(BuildCache *c) {
     auto old = c->root.parent_path() / ".zigcache";
-    if (fs::exists(old)) { plain_tree(old); fs::remove_all(old); }
+    if (fs::exists(old)) { plain_tree(old); remove_tree(old); }
 }
 void finish(BuildCache *c) {
     // Only objects and their input identities are useful to the next update. Regeneration is cheap compared
@@ -195,7 +249,7 @@ void finish(BuildCache *c) {
         if (name == ".lock" || name == "owner" || name == "identity" || name == "generation-identity") continue;
         auto ext = e.path().extension();
         if ((ext == ".o" || ext == ".receipt") && valid_stem(e.path().stem().u8string())) continue;
-        fs::remove_all(e.path());
+        remove_tree(e.path());
     }
     clear_old_zig_cache(c);
 }
@@ -211,7 +265,7 @@ extern "C" BuildCache *build_cache_open(const char *game_dir, const char *spec, 
             // Pre-receipt beta_5 caches are ours too; upgrade them without asking every existing player to clear.
             recover(c.get());
             for (auto &e : fs::directory_iterator(c->root))
-                if (e.path().filename() != ".lock") fs::remove_all(e.path());
+                if (e.path().filename() != ".lock") remove_tree(e.path());
             write(owner, "LASBUILD3\n");
         }
         recover(c.get());
@@ -226,7 +280,7 @@ extern "C" BuildCache *build_cache_open(const char *game_dir, const char *spec, 
         if (!fs::exists(record) || read(record, 128) != identity) {
             for (auto &e : fs::directory_iterator(c->root))
                 if (e.path().filename() != ".lock" && e.path().filename() != "owner")
-                    fs::remove_all(e.path());
+                    remove_tree(e.path());
             write(record, identity);
         }
         write(c->root / "in-progress", "LASBUILD3\n");
@@ -250,7 +304,7 @@ extern "C" bool build_cache_prepare_generation(BuildCache *c, const char *spec, 
         auto record = c->root / "generation-identity";
         if (!fs::exists(record) || read(record, 128) != identity) {
             for (const char *name : {"main.generation", "sdk.generation", "main", "sdk"})
-                fs::remove_all(c->root / name);
+                remove_tree(c->root / name);
             write(record, identity);
         }
         return true;
@@ -390,7 +444,7 @@ extern "C" bool build_cache_clear(const char *game_dir, char *why, size_t cap) {
         auto game = fs::weakly_canonical(fs::absolute(fs::u8path(game_dir)));
         if (!fs::exists(game / ".gamebuild")) {  // (nothing to lock: don't create the cache just to clear it)
             auto old = game / ".zigcache";
-            if (fs::exists(old)) { plain_tree(old); fs::remove_all(old); }
+            if (fs::exists(old)) { plain_tree(old); remove_tree(old); }
             return true;
         }
         auto c = acquire(game_dir);
@@ -399,7 +453,7 @@ extern "C" bool build_cache_clear(const char *game_dir, char *why, size_t cap) {
         clear_old_zig_cache(c.get());
         for (auto &e : fs::directory_iterator(c->root))
             if (e.path().filename() != ".lock")
-                fs::remove_all(e.path());
+                remove_tree(e.path());
         write(c->root / "owner", "LASBUILD3\n");
         return true;
     } catch (const std::exception &e) {

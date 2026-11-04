@@ -932,7 +932,8 @@ static void emit_atom(Ctx *c, uint64_t w, bool red) {
                                          "atomicXor", "atomicExchange"};
     bool sgn = size == 1;
     static const char *const gma[] = {"GMA_ADD", "GMA_MIN", "GMA_MAX", NULL, NULL, "GMA_AND", "GMA_OR", "GMA_XOR", "GMA_XCH"};
-    const bool lazy = maxwell_gmem_chunk_shift && maxwell_gmem_lazy;  // (chunks imported lazily: no gmem_ buffer, the GMA_ functions)
+    // (chunks imported lazily, or windows of one import: no gmem_ buffer, the GMA_ functions)
+    const bool lazy = maxwell_gmem_chunk_shift != 0;
     for (int k = 0; k < (fast ? 2 : 1); k++) {
         const char *m = fast && k == 0 ? "gfast_.w[fw]" : "gmem_.w[uint(ga >> 2)]";
         const char *guard = fast && k == 0 ? "if (fw != 0xFFFFFFFFu)" : fast ? "else if (ok)" : "if (ok)";
@@ -2240,7 +2241,7 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
             snprintf(mem, sizeof mem, "%.*s", (int)(me - m), m);
             if (!strcmp(mem, "pos")) sp(o, c->stage == STAGE_FRAGMENT ? "gl_FragCoord" : "gl_Position");
             else if (!strcmp(mem, "psize")) sp(o, "gl_PointSize");
-            else if (!strcmp(mem, "layer")) sp(o, maxwell_output_layer || c->stage != STAGE_VERTEX ? "gl_Layer" : "layer_dropped_");
+            else if (!strcmp(mem, "layer")) sp(o, maxwell_output_layer || c->stage != STAGE_VERTEX ? "gl_Layer" : "vlayer_");
             else sp(o, "%s", mem);  // a<i> (vertex input), v<i> (varying)
             p = me;
             continue;
@@ -2662,6 +2663,18 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                 sp(&s, "}\n");
             }
             sp(&s, "#define GMW(i, v) GMW_(i, v)\n#define GMAND(i, m) GMAND_(i, m)\n#define GMOR(i, m) GMOR_(i, m)\n");
+            // the atomics (emit ATOM: GMA_<op>, GMCAS), each on its word's window - as the lazy chunks' functions do
+            static const char *const am[][2] = {{"GMA_ADD", "atomicAdd"}, {"GMA_MIN", "atomicMin"}, {"GMA_MAX", "atomicMax"},
+                                                {"GMA_AND", "atomicAnd"}, {"GMA_OR", "atomicOr"}, {"GMA_XOR", "atomicXor"},
+                                                {"GMA_XCH", "atomicExchange"}};
+            for (size_t op = 0; op < sizeof am / sizeof am[0]; op++) {
+                sp(&s, "uint %s(uint i, uint v) { uint c = i >> %du, o = i & 0x%xu;\n", am[op][0], ws, (1u << ws) - 1);
+                for (int k = 0; k < n; k++) sp(&s, "  if (c == %du) return %s(gmem%d_.w[o], v);\n", k, am[op][1], k);
+                sp(&s, "  return 0u; }\n");
+            }
+            sp(&s, "uint GMCAS(uint i, uint cmp, uint v) { uint c = i >> %du, o = i & 0x%xu;\n", ws, (1u << ws) - 1);
+            for (int k = 0; k < n; k++) sp(&s, "  if (c == %du) return atomicCompSwap(gmem%d_.w[o], cmp, v);\n", k, k);
+            sp(&s, "  return 0u; }\n");
         }
     } else if (info->uses_gmem) {  // chunks imported lazily: a table of device addresses, buffer references (shader.h)
         int ws = (int)maxwell_gmem_chunk_shift - 2, cs = GMEM_CHUNK_SET(stage);
@@ -2777,6 +2790,12 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "invariant gl_Position;\nprecise gl_Position;\n");
         for (int i = 0; i < 32; i++)
             if (c->out_attr_mask & (1u << i)) sp(&s, "layout(location = %d) out vec4 v%d;\n", i, i);
+        if (info->writes_layer && !maxwell_output_layer) {  // (the layer for exec.c's geometry shader: a free location)
+            int l = 31;
+            while (l >= 0 && (c->out_attr_mask >> l & 1)) l--;
+            if (l >= 0) { sp(&s, "layout(location = %d) flat out int vlayer_;\n", l); info->layer_loc = (uint8_t)(l + 1); }
+            else sp(&s, "int vlayer_;\n");  // (no location left: dropped, layer 0)
+        }
     } else if (stage == STAGE_FRAGMENT) {
         for (int i = 0; i < 32; i++) {
             if (!(c->in_attr_mask & (1u << i))) continue;
@@ -2799,7 +2818,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         for (int i = 0; i < 32; i++)
             if (c->out_attr_mask & (1u << i)) sp(&s, "  v%d = vec4(0, 0, 0, 1);\n", i);
         if (info->writes_point_size) sp(&s, "  gl_PointSize = 0.0f;\n");
-        if (info->writes_layer) sp(&s, maxwell_output_layer ? "  gl_Layer = 0;\n" : "  int layer_dropped_ = 0;\n");
+        if (info->writes_layer) sp(&s, maxwell_output_layer ? "  gl_Layer = 0;\n" : "  vlayer_ = 0;\n");
     }
     for (int i = 0; i < 256; i++)
         if (c->reg_used[i]) sp(&s, "  uint r%d = 0u;\n", i);

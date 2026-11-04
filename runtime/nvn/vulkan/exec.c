@@ -2084,7 +2084,7 @@ static void begin_pass(void) {
     // (Dozen: a pass over several layers is one layer. Its shaders can't pick the layer (no shaderOutputLayer:
     // translate.c drops the write), and Dozen's barriers for a 3D target's slices - Z-A draws a 64x64x6 one - name
     // subresources Direct3D 12 doesn't have (a 3D texture's are its levels only): the command list was refused)
-    if (g_vk.dozen && !maxwell_output_layer) pass_layers = 1;
+    if (g_vk.dozen && !maxwell_output_layer && getenv("LARECOMP_VK_DOZEN_ONE_LAYER")) pass_layers = 1;  // (test: the old cut)
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = pass_layers,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = pass_ncolor ? ca : NULL,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
@@ -3153,7 +3153,8 @@ static void pipe_key_fill(PipeKey *k, Prog *pr, const PipeIn *in, const VkFormat
 
 // A pipeline's create info from its key (the structures point into each other and into the key: filled in place)
 typedef struct {
-    VkPipelineShaderStageCreateInfo stages[2];
+    VkPipelineShaderStageCreateInfo stages[3];
+    uint32_t nstages;
     VkVertexInputAttributeDescription va[32];
     VkVertexInputBindingDescription vb[17];
     VkVertexInputBindingDivisorDescriptionEXT vd[17];
@@ -3172,12 +3173,48 @@ typedef struct {
     VkGraphicsPipelineCreateInfo pi;
 } PipeCI;
 
+// Without shaderOutputLayer (Dozen, Direct3D 12 underneath) a vertex shader can't pick its render target layer: it
+// sends the layer out as `flat int vlayer_` (translate.c, ShaderInfo.layer_loc) and this geometry shader passes the
+// triangle on with gl_Layer set from it - Z-A draws its colour grading LUT (a 3D target) and other layered targets
+// in one draw; without it they had their first layer only and the world came out black. One module per output set.
+static VkShaderModule layer_gs(const ShaderInfo *vi) {
+    static struct { uint32_t mask; uint8_t loc; VkShaderModule m; } tab[32];
+    static int n;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < n; i++)
+        if (tab[i].mask == vi->out_mask && tab[i].loc == vi->layer_loc) { VkShaderModule m = tab[i].m; pthread_mutex_unlock(&lock); return m; }
+    static char src[16384];
+    int o = snprintf(src, sizeof src, "#version 450\nlayout(triangles) in;\nlayout(triangle_strip, max_vertices = 3) out;\n");
+    for (int i = 0; i < 32; i++)
+        if (vi->out_mask >> i & 1)
+            o += snprintf(src + o, sizeof src - o, "layout(location = %d) in vec4 i%d[];\nlayout(location = %d) out vec4 o%d;\n", i, i, i, i);
+    o += snprintf(src + o, sizeof src - o, "layout(location = %d) flat in int ilayer[];\nvoid main() {\n  for (int k = 0; k < 3; k++) {\n"
+                  "    gl_Position = gl_in[k].gl_Position;\n", vi->layer_loc - 1);
+    for (int i = 0; i < 32; i++)
+        if (vi->out_mask >> i & 1) o += snprintf(src + o, sizeof src - o, "    o%d = i%d[k];\n", i, i);
+    snprintf(src + o, sizeof src - o, "    gl_Layer = ilayer[0];\n    EmitVertex();\n  }\n  EndPrimitive();\n}\n");
+    VkShaderModule m = vk_compile_glsl(src, STAGE_GEOMETRY, "layer_gs");
+    if (n < 32) tab[n].mask = vi->out_mask, tab[n].loc = vi->layer_loc, tab[n].m = m, n++;
+    static int nlog;
+    if (nlog++ < 4) LOG("[vk] layered draws: a geometry shader sets the layer (no shaderOutputLayer; outputs %08x)%s\n", vi->out_mask,
+                        m ? "" : " - failed to compile");
+    pthread_mutex_unlock(&lock);
+    return m;
+}
+
 static void pipe_ci_fill(PipeCI *c, const PipeKey *k) {
     memset(c, 0, sizeof *c);
     c->stages[0] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = k->prog->vs, .pName = "main"};
     c->stages[1] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = k->a2c && k->prog->fs_late ? k->prog->fs_late : k->prog->fs, .pName = "main"};
+    c->nstages = 2;
+    if (k->prog->vi && k->prog->vi->layer_loc && k->topo_class == 2) {  // (layer_gs: triangles; points / lines stay in layer 0)
+        VkShaderModule gs = layer_gs(k->prog->vi);
+        if (gs) c->stages[c->nstages++] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                                         .stage = VK_SHADER_STAGE_GEOMETRY_BIT, .module = gs, .pName = "main"};
+    }
     uint32_t na = 0, nb = 0, nd = 0;
     for (int i = 0; i < 32; i++)
         if (k->attr_mask & (1u << i)) c->va[na++] = (VkVertexInputAttributeDescription){(uint32_t)i, k->attr_bind[i], k->attr_fmt[i], k->attr_off[i]};
@@ -3241,7 +3278,7 @@ static void pipe_ci_fill(PipeCI *c, const PipeKey *k) {
     c->ri = (VkPipelineRenderingCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = k->ncolor,
                                             .pColorAttachmentFormats = k->color, .depthAttachmentFormat = k->depth,
                                             .stencilAttachmentFormat = k->stencil};
-    c->pi = (VkGraphicsPipelineCreateInfo){.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &c->ri, .stageCount = 2,
+    c->pi = (VkGraphicsPipelineCreateInfo){.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &c->ri, .stageCount = c->nstages,
                                            .pStages = c->stages, .pVertexInputState = g_vk.vids ? NULL : &c->vi,
                                            .pInputAssemblyState = &c->ia, .pViewportState = &c->vs, .pRasterizationState = &c->rs,
                                            .pMultisampleState = &c->ms, .pDepthStencilState = &c->ds, .pColorBlendState = &c->cb,
@@ -4627,7 +4664,7 @@ static bool whole_import_probe_oom(void) {
 // - GPU writes: the ranges marked GPU-written while recording (vc_mark_gpu: storage slots, transform feedback) are
 //   copied back into the import at the end of the submission. (Stores to addresses no slot names stay in the copy:
 //   GPU-only state, as the crowds' - the game's CPU doesn't read those.)
-// On by default with Dozen; LARECOMP_VK_GMEM_MIRROR=1 / 0 forces it on / off (=1 also tests it on any GPU). Needs the
+// Off by default (see gmir_mode); LARECOMP_VK_GMEM_MIRROR=1 turns it on, on any GPU. Needs the
 // OS write tracking (Windows: the guest window's MEM_WRITE_WATCH); without it, off.
 static uint32_t *vc_page_gen;  // (below, with the vertex cache)
 static uint32_t vc_gen;
@@ -4635,7 +4672,10 @@ static bool pt_init(void);
 #define GMIR_PAGE 4096ull  // (= VC_PAGE)
 static int gmir_mode(void) {
     static int m = -1;
-    if (m < 0) { const char *e = getenv("LARECOMP_VK_GMEM_MIRROR"); m = e ? atoi(e) != 0 : g_vk.dozen; }
+    // (off by default: with the window bound in storage windows the crowd shaders' "slowness" turned out to be a loop
+    // that never ended - the import in place runs at full speed - and the copy loses GPU stores to addresses no slot
+    // names, which the crowds' indirect parameters are: device lost within a minute)
+    if (m < 0) { const char *e = getenv("LARECOMP_VK_GMEM_MIRROR"); m = e ? atoi(e) != 0 : 0; }
     return m;
 }
 static bool gmir_on;

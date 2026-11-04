@@ -78,6 +78,8 @@ typedef struct {
     uint32_t out_mask;      // vertex: output varyings; fragment: render targets written
     bool writes_depth, uses_discard, writes_point_size;
     bool writes_layer;      // vertex: writes the render target layer (attribute 0x64)
+    uint8_t layer_loc;      // vertex, without shaderOutputLayer: the layer goes out as `flat int vlayer_` at location
+                            // layer_loc - 1 (0: not), for a geometry shader to write gl_Layer (vulkan exec.c layer_gs)
     bool uses_gmem;         // global memory access: bind the guest heap at GMEM_BUFFER_INDEX
     bool uses_gmem_map;     // (GLSL compute only) gmem loads look their address up in GMap (uniform, binding
                             // GMAP_BUFFER_INDEX) and read GFast (storage, GFAST_BUFFER_INDEX) - a device-local copy of the

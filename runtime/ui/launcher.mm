@@ -2360,7 +2360,9 @@ extern "C" void launcher_run(const char *root) {
 
     static int runs;  // (test: =once - only the first time, so a "Title screen" reboot lands on the start screen)
     const char *ap = getenv("LARECOMP_LAUNCHER_AUTOPLAY");
-    if (ap && status.empty() && !(runs && !strcmp(ap, "once"))) play = true;  // (test: PLAY at once)
+    // (=<n>: PLAY after n drawn frames instead - the start screen and its team icons drawn first, #142's test)
+    long ap_frames = ap && atol(ap) > 0 && status.empty() ? atol(ap) : 0;
+    if (ap && !ap_frames && status.empty() && !(runs && !strcmp(ap, "once"))) play = true;  // (test: PLAY at once)
     runs++;
     if (const char *t = getenv("LARECOMP_LAUNCHER_EXTRACT")) {  // (test) <folder>: set the game files up, log, exit
         g_src = t;
@@ -3182,6 +3184,7 @@ extern "C" void launcher_run(const char *root) {
             typed_before = ui_text_busy();
 
             ImGui::Render();
+            if (ap_frames && --ap_frames == 0) play = true;  // (test: LARECOMP_LAUNCHER_AUTOPLAY=<n>)
 #ifdef __APPLE__
             ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cb, enc);
             [enc endEncoding];
@@ -3227,6 +3230,10 @@ extern "C" void launcher_run(const char *root) {
 #ifdef __APPLE__
     ImGui_ImplMetal_Shutdown();
 #else
+    // (the team icons' ImTextureIDs are descriptor sets from the backend's pool, gone with it: after "return to the
+    // start screen" the next start screen drew them through freed sets and NVIDIA's driver crashed at 0x104, #142.
+    // Made again from the PNGs next time; their few small images stay allocated - a handful per return)
+    g_party_icons.clear();
     vk_imgui_backend_shutdown();
 #endif
     ImGui_ImplSDL3_Shutdown();

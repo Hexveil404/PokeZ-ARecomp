@@ -5285,6 +5285,10 @@ static void gmem_chunk_decide(void) {
         int sh = 0;
         if (e) { uint64_t b = strtoull(e, NULL, 10) << 20; if (b) sh = 63 - __builtin_clzll(b); }
         else if (g_vk.dozen) sh = 29;
+        // (also wherever one storage buffer can't reach the whole window: binding past maxStorageBufferRange is out of
+        // spec, and a driver may read 0 there as Dozen did - the crowd shaders' endless loop. Intel: 1 GB, #153)
+        uint64_t lim = g_vk.props.limits.maxStorageBufferRange;
+        if (!sh && !e && lim && gwin_max > lim) sh = lim >= (1ull << 29) ? 29 : 63 - __builtin_clzll(lim);
         if (sh > 30) sh = 30;
         uint64_t span = gwin_max;
         int n = sh ? (int)((span + (1ull << sh) - 1) >> sh) : 0;
@@ -5300,7 +5304,8 @@ static void gmem_chunk_decide(void) {
                 "%llu MB here)\n", n, (unsigned long long)(1ull << sh) >> 20, (unsigned long long)g_vk.props.limits.maxStorageBufferRange >> 20);
             return;
         }
-        LOG("[vk] guest memory: one import of the game's window (not Link's Awakening: no heap chunks)\n");
+        LOG("[vk] guest memory: one import of the game's window (%llu MB; one storage buffer reaches %llu MB here)\n",
+            (unsigned long long)(gwin_max >> 20), (unsigned long long)(lim >> 20));
         return;
     }
     const char *e = getenv("LARECOMP_VK_GMEM_CHUNK_MB");

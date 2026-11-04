@@ -2739,17 +2739,17 @@ extern "C" void launcher_run(const char *root) {
                     if (g_settings.video_rec == VREC_ASK && g_video_rec.known && settings_video_matches_recommended())
                         g_settings.video_rec = VREC_DONE, settings_save();
                     bool offer_video = g_settings.video_rec == VREC_ASK && g_video_rec.known;
-                    if (pressed) {  // first PLAY ever: this PC's video settings, the aspect ratio question, how to reach our menu
+                    // (no aspect ratio question: "Unlocked" widens Link's Awakening's view only - Pokémon Z-A always draws 16:9
+                    // and showed bars on an ultrawide screen either way, #160; LARECOMP_TIP_TEST=aspect still shows it)
+                    if (pressed) {  // first PLAY ever: this PC's video settings, how to reach our menu
                         if (offer_video) ImGui::OpenPopup("##videorec");
-                        else if (!g_settings.aspect_asked) ImGui::OpenPopup("##aspect");
                         else if (!g_settings.menu_tip_seen) ImGui::OpenPopup("##menutip");
                         else play = true;
                     }
                     if (g_tip_test) ImGui::OpenPopup(g_settings.aspect_asked ? "##menutip" : "##aspect"), g_tip_test = false;
                     if (g_video_test && g_video_rec.known) ImGui::OpenPopup("##videorec"), g_video_test = false;
                     if (video_prompt(s)) {
-                        if (!g_settings.aspect_asked) ImGui::OpenPopup("##aspect");
-                        else if (!g_settings.menu_tip_seen) ImGui::OpenPopup("##menutip");
+                        if (!g_settings.menu_tip_seen) ImGui::OpenPopup("##menutip");
                         else play = true;
                     }
                     if (aspect_prompt(s)) {

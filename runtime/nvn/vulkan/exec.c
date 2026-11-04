@@ -1910,8 +1910,9 @@ static int content_extent(int e, bool scalable, float sc, float al) {
 // FSR 2 upscaling draws the shown image whole (textures.c renderer_present_full): so is what a pass draws with it
 static void pass_whole(NvnTexture *t) {
     bool renderer_present_full(void);
+    if (!renderer_present_full()) return;
     TexBackend *b0 = st.rt.ncolor && st.rt.color[0] ? st.rt.color[0]->backend : NULL, *b = t->backend;
-    if (!b0 || !b0->shown || b == b0 || !b || !b->scalable || !renderer_present_full()) return;
+    if (!b0 || !b0->shown || b == b0 || !b || !b->scalable) return;
     b->sx = b->ax, b->sy = b->ay;
     static bool logged;  // (a HUD depth-tested against the scene's depth would find it in the corner: not seen in Z-A)
     if (!logged && renderer_format_is_depth(t->format)) logged = true, LOG("[fsr2] a depth target is drawn with the shown image\n");
@@ -3642,13 +3643,21 @@ static float mv_vp[2][16];
 // resolved the frame before (a frame it doesn't resolve is never shown jittered: at most the first one)
 static float fsr2_jx, fsr2_jy;
 static uint64_t fsr2_jit_frame = ~0ull, fsr2_ok_frame = ~0ull;
-static uint32_t fsr2_scene_w, fsr2_scene_h, fsr2_out_w;  // (the scene's render size and its depth image's width: mv_note_draw)
+static uint32_t fsr2_scene_w, fsr2_scene_h;  // (this frame's render size: fsr2_frame_jitter)
 static bool fsr2_up_broken;  // (fsr2_copy: the picture and its depth weren't drawn at the same size while upscaling)
-static bool fsr2_wanted(void) {  // (F1 > Video > Temporal anti-aliasing; LARECOMP_FSR2=0 / 1 overrides it)
+// The temporal anti-aliasing that runs (TAA_*): F1 > Video > Temporal anti-aliasing (LARECOMP_FSR2=0 / 1 overrides it:
+// the game's / FSR 2). DLAA when it came up at the start - chosen but not up, a change waiting for the restart or no
+// RTX GPU: the game's; FSR 3.1 while its DLL loads and its context works, else FSR 2.
+static int taa_kind(void) {
     static int env = -2;
     if (env == -2) env = ENV("LARECOMP_FSR2") ? atoi(ENV("LARECOMP_FSR2")) != 0 : -1;
-    // (DLAA when it came up at the start; chosen but not up - a change waiting for the restart, no RTX GPU: the game's)
-    return env >= 0 ? env : g_settings.taa == TAA_FSR2 || (g_settings.taa == TAA_DLAA && vk_dlaa_available());
+    if (env >= 0) return env ? TAA_FSR2 : TAA_GAME;
+    switch (g_settings.taa) {
+    case TAA_FSR2: return TAA_FSR2;
+    case TAA_FSR3: return vk_fsr3_available() ? TAA_FSR3 : TAA_FSR2;
+    case TAA_DLAA: return vk_dlaa_available() ? TAA_DLAA : TAA_GAME;
+    default: return TAA_GAME;
+    }
 }
 // The scene's share of the resolution (device.c, each frame, for the next one's render scale): F1 > FSR 2 render
 // resolution (LARECOMP_TAA_RENDER=<percent> overrides it, 50-100). Below 1 the scene is drawn into the top-left part of
@@ -3663,30 +3672,27 @@ float vk_taa_render_share(void) {
     if (env == -2) env = ENV("LARECOMP_TAA_RENDER") ? atoi(ENV("LARECOMP_TAA_RENDER")) : -1;
     int pct = env > 0 ? env : g_settings.taa_render;
     pct = pct < 50 ? 50 : pct > 100 ? 100 : pct;
-    extern uint64_t vk_frame_counter(void);
-    if (pct == 100 || !fsr2_wanted() || g_settings.taa == TAA_DLAA || fsr2_up_broken ||  // (DLAA: anti-aliasing only)
-        g_settings.res_mode == RES_DYNAMIC || fsr2_ok_frame == ~0ull ||
-        fsr2_ok_frame + 30 < vk_frame_counter())
+    int kind = taa_kind();
+    if (pct == 100 || kind == TAA_GAME || kind == TAA_DLAA || fsr2_up_broken ||  // (DLAA: anti-aliasing only)
+        g_settings.res_mode == RES_DYNAMIC || fsr2_ok_frame == ~0ull || fsr2_ok_frame + 30 < vk_frame_counter())
         return 1;
     return pct / 100.0f;
 }
 static void fsr2_frame_jitter(void) {
-    extern uint64_t vk_frame_counter(void);
     uint64_t f = vk_frame_counter();
     if (f == fsr2_jit_frame) return;
     fsr2_jit_frame = f;
     fsr2_jx = fsr2_jy = 0;
-    if (!fsr2_wanted() || !fsr2_scene_w || fsr2_ok_frame + 1 != f) return;
-    {   // this frame's render size (the scale can change between frames: mv_note_draw sees it only at the G-buffer draw)
-        void renderer_get_scale(float *sx, float *sy);
-        float rx, ry;
-        renderer_get_scale(&rx, &ry);
-        TexBackend *db = mv_depth ? mv_depth->backend : NULL;
-        if (db && db->scalable)
-            fsr2_scene_w = (uint32_t)content_extent((int)db->width, true, rx, db->ax), fsr2_scene_h = (uint32_t)content_extent((int)db->height, true, ry, db->ay);
-    }
+    TexBackend *db = mv_depth ? mv_depth->backend : NULL;  // (the scene's depth: mv_note_draw, the frame before)
+    if (taa_kind() == TAA_GAME || !db || fsr2_ok_frame + 1 != f) return;
+    // this frame's render size: the scale device.c set for it (it can change between frames)
+    void renderer_get_scale(float *sx, float *sy);
+    float rx, ry;
+    renderer_get_scale(&rx, &ry);
+    fsr2_scene_w = (uint32_t)content_extent((int)db->width, db->scalable, rx, db->ax);
+    fsr2_scene_h = (uint32_t)content_extent((int)db->height, db->scalable, ry, db->ay);
     static uint32_t index;
-    vk_fsr2_jitter(index++, fsr2_scene_w, fsr2_out_w ? fsr2_out_w : fsr2_scene_w, &fsr2_jx, &fsr2_jy);
+    vk_fsr2_jitter(index++, fsr2_scene_w, db->width, &fsr2_jx, &fsr2_jy);
     // The jitter in (0, 1) pixel, not (-0.5, 0.5): the same sample positions over the sequence, but never changing
     // sign. Z-A fades objects near the camera with a dither pattern that rounds the pixel position at its centre, so
     // a jitter changing sign moved the pattern of one layer against another's: through a fading umbrella, how much of
@@ -3746,9 +3752,6 @@ static void mv_note_draw(Prog *pr) {
     mv_frame[1] = mv_frame[0], memcpy(mv_vp[1], mv_vp[0], sizeof mv_vp[0]);
     mv_frame[0] = f, memcpy(mv_vp[0], m, sizeof mv_vp[0]);
     mv_depth = st.rt.depth;
-    TexBackend *db = mv_depth->backend;  // (its render size: the part drawn - Dynamic, FSR 2 upscaling)
-    if (db) fsr2_scene_w = (uint32_t)content_extent((int)db->width, db->scalable, db->sx, db->ax),
-            fsr2_scene_h = (uint32_t)content_extent((int)db->height, db->scalable, db->sy, db->ay), fsr2_out_w = db->width;
 }
 
 // (renderer_stats, once per stats interval) copies made aliases / renamed / partly or fully copied later
@@ -7707,7 +7710,7 @@ static void draw_(CmdRec *r, bool indexed) {
         if (st.ubuf[0][5].addr) widescreen_scene_ubo((const float *)(uintptr_t)st.ubuf[0][5].addr, st.ubuf[0][5].size);
     }
     mv_note_draw(pr);
-    if (fsr2_wanted() && fsr2_copy(pr)) return;  // (FSR 2 resolved the frame in place of the game's copy)
+    if (taa_kind() != TAA_GAME && fsr2_copy(pr)) return;  // (FSR 2 resolved the frame in place of the game's copy)
     if (g_debug_frame) debug_draw(pr, r, indexed);
     if (ct_on()) ct_draw(pr, "draw");
     alias_draw_check();
@@ -9915,11 +9918,15 @@ static bool fsr2_copy(Prog *pr) {
     VkFsr2Frame fr = {.color = sb->image, .depth = zb->image, .mv = mvb->image, .reactive = rb->image, .out = ob->image,
                       .color_view = cv, .depth_view = zv, .mv_view = post_view(mvb), .reactive_view = post_view(rb), .out_view = post_view(ob),
                       .color_format = sb->format, .depth_format = zb->format, .out_format = VK_FORMAT_R8G8B8A8_UNORM,
-                      .w = w, .h = h, .iw = sb->width, .ih = sb->height, .ow = ow, .oh = oh, .jx = fsr2_jx, .jy = fsr2_jy, .dt_ms = fminf(fmaxf(dt, 1), 100),
+                      .w = w, .h = h, .ow = ow, .oh = oh, .jx = fsr2_jx, .jy = fsr2_jy, .dt_ms = fminf(fmaxf(dt, 1), 100),
                       .near_z = m[14] > 0 ? m[14] : 0.1f, .fov_y = p11 > 0 ? 2 * atanf(1 / p11) : 1.0f, .sharpness = 0, .reset = reset};
+    // DLAA, FSR 3.1 when chosen and its DLL loads, else FSR 2; a switch between them starts the history again (each has its own)
+    int kind = taa_kind();
+    static int last_kind;
+    if (kind != last_kind) fr.reset = true, last_kind = kind;
     VkCommandBuffer sec = fsr2_cmd();
-    bool ok = g_settings.taa == TAA_DLAA && vk_dlaa_available() ? vk_dlaa_record(g_vk.dev, sec, &fr)
-                                                                : vk_fsr2_record(g_vk.phys, g_vk.dev, sec, &fr);
+    bool ok = kind == TAA_DLAA ? vk_dlaa_record(g_vk.dev, sec, &fr)
+              : kind == TAA_FSR3 ? vk_fsr3_record(g_vk.phys, g_vk.dev, sec, &fr) : vk_fsr2_record(g_vk.phys, g_vk.dev, sec, &fr);
     VK_CHECK(vkEndCommandBuffer(sec));
     if (!ok) return false;
     // (the shown image's first pass this frame is now the HUD's: a target's first pass in a frame clears it -
@@ -9944,8 +9951,8 @@ static bool fsr2_copy(Prog *pr) {
     static int nlog;
     static uint32_t last_w;  // (and each change of the render size)
     if (nlog++ < 3 || w != last_w)
-        LOG("[fsr2] frame %llu: %ux%u -> %ux%u, jitter %.3f %.3f%s\n", (unsigned long long)f, w, h, ow, oh, fsr2_jx, fsr2_jy,
-            reset ? ", reset" : "");
+        LOG("[%s] frame %llu: %ux%u -> %ux%u, jitter %.3f %.3f%s\n", kind == TAA_DLAA ? "dlaa" : kind == TAA_FSR3 ? "fsr3" : "fsr2",
+            (unsigned long long)f, w, h, ow, oh, fsr2_jx, fsr2_jy, fr.reset ? ", reset" : "");
     last_w = w;
     fsr2_ok_frame = f;
     return true;

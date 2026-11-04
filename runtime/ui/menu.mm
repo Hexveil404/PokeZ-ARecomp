@@ -820,15 +820,17 @@ static void tab_display(bool in_game) {
 #ifndef __APPLE__
     if (!la) {  // (runtime/nvn/vulkan/exec.c fsr2_copy: applies at once)
         int t = g_settings.taa;
-        const char *taa[] = {TR("Game's", "Do jogo"), "AMD FSR 2", "NVIDIA DLAA"};
-        if (opt_choice(TR("Temporal anti-aliasing", "Anti-aliasing temporal"), &t, taa, 3, 0,
-                       TR("AMD FSR 2 or NVIDIA DLAA in place of the game's own edge smoothing: they combine several frames, "
+        const char *taa[] = {TR("Game's", "Do jogo"), "AMD FSR 2", "NVIDIA DLAA", "AMD FSR 3.1"};  // (TAA_*)
+        if (opt_choice(TR("Temporal anti-aliasing", "Anti-aliasing temporal"), &t, taa, 4, 0,
+                       TR("AMD FSR or NVIDIA DLAA in place of the game's own edge smoothing: they combine several frames, "
                           "so fences, railings, leaves and thin lines stay smooth and stop flickering as you move. Uses a "
-                          "little GPU time. With either on, Anti-aliasing (SMAA) above isn't needed. DLAA: NVIDIA RTX GPUs, "
+                          "little GPU time. FSR 3.1 leaves less of a trail behind moving things than FSR 2 (FSR 2 if its DLL is "
+                          "missing). With any on, Anti-aliasing (SMAA) above isn't needed. DLAA: NVIDIA RTX GPUs, "
                           "with nvngx_dlss.dll next to lasrecomp.exe; it applies from the next start.",
-                          "AMD FSR 2 ou NVIDIA DLAA no lugar da suavização de bordas do próprio jogo: eles combinam vários "
+                          "AMD FSR ou NVIDIA DLAA no lugar da suavização de bordas do próprio jogo: eles combinam vários "
                           "quadros, então grades, corrimões, folhas e linhas finas ficam lisos e param de tremular quando "
-                          "você anda. Usa um pouco da GPU. Com um deles ligado, o Anti-aliasing (SMAA) acima não é "
+                          "você anda. Usa um pouco da GPU. O FSR 3.1 deixa menos rastro atrás do que se move que o FSR 2 (FSR 2 se a "
+                          "DLL dele faltar). Com um deles ligado, o Anti-aliasing (SMAA) acima não é "
                           "necessário. DLAA: GPUs NVIDIA RTX, com o nvngx_dlss.dll ao lado do lasrecomp.exe; vale a partir "
                           "do próximo início.")))
             g_settings.taa = t;
@@ -838,16 +840,16 @@ static void tab_display(bool in_game) {
                                                      "O DLAA não está disponível: são necessários uma GPU NVIDIA RTX e o nvngx_dlss.dll.")
                                                 : TR("DLAA starts with the next start of the game.",
                                                      "O DLAA começa no próximo início do jogo."));
-        if (g_settings.taa == TAA_FSR2) {  // (exec.c vk_taa_render_share: applies at once)
+        if (g_settings.taa == TAA_FSR2 || g_settings.taa == TAA_FSR3) {  // (exec.c vk_taa_render_share: applies at once)
             int r = g_settings.taa_render < 100 ? 1 : 0;
             const char *rs[] = {"100%", TR("67% (upscaled)", "67% (ampliada)")};
             ImGui::BeginDisabled(g_settings.res_mode == RES_DYNAMIC);
-            if (opt_choice(TR("FSR 2 render resolution", "Resolução de render do FSR 2"), &r, rs, 2, 0,
-                           TR("67%: the world is drawn at two thirds of the resolution above and FSR 2 rebuilds it at the "
+            if (opt_choice(TR("FSR render resolution", "Resolução de render do FSR"), &r, rs, 2, 0,
+                           TR("67%: the world is drawn at two thirds of the resolution above and FSR rebuilds it at the "
                               "full one from several frames - less than half the pixels for the GPU, close to the full "
                               "resolution's look. The HUD and text stay sharp. 100%: smoothing only. Not with Dynamic "
                               "resolution.",
-                              "67%: o mundo é desenhado a dois terços da resolução acima e o FSR 2 o reconstrói na "
+                              "67%: o mundo é desenhado a dois terços da resolução acima e o FSR o reconstrói na "
                               "resolução cheia a partir de vários quadros - menos da metade dos pixels para a GPU, perto do "
                               "visual da resolução cheia. O HUD e os textos ficam nítidos. 100%: só suavização. Não com a "
                               "Resolução dinâmica.")))

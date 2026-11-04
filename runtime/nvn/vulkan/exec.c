@@ -3670,7 +3670,10 @@ static int taa_kind(void) {
 float vk_taa_render_share(void) {
     static int env = -2;
     if (env == -2) env = ENV("LARECOMP_TAA_RENDER") ? atoi(ENV("LARECOMP_TAA_RENDER")) : -1;
-    int pct = env > 0 ? env : g_settings.taa_render;
+    // (the setting is held at 100 for now: at 67% a rectangle of the scene's 67% showed other lighting than the rest,
+    // with a ghost of the player's shadow outside it - a pass drawn at the whole size over one drawn at the scene's
+    // scale, at 1x and 2x alike. LARECOMP_TAA_RENDER=67 still turns it on, and shows the F1 row, to work on it)
+    int pct = env > 0 ? env : 100;
     pct = pct < 50 ? 50 : pct > 100 ? 100 : pct;
     int kind = taa_kind();
     if (pct == 100 || kind == TAA_GAME || kind == TAA_DLAA || fsr2_up_broken ||  // (DLAA: anti-aliasing only)

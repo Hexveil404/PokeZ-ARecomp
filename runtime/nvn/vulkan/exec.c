@@ -7361,6 +7361,117 @@ static void prep_check(const PipeKey *k, uint64_t vh, uint64_t fh, const ShaderR
         k->prog->prep_vh ? "prepared" : "not prepared", progs, nprep, best ? diff : " (none)", line);
 }
 
+// ---- What the draws read in place ([vread]; LARECOMP_VK_READ_CHECK=0 off). The AMD device faults (#146 #147 #148
+// #150 #151) read a page some 960-980 MB below the guest window import's start, where nothing of ours ever was. A
+// vertex stream read in place starts at its binding plus (vertex offset, or first vertex) x stride: a negative offset
+// large enough reads below the buffer - which AMD's driver faults on, and NVIDIA's may read quietly (other memory lies
+// there). So each draw's in-place streams are kept (the last RD_N draws) and checked: a draw's own parameters at once,
+// an indirect draw's - GPU-filled, read in place - from its guest block once its submission is done (the values the
+// GPU used, unless later work wrote them again). Logged: the first 40. At a device fault, vk_read_explain (device.c)
+// names the kept draws whose reads cover the address: in the import by its device address (LARECOMP_VK_GMEM_ADDR, on by
+// default on AMD), in other buffers - the vertex cache's, copies - by theirs in the address binding report.
+enum { RD_N = 8192, RD_STREAMS = 4 };
+typedef struct { uint64_t buf, off, size; uint32_t stride; uint8_t stream, gmem; } RdStream;  // (gmem: in the guest window import)
+typedef struct {
+    uint64_t vs, fs, frame, seq, ind_pa;  // (seq: its submission; ind_pa: an indirect draw's guest parameters, else 0)
+    int64_t vo;                           // the vertex offset (indexed) or first vertex it was recorded with
+    uint32_t count;                       // indices / vertices
+    uint8_t indexed, n;
+    RdStream s[RD_STREAMS];               // (the per-vertex streams read in place: instance streams start at 0 or more)
+} RdRec;
+static RdRec rd_ring[RD_N];
+static unsigned rd_n, rd_live;  // (rd_live: the next record the check reads)
+static uint64_t rd_frame = ~0ull;
+static int rd_logged;
+static bool rd_enabled(void) {
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_VK_READ_CHECK") || atoi(ENV("LARECOMP_VK_READ_CHECK")) != 0;
+    return on;
+}
+static int64_t rd_vo(const RdRec *r) {  // (an indirect draw's from its guest block now: guest = host memory)
+    if (!r->ind_pa) return r->vo;
+    const uint32_t *q = (const uint32_t *)(uintptr_t)r->ind_pa;
+    return r->indexed ? (int64_t)(int32_t)q[3] : (int64_t)q[2];
+}
+static int64_t rd_lo(const RdRec *r, int i, int64_t vo) { return (int64_t)r->s[i].off + vo * (int64_t)r->s[i].stride; }
+static void rd_log(const RdRec *r, int i, int64_t vo, const char *what, uint64_t base) {  // (base: the buffer's device address, 0 unknown)
+    int64_t lo = rd_lo(r, i, vo);
+    char va[64] = "";
+    if (base) snprintf(va, sizeof va, ", device address %#llx", (unsigned long long)(base + (uint64_t)lo));
+    LOG("[vread] %s: frame %llu %s%s draw (vs %llx fs %llx) stream %u: binding at %s+%llu KB, stride %u, %s %lld -> "
+        "reads from %s%lld KB%s\n", what, (unsigned long long)r->frame, r->ind_pa ? "indirect " : "", r->indexed ? "indexed" : "",
+        (unsigned long long)r->vs, (unsigned long long)r->fs, r->s[i].stream, r->s[i].gmem ? "the guest window import " : "its buffer ",
+        (unsigned long long)(r->s[i].off >> 10), r->s[i].stride, r->indexed ? "vertex offset" : "first vertex", (long long)vo,
+        lo < 0 ? "-" : "+", (long long)((lo < 0 ? -lo : lo) >> 10), va);
+}
+static void rd_check(const RdRec *r) {
+    if (rd_logged >= 40) return;
+    int64_t vo = rd_vo(r);
+    for (int i = 0; i < r->n; i++)
+        if (rd_lo(r, i, vo) < 0) {
+            extern uint64_t g_gmem_va;
+            rd_logged++;
+            rd_log(r, i, vo, "below its buffer's start", r->s[i].gmem ? g_gmem_va : 0);
+            return;
+        }
+}
+// The indirect draws whose submissions are done since the last call: their GPU-filled parameters checked
+static void rd_scan(void) {
+    if (rd_n - rd_live > RD_N) rd_live = rd_n - RD_N;
+    if (rd_live == rd_n) return;
+    uint64_t done = vk_completed_seq();
+    for (; rd_live != rd_n; rd_live++) {
+        const RdRec *r = &rd_ring[rd_live & (RD_N - 1)];
+        if (r->seq > done) break;
+        if (r->ind_pa) rd_check(r);
+    }
+}
+static void rd_add(const RdRec *r) {
+    uint64_t f = renderer_present_count();
+    if (f != rd_frame) rd_frame = f, rd_scan();  // (once a frame)
+    RdRec *d = &rd_ring[rd_n++ & (RD_N - 1)];
+    *d = *r;
+    d->frame = f, d->seq = submit_seq + 1;
+    if (!d->ind_pa) rd_check(d);
+}
+// At a device fault (device.c): the kept draws whose in-place reads cover addr - from their lowest read (offset 0 or
+// the vertex offset) to the binding's end - else the nearest below it. Reads the ring without a lock: the render thread
+// may still be writing a record (a diagnostic, as the device-lost trace).
+void vk_read_explain(uint64_t addr) {
+    extern uint64_t g_gmem_va, vk_ab_buffer_base(uint64_t handle);
+    if (!rd_enabled()) return;
+    enum { NB = 1024 };  // (the buffers' device addresses, each looked up once: the report has up to 139 k events)
+    static uint64_t bh[NB], bb[NB];
+    int nb = 0;
+    unsigned n = rd_n < RD_N ? rd_n : RD_N, covers = 0, below = 0, unknown = 0;
+    const RdRec *near = NULL;
+    int near_i = 0;
+    uint64_t near_d = ~0ull, near_base = 0;
+    for (unsigned k = 0; k < n; k++) {
+        const RdRec *r = &rd_ring[(rd_n - 1 - k) & (RD_N - 1)];
+        int64_t vo = rd_vo(r);
+        for (int i = 0; i < r->n; i++) {
+            uint64_t base = r->s[i].gmem ? g_gmem_va : 0;
+            if (!r->s[i].gmem) {
+                int j = 0;
+                while (j < nb && bh[j] != r->s[i].buf) j++;
+                if (j == nb && nb < NB) bh[nb] = r->s[i].buf, bb[nb] = vk_ab_buffer_base(r->s[i].buf), nb++;
+                base = j < nb ? bb[j] : 0;
+            }
+            int64_t lo = rd_lo(r, i, vo);
+            if (lo < 0) below++;
+            if (!base) { unknown++; continue; }
+            uint64_t a = base + (uint64_t)lo, end = base + r->s[i].off + r->s[i].size + (vo > 0 ? (uint64_t)vo * r->s[i].stride : 0);
+            if (addr >= a && addr < end) {
+                if (covers++ < 8) rd_log(r, i, vo, "covers the fault", base);
+            } else if (a > addr && a - addr < near_d) near_d = a - addr, near = r, near_i = i, near_base = base;
+        }
+    }
+    LOG("[vread] the last %u draws: %u streams read the fault's address, %u read below their buffer's start, %u in buffers "
+        "of unknown address\n", n, covers, below, unknown);
+    if (!covers && near) rd_log(near, near_i, rd_vo(near), "nearest above the fault", near_base);
+}
+
 static void draw_(CmdRec *r, bool indexed);
 static void gtao_before_lighting(Prog *pr);
 static void gtao_mark(NvnTexture *target);
@@ -8072,6 +8183,7 @@ static void draw_(CmdRec *r, bool indexed) {
     }
 
     // ---- vertex streams: the range this draw can read, copied once per submission
+    RdRec rd = {0};  // (the streams read in place: vk_read_explain above)
     for (int s = 0; s < 17; s++) {
         if (!(vl.used_streams & (1u << s))) continue;
         VkSpan sp;
@@ -8083,6 +8195,8 @@ static void draw_(CmdRec *r, bool indexed) {
             VkBuffer dbuf;
             VkDeviceSize doff;
             if (v.addr && v.size && guest_direct(0, v.addr, v.size, &dbuf, &doff)) {
+                if (rd.n < RD_STREAMS && !vl.divisor[s] && vl.stride[s])
+                    rd.s[rd.n++] = (RdStream){(uint64_t)(uintptr_t)dbuf, doff, v.size, vl.stride[s], (uint8_t)s, dbuf == gmem_buf};
                 if (ss_on && (ss.vb_known >> s & 1) && ss.vb[s] == dbuf && ss.vo[s] == doff) continue;
                 ss.vb[s] = dbuf; ss.vo[s] = doff; ss.vb_known |= 1u << s;
                 rec_CmdBindVertexBuffers(cb, (uint32_t)s, 1, &dbuf, &doff);
@@ -8198,6 +8312,13 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     if (lighting && nruns == 1 && planar_on())  // (and the lighting, onto the mirrored G-buffer)
         planar_light(pr, pp, fii, vset, dyn, nv_dyn, rs0, tint, vl.used_streams, &pl_dc);
+    if (rd.n && rd_enabled()) {
+        bool ind = g_ind_gpu && ind_ok;
+        rd.vs = st.program->stages[0].code_addr, rd.fs = st.program->stages[1].code_addr, rd.ind_pa = ind ? g_ind_pa : 0;
+        rd.indexed = ind ? indexed : use_index;
+        rd.vo = use_index ? base_vertex : first, rd.count = use_index ? icount : count;
+        rd_add(&rd);
+    }
     dl_note("draw vs %llx fs %llx%s xfb %d", (unsigned long long)st.program->stages[0].code_addr,
             (unsigned long long)st.program->stages[1].code_addr, g_ind_gpu && ind_ok ? " indirect" : "", xfb_on);
     if (g_ind_gpu && ind_ok && dl_on > 0) {

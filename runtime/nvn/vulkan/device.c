@@ -390,6 +390,18 @@ static const AbEvent *ab_at(uint32_t i) {  // i-th kept event, oldest first
     return &ab_ev[AB_KEEP + (later - inring + (i - kept)) % AB_RING];
 }
 static uint32_t ab_count(void) { return ab_n < AB_KEEP ? ab_n : AB_KEEP + (ab_n - AB_KEEP < AB_RING ? ab_n - AB_KEEP : AB_RING); }
+// A buffer's device address, from its latest kept bind event (0: not in the report): exec.c vk_read_explain
+uint64_t vk_ab_buffer_base(uint64_t handle) {
+    if (!ab_ev || !handle) return 0;
+    uint64_t base = 0;
+    while (atomic_flag_test_and_set_explicit(&ab_lock, memory_order_acquire)) {}
+    for (uint32_t i = ab_count(); i-- > 0;) {
+        const AbEvent *e = ab_at(i);
+        if (e->handle == handle && e->objtype == VK_OBJECT_TYPE_BUFFER && !e->unbind) { base = e->base; break; }
+    }
+    atomic_flag_clear_explicit(&ab_lock, memory_order_release);
+    return base;
+}
 
 // Which kept bind events were unbound later (freed / rebound elsewhere): one pass from the newest event back, the
 // unbinds seen so far in a hash set of (object, address).
@@ -633,6 +645,8 @@ void vk_device_fault_report(void) {
             (unsigned long long)addr[i].reportedAddress, (unsigned long long)addr[i].addressPrecision);
         if (addr[i].addressType == VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_INVALID_EXT) vk_bad_code_note();
         gmem_fault_explain(addr[i].reportedAddress);
+        extern void vk_read_explain(uint64_t addr);  // (exec.c: the draws whose in-place reads cover it)
+        if (addr[i].addressType == VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT) vk_read_explain(addr[i].reportedAddress);
         if (addr[i].addressType >= VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT &&
             addr[i].addressType <= VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT)
             ab_explain(addr[i].reportedAddress & ~(addr[i].addressPrecision ? addr[i].addressPrecision - 1 : 0), addr[i].addressPrecision);

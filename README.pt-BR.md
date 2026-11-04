@@ -238,8 +238,8 @@ renderizador no driver **DirectX 12** da placa, o que ajuda quando o driver Vulk
   `D3D12`. Mantenha as duas pastas ao lado do `lasrecomp.exe`.
 - **Situação**: novo e experimental. Numa RTX 4060 Ti ele desenha a mesma imagem que o Vulkan, na mesma velocidade;
   ainda não foi testado em placas AMD nem Intel - conte pra gente como roda na sua.
-- **Diferenças**: *Preparar shaders ao iniciar* fica desligado no DirectX 12, então um efeito pode dar uma travadinha
-  na primeira vez que aparece.
+- **Primeiro início**: o primeiro início no DirectX 12 prepara uma vez os shaders que você já viu no jogo (pode levar
+  alguns minutos); depois disso leva menos de um segundo.
 - **Logs**: o `logs/play.log` tem uma linha `graphics API: DirectX 12 (Dozen, ...)` quando ele está ligado.
 
 ## Solução de problemas

@@ -35,8 +35,13 @@ bool gpu_feature_on(int feature, const char *env) {
     // own memory, Focus Blast on an RX 9060 XT every time: #63; #92) came from a run that prepared them, and the same
     // player's runs without them, a long one too, never faulted. (The pipelines are then built as the game first uses
     // them: a short hitch the first time an effect shows.)
-    // (DirectX 12 through Dozen: the prepared pipelines fail in its shader compiler - built as the game uses them)
-    if (g_gpu_dozen && feature == GPU_SHADER_PREP) return false;
+    // DirectX 12 through Dozen: prepared, on AMD too (the faults above are AMD's Vulkan driver, which Dozen doesn't use).
+    // Its compiles are slow (SPIR-V -> DXIL -> the driver's: 10.2 s for 186 pipelines in one session's battles, up to
+    // 732 ms a frame, and draws whose pipeline is still building are skipped - the scenery blinked out and back), so
+    // built as the game used them they made every battle move hitch. Prepared: 0.46 s at the start with its pipeline
+    // cache warm (2950 pipelines, RTX 4060 Ti; the first start after switching builds them all once). (The early failures
+    // in its shader compiler were the 512 MB storage-buffer limit, since bound in windows: 2 of 2988 fail now.)
+    if (g_gpu_dozen && feature == GPU_SHADER_PREP) return true;
     return !(g_gpu_vendor == 0x1002 && (feature == GPU_ROBUST2 || feature == GPU_SHADER_PREP));
 }
 

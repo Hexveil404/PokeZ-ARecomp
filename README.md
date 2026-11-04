@@ -242,7 +242,7 @@ card's **DirectX 12** driver, which helps where the Vulkan driver crashes or mis
   both folders next to `lasrecomp.exe`.
 - **Status**: new and experimental. On an RTX 4060 Ti it draws the same picture as Vulkan at the same speed; it has
   not been tested on AMD or Intel cards yet - please report how it runs on yours.
-- **Differences**: *Prepare shaders at start* is off with DirectX 12, so an effect can hitch the first time it shows.
+- **First start**: the first start on DirectX 12 prepares the shaders you have already seen in the game once (it can take a few minutes); after that it takes under a second.
 - **Logs**: `logs/play.log` has a `graphics API: DirectX 12 (Dozen, ...)` line when it is on.
 
 ## Troubleshooting

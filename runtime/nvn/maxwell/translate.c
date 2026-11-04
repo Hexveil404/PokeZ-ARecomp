@@ -36,6 +36,10 @@ bool maxwell_quad_deriv_default;  // (vk_exec_init: AMD; quad_deriv)
 // (vulkan/device.c: the device has shaderOutputLayer. Without it - Dozen, DirectX 12 underneath - a vertex shader's
 // render target layer is written to a local and dropped: the draw goes to layer 0 instead of its pipeline failing)
 bool maxwell_output_layer = true;
+// (test) LARECOMP_SHADER_GUARD_REPORT=1: a compute shader whose pc state machine runs into its bound (loop_guard)
+// stores where it was - the pc, the code's id, 5 registers - into gmem words from maxwell_guard_word on (exec.c
+// gmir: an area past the copy of the guest window, read back and logged as "[guard]")
+uint32_t maxwell_guard_word;
 bool maxwell_gmem_fs_miss;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
@@ -2814,9 +2818,20 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         free(flat.buf);
         sp(&s, "  uint pc = 8u; uint ssy_0 = 0u; uint ssy_1 = 0u; uint ssy_2 = 0u; uint ssy_3 = 0u; uint ssy_4 = 0u; uint ssy_5 = 0u; uint ssy_6 = 0u; uint ssy_7 = 0u; uint ssy_8 = 0u; uint ssy_9 = 0u; uint ssy_10 = 0u; uint ssy_11 = 0u; uint ssy_12 = 0u; uint ssy_13 = 0u; uint ssy_14 = 0u; uint ssy_15 = 0u; uint pbk_0 = 0u; uint pbk_1 = 0u; uint pbk_2 = 0u; uint pbk_3 = 0u; uint pbk_4 = 0u; uint pbk_5 = 0u; uint pbk_6 = 0u; uint pbk_7 = 0u; uint pbk_8 = 0u; uint pbk_9 = 0u; uint pbk_10 = 0u; uint pbk_11 = 0u; uint pbk_12 = 0u; uint pbk_13 = 0u; uint pbk_14 = 0u; uint pbk_15 = 0u; uint pcnt_0 = 0u;\n");
         sp(&s, "  bool exit_now = false;\n");
-        sp(&s, "  for (uint guard = 0u; guard < %uu; guard++) {\n  switch (pc) {\n", loop_guard());
+        bool report = maxwell_guard_word && c->stage == STAGE_COMPUTE && c->info->uses_gmem;
+        sp(&s, "  uint guard = 0u;\n  for (; guard < %uu; guard++) {\n  switch (pc) {\n", loop_guard());
         sp(&s, "%s", body.buf ? body.buf : "");
         sp(&s, "    exit_now = true; break;\n  default: exit_now = true; break;\n  }\n  if (exit_now) break;\n  }\n");
+        if (report) {  // (test: maxwell_guard_word)
+            uint32_t id = 2166136261u;
+            for (size_t i = 0; i < 256 && i < c->ninsts * 8; i++) id = (id ^ c->code[i]) * 16777619u;
+            sp(&s, "  if (guard >= %uu) { uint k_ = atomicAdd(gmem_.w[%uu], 1u); if (k_ < 400u) { uint b_ = %uu + 4u + k_ * 12u;\n"
+                   "    gmem_.w[b_] = pc; gmem_.w[b_ + 1u] = 0x%08xu;\n", loop_guard(), maxwell_guard_word, maxwell_guard_word, id);
+            int k = 0;
+            for (int i = 0; i < 255 && k < 5; i++)
+                if (c->reg_used[i]) { sp(&s, "    gmem_.w[b_ + %du] = %du; gmem_.w[b_ + %du] = r%d;\n", 2 + 2 * k, i, 3 + 2 * k, i); k++; }
+            sp(&s, "  } }\n");
+        }
     } else {
         sp(&s, "  do {\n%s  } while (false);\n", body.buf ? body.buf : "");
     }
@@ -3273,7 +3288,7 @@ static uint64_t cache_key(const uint8_t *blob, size_t max_size, int stage, const
         if ((((const uint64_t *)code)[i] & 0xfff0000000000000ull) == 0xe250000000000000ull) return 0;  // BRX
     // (the straight-line switch is in the key: on and off translations of one shader differ, and a GPU that changes
     // the default - AMD - or a player's LARECOMP_SHADER_FLAT must not load the other form)
-    uint64_t v[6] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size, (uint64_t)maxwell_flat_on() | (uint64_t)loop_guard() << 8, (uint64_t)quad_on() + 2 + 16 * (uint64_t)quad_deriv() + 64 * (uint64_t)!maxwell_output_layer};
+    uint64_t v[6] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size, (uint64_t)maxwell_flat_on() | (uint64_t)loop_guard() << 8 | (uint64_t)maxwell_guard_word << 32, (uint64_t)quad_on() + 2 + 16 * (uint64_t)quad_deriv() + 64 * (uint64_t)!maxwell_output_layer};
     uint64_t h = fnv(fnv(fnv(0xcbf29ce484222325ull, cache_build, sizeof cache_build), v, sizeof v), key, sizeof *key);
     h = fnv(h, blob, (size_t)(code - blob) + end * 8);
     return h ? h : 1;

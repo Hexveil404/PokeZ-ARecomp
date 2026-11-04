@@ -90,8 +90,10 @@ static bool view_info(VkImageView v, VkFormat *f, VkSampleCountFlagBits *s) {
     return false;
 }
 
+_Atomic uint64_t vkc_views_made, vkc_views_freed;  // (counts: Dozen's descriptor slots go one a view)
 VkResult vkc_CreateImageView(VkDevice dev, const VkImageViewCreateInfo *ci, const VkAllocationCallbacks *al, VkImageView *v) {
     VkResult r = vkCreateImageView(dev, ci, al, v);
+    if (r == VK_SUCCESS) atomic_fetch_add(&vkc_views_made, 1);
     if (r != VK_SUCCESS || !g_vkc.render_pass) return r;
     pthread_mutex_lock(&rp_lock);
     uint64_t k = (uint64_t)*v;
@@ -109,6 +111,7 @@ static struct { FbKey k; VkFramebuffer fb; bool used, ever; } fb_tab[FB_TAB];
 static int nfb;
 
 void vkc_DestroyImageView(VkDevice dev, VkImageView v, const VkAllocationCallbacks *al) {
+    if (v) atomic_fetch_add(&vkc_views_freed, 1);
     if (g_vkc.render_pass && v) {
         pthread_mutex_lock(&rp_lock);
         uint64_t k = (uint64_t)v;

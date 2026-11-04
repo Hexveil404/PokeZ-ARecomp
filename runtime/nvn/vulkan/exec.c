@@ -4647,6 +4647,10 @@ static bool gmir_all;                  // every page (the first upload, or more 
 #define GMIR_BACK 4096
 static struct { uint64_t lo, hi; } gmir_back[GMIR_BACK];  // window offsets the GPU writes in this submission
 static int gmir_back_n;
+#define GMIR_REPORT 65536u  // (LARECOMP_SHADER_GUARD_REPORT: the area past the copy, translate.c maxwell_guard_word)
+static VkBuffer gmir_rb;
+static VmaAllocation gmir_rb_mem;
+static uint32_t *gmir_rb_ptr;
 static uint64_t gmir_up_bytes, gmir_back_bytes, gmir_poll_ns;  // (logged every ~10 s)
 
 static void gmir_dirty(uint64_t p) {
@@ -4744,11 +4748,27 @@ static void gmir_copy_back(VkCommandBuffer cb) {
     rec_CmdCopyBuffer(cb, gmem_buf, gmir_host, (uint32_t)gmir_back_n, rg);
     vk_full_barrier(cb);
     gmir_back_n = 0;
+    if (gmir_rb) {  // (LARECOMP_SHADER_GUARD_REPORT) the report area, read back; logged as it arrives
+        static int logged;
+        uint32_t cnt = gmir_rb_ptr[0];
+        if (cnt && logged < 60) {
+            for (uint32_t k = 0; k < cnt && k < 400 && logged < 60; k++, logged++) {
+                const uint32_t *e = gmir_rb_ptr + 4 + k * 12;
+                LOG("[guard] shader %08x stuck at pc %x: r%u=%08x r%u=%08x r%u=%08x r%u=%08x r%u=%08x (%u threads this time)\n", e[1], e[0],
+                    e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11], cnt);
+            }
+        }
+        VkBufferCopy rc = {gmem_size, 0, GMIR_REPORT};
+        rec_CmdCopyBuffer(cb, gmem_buf, gmir_rb, 1, &rc);
+        vk_full_barrier(cb);
+    }
     static uint64_t next;
     uint64_t now = SDL_GetTicksNS();
     if (now >= next) {
-        if (next) LOG("[vk] gmem copy: %.1f MB up, %.1f MB back, write tracking polls %.1f ms (last ~10 s)\n", gmir_up_bytes / 1048576.0,
-                      gmir_back_bytes / 1048576.0, gmir_poll_ns / 1e6);
+        extern _Atomic uint64_t vkc_views_made, vkc_views_freed;
+        if (next) LOG("[vk] gmem copy: %.1f MB up, %.1f MB back, write tracking polls %.1f ms (last ~10 s); image views made %llu, "
+                      "live %llu\n", gmir_up_bytes / 1048576.0, gmir_back_bytes / 1048576.0, gmir_poll_ns / 1e6,
+                      (unsigned long long)vkc_views_made, (unsigned long long)(vkc_views_made - vkc_views_freed));
         gmir_up_bytes = gmir_back_bytes = gmir_poll_ns = 0;
         next = now + 10000000000ull;
     }
@@ -4757,7 +4777,7 @@ static void gmir_copy_back(VkCommandBuffer cb) {
 // (gmem_import) the copy in video memory of an import just made: buf / mem become it, the import is kept for the copies
 static bool gmir_make(VkBuffer *buf, VkDeviceMemory *mem, uint64_t size) {
     if (!gmir_mode() || !pt_init()) return false;
-    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size + GMIR_REPORT,
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT};
     VkBuffer b;
@@ -4789,6 +4809,18 @@ static bool gmir_make(VkBuffer *buf, VkDeviceMemory *mem, uint64_t size) {
     *buf = b, *mem = m;
     gmir_on = true;
     gmir_all = true;  // (the first submission copies all of it)
+    if (ENV("LARECOMP_SHADER_GUARD_REPORT") && !gmir_rb) {
+        VkBufferCreateInfo rbi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = GMIR_REPORT, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo aci = {.usage = VMA_MEMORY_USAGE_AUTO,
+                                       .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo inf;
+        if (vmaCreateBuffer(g_vk.vma, &rbi, &aci, &gmir_rb, &gmir_rb_mem, &inf) == VK_SUCCESS) {
+            gmir_rb_ptr = inf.pMappedData;
+            memset(gmir_rb_ptr, 0, GMIR_REPORT);
+            maxwell_guard_word = (uint32_t)(size / 4);
+            LOG("[guard] report on: compute shaders that run into their loop bound log where they were\n");
+        }
+    }
     LOG("[vk] gmem: the import's copy in video memory (%llu MB): shaders read it, kept in step with guest memory "
         "(LARECOMP_VK_GMEM_MIRROR=0: the import in place)\n", (unsigned long long)(size >> 20));
     return true;
@@ -5073,7 +5105,7 @@ static VkDescriptorBufferInfo gmem_info(void) {
         LOG("[vk] guest heap import failed (%llu MB): shader global memory reads return zero\n", (unsigned long long)(want >> 20));
         off = 1;
     }
-    if (gmem_buf) return (VkDescriptorBufferInfo){gmem_buf, 0, gmem_size};
+    if (gmem_buf) return (VkDescriptorBufferInfo){gmem_buf, 0, gmem_size + (gmir_on ? GMIR_REPORT : 0)};
     static uint32_t zero[1024];
     VkSpan s = vk_transient_copy(zero, sizeof zero, 256);
     return (VkDescriptorBufferInfo){s.buf, s.off, sizeof zero};
@@ -5193,6 +5225,29 @@ static void gmem_chunk_decide(void) {
     if (!g_game_is_la || !game_files_are_la("extracted")) {
         gc_lazy = maxwell_gmem_lazy = maxwell_gmem_fs_miss = false;
         gc_shift = 0, gc_n = 0, gc_shift_decided = 0;
+        // Windows of the one import (no lazy chunks) where one storage buffer can't span the window: Dozen (DirectX 12)
+        // takes a storage buffer of 2^27 words at most (a raw view's elements: 512 MB; it reports 128), and every
+        // read past that came back 0 - Z-A's crowd shaders took a jump table entry of 0 and looped back to their
+        // start for good, the world drew nothing. LARECOMP_VK_GMEM_CHUNK_MB=<MB>: windows of that size on any GPU.
+        const char *e = getenv("LARECOMP_VK_GMEM_CHUNK_MB");
+        int sh = 0;
+        if (e) { uint64_t b = strtoull(e, NULL, 10) << 20; if (b) sh = 63 - __builtin_clzll(b); }
+        else if (g_vk.dozen) sh = 29;
+        if (sh > 30) sh = 30;
+        uint64_t span = gwin_max;
+        int n = sh ? (int)((span + (1ull << sh) - 1) >> sh) : 0;
+        uint32_t per_stage = g_vk.props.limits.maxPerStageDescriptorStorageBuffers;
+        if (sh && (n > GC_MAX || (uint32_t)n + 8 > per_stage)) {
+            LOG("[vk] guest memory windows of %llu MB: %d don't fit (%u storage buffers a stage): one buffer\n",
+                (unsigned long long)(1ull << sh) >> 20, n, per_stage);
+            sh = 0, n = 0;
+        }
+        if (sh) {
+            gc_shift = (uint32_t)sh, gc_n = n, gc_shift_decided = sh;
+            LOG("[vk] guest memory: the game's window bound to shaders in %d windows of %llu MB (one storage buffer reaches "
+                "%llu MB here)\n", n, (unsigned long long)(1ull << sh) >> 20, (unsigned long long)g_vk.props.limits.maxStorageBufferRange >> 20);
+            return;
+        }
         LOG("[vk] guest memory: one import of the game's window (not Link's Awakening: no heap chunks)\n");
         return;
     }

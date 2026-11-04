@@ -66,7 +66,9 @@ bool rt_compile_crash_at(uint64_t pc) { return in_gpu_driver(pc) || getenv("LARE
 void rt_crash_explain(char *out, size_t n, const char *log_path) {
     static const char *const report = "Please report it as a GitHub issue and attach the log file below. "
                                       "Your progress up to your last save or autosave is safe.";
-    const char *app = g_game_is_la ? "LAS Recomp" : "ZA Recomp";
+    // (g_game_is_la is Link's Awakening's until the game's files are read: a crash on the start screen or while the
+    // GPU starts said "LAS Recomp stopped", #159)
+    const char *app = g_game_is_la && rt_romfs_files >= 0 ? "LAS Recomp" : "ZA Recomp";
     char head[160], what[600];
     extern void vk_compile_crash_note(void) __attribute__((weak));  // (Vulkan: was this thread compiling a pipeline?)
     if (vk_compile_crash_note && g_pc && rt_compile_crash_at(g_pc)) vk_compile_crash_note();

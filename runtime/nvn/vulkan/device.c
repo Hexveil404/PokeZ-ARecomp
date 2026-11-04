@@ -991,7 +991,28 @@ static void create_device(void) {
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1,
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     if (ab_on) ab_feat.pNext = (void *)di.pNext, di.pNext = &ab_feat;
-    VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
+    VkResult created = vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev);
+#ifdef _WIN32
+    if (created == VK_SUCCESS && g_vk.dozen && ENV("LARECOMP_TEST_DX12_DEVICE_FAIL"))  // (tests the fallback below)
+        vkDestroyDevice(g_vk.dev, NULL), g_vk.dev = VK_NULL_HANDLE, created = VK_ERROR_DEVICE_LOST;
+    // DirectX 12 (Dozen) whose device can't start: start again on Vulkan instead of a crash dialog (#159: RX 7600,
+    // vkCreateDevice -4 on Dozen two minutes after a device loss on AMD's Vulkan driver - D3D12 refused the new device,
+    // likely Windows still recovering the GPU or blocking this program after the reset). The settings file already says
+    // Vulkan (the Graphics API choice is only kept once the device and swapchain are up), so this can't loop.
+    if (created != VK_SUCCESS && g_vk.dozen && !ENV("LARECOMP_DX12_NO_FALLBACK")) {
+        LOG("[vk] DirectX 12 (Dozen) could not create its device (%d: %s): starting again on Vulkan\n", created,
+            created == VK_ERROR_DEVICE_LOST ? "Direct3D 12 reports the GPU removed or reset" : "Direct3D 12 refused");
+        launcher_log_file("[vk] DirectX 12 could not create its device (%d): started again on Vulkan\n", created);
+        g_settings.dx12 = false;
+        settings_save();
+        _putenv_s("VK_DRIVER_FILES", "");
+        _putenv_s("LARECOMP_DX12", "0");
+        if (plat_relaunch()) exit(0);
+        LOG("[vk] could not start the game again: close it and start it (Graphics API is now Vulkan)\n");
+    }
+#endif
+    if (created != VK_SUCCESS)
+        FATAL("vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev) failed: %d (%s:%d)\n", created, __FILE__, __LINE__);
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
 #define VK_LOAD_COMMAND(f)                                                                                            \
     if (!(vkp_##f = (PFN_##f)vkGetDeviceProcAddr(g_vk.dev, #f)))                                                     \

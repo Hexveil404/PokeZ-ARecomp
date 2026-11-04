@@ -522,6 +522,12 @@ static void tab_display(bool in_game) {
                           "realmente passou, então 50 fps joga em velocidade normal, não em câmera lenta. Desligado: o "
                           "passo do próprio jogo - abaixo da taxa escolhida tudo fica em câmera lenta. Vale a partir do "
                           "próximo quadro."));
+            opt_toggle(TR("Smooth distant animation", "Animação suave à distância"), &g_settings.smooth_anim, true,
+                       TR("Characters and Pokémon away from the camera animate every frame, as those close by do, instead of "
+                          "in visible steps. Costs a little CPU in crowded places. Off: the game's own. Game version 2.0.2 only.",
+                          "Personagens e Pokémon longe da câmera animam a cada quadro, como os que estão perto, em vez de "
+                          "em passos visíveis. Custa um pouco de CPU em lugares cheios. Desligado: o do próprio jogo. "
+                          "Apenas na versão 2.0.2 do jogo."));
             if (in_game && g_settings.fps60 && g_fps60_fell_back)
                 ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s",
                                    TR("Running at 30 fps: this PC didn't keep 60 fps.", "Rodando a 30 fps: este PC não segurou 60 fps."));

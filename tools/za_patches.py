@@ -54,10 +54,30 @@ def _za_frame_step(gen, a):
             f'  /* {a:#x}: mov w2, w20 (the channels\' step -> the decoupled one, any frame mode) */')
 
 
+# Smooth distant animation: the per-frame animation update (f_7001dcdf40) reads one byte of each entity's context,
+# `ldrb w8, [x8, #0x1f4]` ([x8] is [this+0x48]). Set: the entity is updated every frame. Clear: it goes through the
+# reduced path that makes distant characters and Pokemon move in visible steps (about 24 of 70 entities are set in the
+# station, chosen by distance and view). rt_za_smooth_anim (runtime/hle/framepace.c; F1 > Smooth distant animation, on
+# by default) hands the update a set byte whatever the game chose; the loaded value is what the update tests, and later
+# tests again, so the one patch covers both. Found and verified in game in MonZaMac (lucabravi/MonZaMac#150, the same
+# game on macOS/Metal). 2.0.2 only: the address and the word are checked there and nowhere else.
+SMOOTH_ANIM = {'b1f12fd919eae86a': 0x7001dcdf60}
+
+
+def _za_smooth_anim(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x3947d108, hex(w)  # ldrb w8, [x8, #0x1f4]
+    return ('{ extern uint8_t rt_za_smooth_anim(uint8_t); '
+            'c->x[8] = rt_za_smooth_anim((uint8_t)LD8(c->x[8] + 0x1f4)); }'
+            f'  /* {a:#x}: ldrb w8, [x8, #0x1f4] (the entity updates every frame: distant ones too) */')
+
+
 def za_patches(build):
     out = {ZA_BUILDS[build]: _za_frame_cfg}
     if build in FRAME_DT:
         out[FRAME_DT[build]] = _za_frame_dt
     if build in FRAME_STEP:
         out[FRAME_STEP[build]] = _za_frame_step
+    if build in SMOOTH_ANIM:
+        out[SMOOTH_ANIM[build]] = _za_smooth_anim
     return out

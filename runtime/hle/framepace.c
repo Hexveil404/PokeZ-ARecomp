@@ -250,3 +250,11 @@ int32_t rt_za_frame_cfg(int32_t cfg) {
     return mode;
 }
 uint64_t g_game_vsyncs;  // (see rt_za_frame_cfg)
+
+// Smooth distant animation (tools/za_patches.py SMOOTH_ANIM, Pokemon Z-A 2.0.2): the byte the animation update reads for
+// each entity says "update every frame"; the game clears it for the ones outside a small set chosen by distance and view,
+// and those move in visible steps. On, every entity reads it set (the game's own logic, and its selection, stay as they
+// are). F1 > Smooth distant animation; LARECOMP_SMOOTH_ANIM=0 / 1 overrides the setting at load.
+uint8_t rt_za_smooth_anim(uint8_t flag) {
+    return g_settings.smooth_anim ? 1 : flag;
+}

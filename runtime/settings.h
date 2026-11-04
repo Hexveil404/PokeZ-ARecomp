@@ -135,6 +135,8 @@ typedef struct {
     bool frame_dt;    // Pokémon Z-A: the world's step from a wall-clock accumulator (runtime/hle/framepace.c
                       // rt_za_frame_dt) - the same game speed at any frame rate. Off: the game's own step (slow motion
                       // below 60 fps). On by default; LARECOMP_FRAME_DT=0 / 1 overrides it at load.
+    bool smooth_anim; // Pokémon Z-A 2.0.2: distant characters animate every frame (runtime/hle/framepace.c
+                      // rt_za_smooth_anim). On by default; LARECOMP_SMOOTH_ANIM=0 / 1 overrides it at load.
     int ui_lang;      // UI_LANG_*: the start screen's language (runtime/ui/launcher.mm); auto = the system's
     // mods/ folders (runtime/services/fs.c layers them): '|' between names. order: first wins where two replace the
     // same file (folders not listed come after, by name); off: not loaded. Edited on the start screen's Mods page.

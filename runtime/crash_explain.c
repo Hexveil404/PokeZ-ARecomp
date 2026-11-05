@@ -13,6 +13,7 @@
 static char g_line[512];   // the first fatal line (FATAL message / "signal 11 accessing 0x10")
 static uint64_t g_pc;      // a crash's host pc (0: a FATAL)
 bool rt_game_data_bad;
+bool rt_game_huge_alloc;
 int rt_mods_on;
 int rt_gpu_bad_code;
 int rt_romfs_files = -1;   // the game's own RomFS files (runtime/services/fs.c; -1: not read yet)
@@ -115,6 +116,16 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
         snprintf(what, sizeof what, "The game read data from its files that can't be unpacked, so it stopped. %s"
                  "Dump the game again from your Switch and set it up on the start screen (Game Files).",
                  rt_mods_on ? "Turn your mods off first: a mod made for another version of the game can do this. If it still happens: " : "");
+    } else if (has("svcBreak") && rt_game_huge_alloc) {  // (#121 #138: a 6 GB list read from data at the first scene,
+        // on 1.0.0 code, on any GPU and on DirectX 12 too: the data most likely isn't that code's version)
+        snprintf(head, sizeof head, "The game files don't match each other");
+        snprintf(what, sizeof what, "While reading its data the game asked for an impossible amount of memory (over 4 GB "
+                 "at once) and stopped. This usually means the game data is from another version than the game code "
+                 "- for example a romfs folder extracted with another tool, or a base game mixed with an update. %s"
+                 "Set the game files up again on the start screen (Game Files), from your .xci or .nsp, together with "
+                 "its update file if you have one. %s",
+                 rt_mods_on ? "Turn your mods off first: a mod made for another version of the game can also do this. " : "",
+                 report);
     } else if (has("svcBreak")) {  // (the game's own check failed: Pokémon Z-A, rarely, while it starts - a timing race)
         snprintf(head, sizeof head, "The game stopped at one of its own checks");
         snprintf(what, sizeof what, "Start it again: this happens now and then while the game starts, and the next "

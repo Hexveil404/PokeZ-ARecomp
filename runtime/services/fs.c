@@ -124,8 +124,14 @@ static void base_open(void) {
     bool folder = stat(path, &sb) == 0 || (!image && stat(g_romfs_dir, &sb) == 0 && S_ISDIR(sb.st_mode));
     if (folder && romfs_layout(g_romfs_dir, &g_base, why, sizeof why)) {
         LOG("[fs] romfs: %d files served from %s\n", g_base.nfiles, g_romfs_dir);
+        // (Pokémon Z-A: the data index's size tells the data's version - #121 #138 crashed on 1.0.0 code at its first
+        // scene, a 6 GiB list read from data, on any GPU: a folder extracted elsewhere, maybe from another version.
+        // 2.0.0's is 9877520 bytes)
+        snprintf(path, sizeof path, "%s/arc/data.trpfd", g_romfs_dir);
+        if (stat(path, &sb) == 0) LOG("[fs] romfs: arc/data.trpfd %lld bytes (a folder extracted by another tool)\n", (long long)sb.st_size);
     } else {
         snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // (an older version's image)
+        if (stat(path, &sb) == 0) LOG("[fs] romfs: %s.bin, %lld bytes\n", g_romfs_dir, (long long)sb.st_size);
         g_base_fd = open(path, O_RDONLY);
         if (g_base_fd < 0) FATAL("cannot read the game data in %s %s(set up the game files on the start screen)\n",
                                  g_romfs_dir, why);

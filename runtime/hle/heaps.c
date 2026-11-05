@@ -23,6 +23,7 @@ static uint64_t orig(const char *name, uint64_t *cache) {
 }
 
 static void fail_once(const char *what, uint64_t lr, uint64_t size) {
+    if (size >= (4ull << 30)) rt_game_huge_alloc = true;  // (crash_explain.c: data that doesn't fit the code)
     static uint64_t seen[64];
     static int n;
     for (int i = 0; i < n; i++) if (seen[i] == lr) return;

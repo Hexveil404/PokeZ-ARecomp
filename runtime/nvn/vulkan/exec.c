@@ -1549,11 +1549,12 @@ void vk_exec_init(void) {
         const char *qc = getenv("LARECOMP_SHADER_QUAD_CONTROL");
         bool qc_on = g_vk.quad_control && (qc ? atoi(qc) != 0 : maxwell_quad_control_default);  // (as translate.c decides)
         LOG("[vk] fragment shaders' own derivatives: %s (LARECOMP_SHADER_QUAD_CONTROL, LARECOMP_SHADER_QUAD_DERIV); the driver's "
-            "quad control and maximal reconvergence: %s\n",
+            "quad control and maximal reconvergence: %s; quads in step through the iris loop: %s (LARECOMP_SHADER_QUAD_LOCKSTEP)\n",
             qc_on ? "quad swaps in full quads, quads kept together (quad control)"
             : getenv("LARECOMP_SHADER_QUAD_DERIV") ? getenv("LARECOMP_SHADER_QUAD_DERIV")
             : maxwell_quad_deriv_default ? "the hardware's (AMD: helpers in quad swaps)" : "quad swaps",
-            g_vk.quad_control ? "yes" : "no");
+            g_vk.quad_control ? "yes" : "no",
+            getenv("LARECOMP_SHADER_QUAD_LOCKSTEP") ? getenv("LARECOMP_SHADER_QUAD_LOCKSTEP") : "yes");
     }
     LOG("[vk] subgroups: %u lanes, quad operations in fragment shaders: %s\n", sg.subgroupSize, maxwell_quad_ops ? "yes" : "no");
     if (!getenv("LARECOMP_SHADER_FLAT") && !maxwell_flat_default)

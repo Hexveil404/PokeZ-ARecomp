@@ -4,11 +4,13 @@
 // game code, LAS Recomp itself, the graphics driver), and the game files.
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 
 #include "platform.h"
 #include "rt.h"
+#include "settings.h"
 
 static char g_line[512];   // the first fatal line (FATAL message / "signal 11 accessing 0x10")
 static uint64_t g_pc;      // a crash's host pc (0: a FATAL)
@@ -62,6 +64,26 @@ static bool in_gpu_driver(uint64_t pc) {
     for (size_t i = 0; i < sizeof drivers / sizeof *drivers; i++)
         if (contains_nocase(m, drivers[i])) return true;
     return false;
+}
+
+// A crash in our DirectX 12 (Dozen: vulkan_dzn.dll), not while compiling a pipeline (that one is recovered, #93):
+// the settings say Vulkan from the next start. #172: an RTX 4050 Laptop on DirectX 12 crashed in vulkan_dzn on the
+// first frames of every start - Vulkan is the normal path there, DirectX 12 the way round AMD driver crashes, and a
+// start that crashes the same way each time is a loop the player can only break in F1 if the game gets that far.
+// LARECOMP_DX12_NO_FALLBACK=1: left as chosen.
+static bool dozen_crash_to_vulkan(void) {
+#ifdef _WIN32
+    char m[512];
+    if (!g_settings.dx12 || getenv("LARECOMP_DX12_NO_FALLBACK") || !g_pc || !plat_module_name(g_pc, m, sizeof m) ||
+        !contains_nocase(m, "vulkan_dzn"))
+        return false;
+    g_settings.dx12 = false;
+    settings_save();
+    rt_launcher_log("[crash] in DirectX 12 (Dozen): the Graphics API is Vulkan from the next start\n");
+    return true;
+#else
+    return false;
+#endif
 }
 
 // (device.c vk_compile_crash_recover; LARECOMP_TEST_COMPILE_CRASH: the test's crash is in build_pipeline itself)
@@ -133,6 +155,11 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
         snprintf(head, sizeof head, "The game stopped at one of its own checks");
         snprintf(what, sizeof what, "Start it again: this happens now and then while the game starts, and the next "
                  "start is normally fine. If it keeps happening at the same place, it's a bug in %s. %s", app, report);
+    } else if (in_gpu_driver(g_pc) && dozen_crash_to_vulkan()) {
+        snprintf(head, sizeof head, "DirectX 12 crashed");
+        snprintf(what, sizeof what, "The DirectX 12 mode (F1 > Display > Graphics API) crashed on this PC, so the next "
+                 "start uses Vulkan, the normal mode. Start the game again: nothing is lost, up to your last save or "
+                 "autosave. %s", report);
     } else if (in_gpu_driver(g_pc)) {
         snprintf(head, sizeof head, "Your graphics driver crashed");
         snprintf(what, sizeof what, "Update your graphics driver (NVIDIA, AMD or Intel) and try again. If it keeps "

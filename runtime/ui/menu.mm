@@ -848,19 +848,26 @@ static void tab_display(bool in_game) {
                                                 : TR("DLAA starts with the next start of the game.",
                                                      "O DLAA começa no próximo início do jogo."));
         if (g_settings.taa == TAA_FSR2 || g_settings.taa == TAA_FSR3) {  // (exec.c vk_taa_render_share: applies at once)
-            int r = g_settings.taa_render < 100 ? 1 : 0;
-            const char *rs[] = {"100%", TR("67% (upscaled)", "67% (ampliada)")};
+            // AMD's FSR modes (Native AA, Quality 1.5x, Balanced 1.7x, Performance 2x; not Ultra Performance's 3x:
+            // temporal_aa_render keeps 50-100). An ini value between them shows as the nearest, kept until a pick.
+            static const int pcts[] = {100, 67, 59, 50};
+            int r = 0;
+            for (int i = 1; i < 4; i++)
+                if (abs(g_settings.taa_render - pcts[i]) < abs(g_settings.taa_render - pcts[r])) r = i;
+            const int r0 = r;
+            const char *rs[] = {TR("100% (Native AA)", "100% (AA nativo)"), TR("67% (Quality)", "67% (Qualidade)"),
+                                TR("59% (Balanced)", "59% (Equilibrado)"), TR("50% (Performance)", "50% (Desempenho)")};
             ImGui::BeginDisabled(g_settings.res_mode == RES_DYNAMIC);
-            if (opt_choice(TR("FSR render resolution", "Resolução de render do FSR"), &r, rs, 2, 0,
-                           TR("67%: the world is drawn at two thirds of the resolution above and FSR rebuilds it at the "
-                              "full one from several frames - less than half the pixels for the GPU, close to the full "
-                              "resolution's look. The HUD and text stay sharp. 100%: smoothing only. Not with Dynamic "
-                              "resolution.",
-                              "67%: o mundo é desenhado a dois terços da resolução acima e o FSR o reconstrói na "
-                              "resolução cheia a partir de vários quadros - menos da metade dos pixels para a GPU, perto do "
-                              "visual da resolução cheia. O HUD e os textos ficam nítidos. 100%: só suavização. Não com a "
-                              "Resolução dinâmica.")))
-                if (r != (g_settings.taa_render < 100)) g_settings.taa_render = r ? 67 : 100;
+            if (opt_choice(TR("FSR render resolution", "Resolução de render do FSR"), &r, rs, 4, 0,
+                           TR("Below 100% the world is drawn at that share of the resolution above and FSR rebuilds it "
+                              "at the full one from several frames: fewer pixels for the GPU (67%: under half, 50%: a "
+                              "quarter), softer the lower it goes. The HUD and text stay sharp. 100%: smoothing only. "
+                              "Not with Dynamic resolution.",
+                              "Abaixo de 100% o mundo é desenhado nessa parte da resolução acima e o FSR o reconstrói na "
+                              "resolução cheia a partir de vários quadros: menos pixels para a GPU (67%: menos da metade, "
+                              "50%: um quarto), mais suave quanto mais baixo. O HUD e os textos ficam nítidos. 100%: só "
+                              "suavização. Não com a Resolução dinâmica.")))
+                if (r != r0) g_settings.taa_render = pcts[r];
             ImGui::EndDisabled();
         }
     }

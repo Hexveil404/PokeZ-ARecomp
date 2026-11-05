@@ -55,7 +55,10 @@ static bool in_gpu_driver(uint64_t pc) {
     static const char *const drivers[] = {"nvoglv", "nvgpucomp", "nvwgf", "libnvidia", "amdvlk", "amdxc", "atiumd",
                                           "atig6", "igvk", "igc64", "igd", "libvulkan_radeon", "libvulkan_intel",
                                           "libvulkan_nouveau", "libvulkan_lvp", "libvulkan_virtio", "AGXMetal",
-                                          "MTLCompiler", "libLLVM", "radeonsi"};
+                                          "MTLCompiler", "libLLVM", "radeonsi",
+                                          // (DirectX 12: our Dozen and the DXIL compiler under it - a compute shader's
+                                          // build crashed deep in vulkan_dzn's recursion during the startup preparation)
+                                          "vulkan_dzn", "dxil", "dxcompiler"};
     for (size_t i = 0; i < sizeof drivers / sizeof *drivers; i++)
         if (contains_nocase(m, drivers[i])) return true;
     return false;

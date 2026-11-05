@@ -6763,7 +6763,26 @@ static void build_compute(void *arg) {
     SLOW_FEEDBACK(ci);
     extern bool g_vk_no_opt;
     if (g_vk_no_opt) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+    // A driver's compiler can crash on one compute shader too (DirectX 12: deep in vulkan_dzn during the startup
+    // preparation): marked like the graphics builds (t_build_*: device.c vk_compile_crash_recover - this worker is
+    // given up, the game goes on, cache/gpu_bad_shaders), by its GLSL's hash and "cs" in place of a fragment shader
+    const uint64_t cs_mark = 0x6373;
+    uint64_t gh = 1469598103934665603ull;
+    for (const char *q = cp->si->msl; *q; q++) gh = (gh ^ (uint8_t)*q) * 1099511628211ull;
+    extern bool vk_shader_bad(uint64_t vs, uint64_t fs);
+    if (vk_shader_bad(gh, cs_mark)) {
+        LOG("[compute] cs %llx: skipped (the driver's compiler crashed on it before)\n", (unsigned long long)cp->code);
+        vkDestroyShaderModule(g_vk.dev, m, NULL);
+        atomic_store(&cp->p.state, 2);
+        build_end(bs);
+        return;
+    }
+    extern __thread uint64_t t_build_vs, t_build_fs;
+    t_build_vs = gh, t_build_fs = cs_mark;
+    t_build_state = &cp->p.state, t_build_slot = bs;
     VkResult r = vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &cp->pipe);
+    t_build_vs = t_build_fs = 0;
+    t_build_state = NULL;
     SLOW_FEEDBACK_HIT();
     atomic_fetch_add(&stat_compiles, 1);
     atomic_fetch_add(&builds_done, 1);

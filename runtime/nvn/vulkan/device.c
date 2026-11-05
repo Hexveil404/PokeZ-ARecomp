@@ -1216,7 +1216,46 @@ static void create_swapchain(void) {
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = present_mode(), .clipped = VK_TRUE,
         .oldSwapchain = old};
-    VK_CHECK(vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &g_vk.swapchain));
+    VkResult sr = vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &g_vk.swapchain);
+#ifdef _WIN32
+    if (sr == VK_SUCCESS && g_vk.dozen && ENV("LARECOMP_TEST_DX12_SWAPCHAIN_FAIL"))  // (tests what follows)
+        vkDestroySwapchainKHR(g_vk.dev, g_vk.swapchain, NULL), g_vk.swapchain = VK_NULL_HANDLE, sr = VK_ERROR_OUT_OF_HOST_MEMORY;
+#endif
+    if (sr != VK_SUCCESS) {
+        // (#151, RX 9060 XT on DirectX 12: -1 at the very first swapchain, fifo or mailbox alike - not seen here.) What
+        // the surface offers, for the next log; then once more with the plainest request: fifo, the fewest images, no
+        // copies out of the window's images
+        LOG("[vk] swapchain %ux%u failed: %d (format %d space %d, %u images, usage %#x, present mode %d; surface: %u..%u "
+            "images, usage %#x, %u formats, transform %#x, alpha %#x)\n", ext.width, ext.height, sr, wf.format,
+            wf.colorSpace, count, ci.imageUsage, ci.presentMode, caps.minImageCount, caps.maxImageCount,
+            caps.supportedUsageFlags, nf, caps.currentTransform, caps.supportedCompositeAlpha);
+        ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        ci.minImageCount = caps.minImageCount > 2 ? caps.minImageCount : 2;
+        if (caps.maxImageCount && ci.minImageCount > caps.maxImageCount) ci.minImageCount = caps.maxImageCount;
+        ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        ci.imageFormat = sf.format, ci.imageColorSpace = sf.colorSpace, hdr = false, wf = sf;
+        if (!(caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR))
+            ci.compositeAlpha = (VkCompositeAlphaFlagBitsKHR)(caps.supportedCompositeAlpha & -caps.supportedCompositeAlpha);
+        count = ci.minImageCount;
+        sr = vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &g_vk.swapchain);
+        LOG("[vk] swapchain again (fifo, %u images, no copies out): %s (%d)\n", count, sr == VK_SUCCESS ? "ok" : "failed", sr);
+#ifdef _WIN32
+        if (sr == VK_SUCCESS && g_vk.dozen && ENV("LARECOMP_TEST_DX12_SWAPCHAIN_FAIL"))
+            vkDestroySwapchainKHR(g_vk.dev, g_vk.swapchain, NULL), g_vk.swapchain = VK_NULL_HANDLE, sr = VK_ERROR_OUT_OF_HOST_MEMORY;
+        // DirectX 12 (Dozen) with no window to draw in: start again on Vulkan, as when its device can't start (#159)
+        if (sr != VK_SUCCESS && g_vk.dozen && !ENV("LARECOMP_DX12_NO_FALLBACK")) {
+            LOG("[vk] DirectX 12 (Dozen) could not make the window's swapchain (%d): starting again on Vulkan\n", sr);
+            launcher_log_file("[vk] DirectX 12 could not make the window's swapchain (%d): started again on Vulkan\n", sr);
+            g_settings.dx12 = false;
+            settings_save();
+            _putenv_s("VK_DRIVER_FILES", "");
+            _putenv_s("LARECOMP_DX12", "0");
+            if (plat_relaunch()) exit(0);
+            LOG("[vk] could not start the game again: close it and start it (Graphics API is now Vulkan)\n");
+        }
+#endif
+        if (sr != VK_SUCCESS) FATAL("vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &g_vk.swapchain) failed: %d (%s:%d)\n", sr, __FILE__, __LINE__);
+    }
     static const char *const modes[] = {"immediate", "mailbox", "fifo", "fifo-relaxed"};
     LOG("[vk] swapchain %ux%u, %u images, %s%s\n", ext.width, ext.height, count,
         ci.presentMode < 4 ? modes[ci.presentMode] : "other present mode",

@@ -33,6 +33,7 @@ bool maxwell_gmem_lazy;
 bool maxwell_flat_default = true;
 bool maxwell_quad_ops;  // (vk_exec_init: the device has quad subgroup operations in fragment shaders)
 bool maxwell_quad_deriv_default;  // (vk_exec_init: AMD; quad_deriv)
+bool maxwell_quad_control_ok, maxwell_quad_control_default;  // (vk_exec_init: the device has quad control; AMD: on)
 // (vulkan/device.c: the device has shaderOutputLayer. Without it - Dozen, DirectX 12 underneath - a vertex shader's
 // render target layer is written to a local and dropped: the draw goes to layer 0 instead of its pipeline failing)
 bool maxwell_output_layer = true;
@@ -140,6 +141,7 @@ typedef struct {
     uint32_t brx_pc[32], brx_tgt[32][64];
     int brx_ntgt[32], nbrx;
     bool brx_unknown;
+    bool full_quads;  // (a fragment shader with the game's own derivatives, written as quad swaps: quad_control_on)
 } Ctx;
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
@@ -425,6 +427,21 @@ static int quad_deriv(void) {
     static int m = -1;
     if (m < 0) { const char *e = getenv("LARECOMP_SHADER_QUAD_DERIV"); m = e ? atoi(e) : maxwell_quad_deriv_default; }
     return m;
+}
+
+// The way the spec defines it, in place of quad_deriv: VK_KHR_shader_quad_control (+ maximal reconvergence). A fragment
+// shader with the game's own derivatives asks for full quads (helpers run and take part in quad operations, as on the
+// Switch and NVIDIA), derivatives over the whole quad, and quads together again after its branches and loops - the
+// eyes' iris is a march loop inside the pc state machine, where dFdxFine (quad_deriv) is undefined once the quad's
+// pixels part ways: v0.1.16 left grain on AMD (#74 #95 #144). The SHFLs are then the game's quad swaps as they are.
+// LARECOMP_SHADER_QUAD_CONTROL=1 on (default on AMD where the driver has both extensions), 0 off
+static bool quad_control_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LARECOMP_SHADER_QUAD_CONTROL");
+        on = maxwell_quad_control_ok && (e ? atoi(e) != 0 : maxwell_quad_control_default);
+    }
+    return on;
 }
 
 // Whether the SHFL at pc (into register d) is read by an FSWZADD as its first operand within the next few
@@ -2081,8 +2098,10 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             const char *const *fn = warp_emu() ? fn_w : fn_s;  // (per 32-lane warp: the prelude's w* functions)
             static const char *const quad[] = {NULL, "subgroupQuadSwapHorizontal", "subgroupQuadSwapVertical", "subgroupQuadSwapDiagonal"};
             unsigned m = (unsigned)bits(w, 20, 5);
-            bool qd = c->stage == STAGE_FRAGMENT && mode == 3 && bits(w, 28, 1) && (m == 1 || m == 2) && quad_deriv() &&
-                      shfl_feeds_fswzadd(c, pc, d);
+            bool feeds = c->stage == STAGE_FRAGMENT && mode == 3 && bits(w, 28, 1) && (m == 1 || m == 2) &&
+                         (quad_deriv() || quad_control_on()) && shfl_feeds_fswzadd(c, pc, d);
+            bool qd = feeds && !quad_control_on();
+            if (feeds && quad_control_on()) c->full_quads = true;  // (the quad swap below, in full quads: quad_control_on)
             if (qd && quad_deriv() == 2)  // (test: a helper partner gives nothing - this pixel's own value)
                 sprintf(t, "(%s(uint(gl_HelperInvocation)) != 0u ? %s : %s(%s))", quad[m], R(a), quad[m], R(a));
             else if (qd)  // (the neighbour from the hardware's derivative, the helpers included: quad_deriv)
@@ -2614,6 +2633,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     int set = stage == STAGE_FRAGMENT ? 1 : 0;
     Str s = {0};
     sp(&s, "#version 460\n");  // (the prelude's first line; an extension directive has to follow it)
+    if (c->full_quads) sp(&s, "#extension GL_EXT_shader_quad_control : require\n#extension GL_EXT_maximal_reconvergence : require\n");
     if (info->uses_gmem && maxwell_gmem_chunk_shift && maxwell_gmem_lazy) sp(&s, "#extension GL_EXT_buffer_reference : require\n");
     {   // (test) LARECOMP_WARP_FORCE_EMU=1: the 64-lane warp code even on 32-lane subgroups (it must change nothing there)
         const char *pre = glsl_prelude + sizeof "#version 460\n" - 1;
@@ -2809,10 +2829,11 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         }
         if (c->omap_depth) info->writes_depth = true;
         if (glsl_early_tests(c)) sp(&s, "layout(early_fragment_tests) in;\n");
+        if (c->full_quads) sp(&s, "layout(full_quads) in;\nlayout(quad_derivatives) in;\n");  // (quad_control_on)
     } else {
         sp(&s, "layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;\n");
     }
-    sp(&s, "void main() {\n");
+    sp(&s, c->full_quads ? "void main() [[maximally_reconverges]] {\n" : "void main() {\n");
     if (stage == STAGE_VERTEX) {
         sp(&s, "  gl_Position = vec4(0, 0, 0, 1);\n");
         for (int i = 0; i < 32; i++)
@@ -3307,7 +3328,7 @@ static uint64_t cache_key(const uint8_t *blob, size_t max_size, int stage, const
         if ((((const uint64_t *)code)[i] & 0xfff0000000000000ull) == 0xe250000000000000ull) return 0;  // BRX
     // (the straight-line switch is in the key: on and off translations of one shader differ, and a GPU that changes
     // the default - AMD - or a player's LARECOMP_SHADER_FLAT must not load the other form)
-    uint64_t v[6] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size, (uint64_t)maxwell_flat_on() | (uint64_t)loop_guard() << 8 | (uint64_t)maxwell_guard_word << 32, (uint64_t)quad_on() + 2 + 16 * (uint64_t)quad_deriv() + 64 * (uint64_t)!maxwell_output_layer};
+    uint64_t v[6] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size, (uint64_t)maxwell_flat_on() | (uint64_t)loop_guard() << 8 | (uint64_t)maxwell_guard_word << 32, (uint64_t)quad_on() + 2 + 16 * (uint64_t)quad_deriv() + 64 * (uint64_t)!maxwell_output_layer + 128 * (uint64_t)quad_control_on()};
     uint64_t h = fnv(fnv(fnv(0xcbf29ce484222325ull, cache_build, sizeof cache_build), v, sizeof v), key, sizeof *key);
     h = fnv(h, blob, (size_t)(code - blob) + end * 8);
     return h ? h : 1;

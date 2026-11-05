@@ -1542,9 +1542,19 @@ void vk_exec_init(void) {
     vkGetPhysicalDeviceProperties2(g_vk.phys, &pr2);
     maxwell_quad_ops = (sg.supportedOperations & VK_SUBGROUP_FEATURE_QUAD_BIT) && (sg.supportedStages & VK_SHADER_STAGE_FRAGMENT_BIT);
     maxwell_quad_deriv_default = g_vk.props.vendorID == 0x1002;  // (translate.c quad_deriv: helpers in quad swaps)
-    LOG("[vk] fragment shaders' own derivatives: %s (LARECOMP_SHADER_QUAD_DERIV)\n",
-        getenv("LARECOMP_SHADER_QUAD_DERIV") ? getenv("LARECOMP_SHADER_QUAD_DERIV")
-        : maxwell_quad_deriv_default ? "the hardware's (AMD: helpers in quad swaps)" : "quad swaps");
+    extern bool maxwell_quad_control_ok, maxwell_quad_control_default;
+    maxwell_quad_control_ok = g_vk.quad_control;  // (translate.c quad_control_on: full quads where the game derives itself)
+    maxwell_quad_control_default = g_vk.quad_control && g_vk.props.vendorID == 0x1002;
+    {
+        const char *qc = getenv("LARECOMP_SHADER_QUAD_CONTROL");
+        bool qc_on = g_vk.quad_control && (qc ? atoi(qc) != 0 : maxwell_quad_control_default);  // (as translate.c decides)
+        LOG("[vk] fragment shaders' own derivatives: %s (LARECOMP_SHADER_QUAD_CONTROL, LARECOMP_SHADER_QUAD_DERIV); the driver's "
+            "quad control and maximal reconvergence: %s\n",
+            qc_on ? "quad swaps in full quads, quads kept together (quad control)"
+            : getenv("LARECOMP_SHADER_QUAD_DERIV") ? getenv("LARECOMP_SHADER_QUAD_DERIV")
+            : maxwell_quad_deriv_default ? "the hardware's (AMD: helpers in quad swaps)" : "quad swaps",
+            g_vk.quad_control ? "yes" : "no");
+    }
     LOG("[vk] subgroups: %u lanes, quad operations in fragment shaders: %s\n", sg.subgroupSize, maxwell_quad_ops ? "yes" : "no");
     if (!getenv("LARECOMP_SHADER_FLAT") && !maxwell_flat_default)
         LOG("[vk] straight-line shader form off (%s; LARECOMP_SHADER_FLAT=1: on)\n",

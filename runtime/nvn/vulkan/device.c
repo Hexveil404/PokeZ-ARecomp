@@ -734,6 +734,22 @@ static void create_device(void) {
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     g_fault_ext = fault;
+    // Full quads and derivatives over the whole 2x2 quad, helpers included, and quads together again after a branch or
+    // a loop: what the game's own derivatives (SHFL + FSWZADD: eyes, hair) need, defined by these two extensions instead
+    // of left to the driver (AMD's helpers sit out quad swaps: #74 #95 #144). Used by translate.c quad_control_on
+    VkPhysicalDeviceShaderQuadControlFeaturesKHR qc_feat = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_QUAD_CONTROL_FEATURES_KHR};
+    VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR mr_feat = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR};
+    if (has_ext(ep, ne, VK_KHR_SHADER_QUAD_CONTROL_EXTENSION_NAME) && has_ext(ep, ne, VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME)) {
+        qc_feat.pNext = &mr_feat;
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &qc_feat};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &q);
+        g_vk.quad_control = qc_feat.shaderQuadControl && mr_feat.shaderMaximalReconvergence;
+        qc_feat.pNext = mr_feat.pNext = NULL;
+    }
+    if (g_vk.quad_control) {
+        ext[n_ext++] = VK_KHR_SHADER_QUAD_CONTROL_EXTENSION_NAME;
+        ext[n_ext++] = VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME;
+    }
     VkPhysicalDeviceAddressBindingReportFeaturesEXT ab_feat = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT};
     if (ab_inst_ext && has_ext(ep, ne, VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME)) {  // (GPU address owners: ab_explain)
         VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &ab_feat};
@@ -964,6 +980,10 @@ static void create_device(void) {
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
                                            .pNext = &f11};
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = fault ? (void *)&ff : (void *)&f11};
+    if (g_vk.quad_control) {  // (enabled as found above)
+        qc_feat.shaderQuadControl = VK_TRUE, mr_feat.shaderMaximalReconvergence = VK_TRUE;
+        mr_feat.pNext = f.pNext, qc_feat.pNext = &mr_feat, f.pNext = &qc_feat;
+    }
 #if defined(__linux__) && defined(VK_EXT_map_memory_placed)
     VkPhysicalDeviceMapMemoryPlacedFeaturesEXT placed = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT,
                                                          .memoryMapPlaced = VK_TRUE, .memoryUnmapReserve = g_vk.unmap_reserve,

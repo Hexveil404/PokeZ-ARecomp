@@ -859,7 +859,11 @@ static void tab_display(bool in_game) {
             g_settings.taa = t;
         if (g_settings.taa == TAA_DLAA && !vk_dlaa_available())
             ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s",
-                               vk_dlaa_wanted() ? TR("DLAA isn't available: an NVIDIA RTX GPU and nvngx_dlss.dll are needed.",
+                               // (DirectX 12: Dozen's device isn't NVIDIA's Vulkan one, NGX can't start on it - #169)
+                               vk_dlaa_wanted() && g_settings.dx12
+                                   ? TR("DLAA works only with Graphics API = Vulkan: DirectX 12 is on.",
+                                        "O DLAA só funciona com API gráfica = Vulkan: o DirectX 12 está ligado.")
+                               : vk_dlaa_wanted() ? TR("DLAA isn't available: an NVIDIA RTX GPU and nvngx_dlss.dll are needed.",
                                                      "O DLAA não está disponível: são necessários uma GPU NVIDIA RTX e o nvngx_dlss.dll.")
                                                 : TR("DLAA starts with the next start of the game.",
                                                      "O DLAA começa no próximo início do jogo."));

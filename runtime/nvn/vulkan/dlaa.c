@@ -179,7 +179,15 @@ static bool vtable_ok(void) {
 }
 
 void vk_dlaa_init(VkInstance inst, VkPhysicalDevice phys, VkDevice dev) {
-    if (!vk_dlaa_wanted() || !core_load()) return;
+    if (!vk_dlaa_wanted()) return;
+    // (DirectX 12: Dozen's device isn't NVIDIA's Vulkan one, NGX can't run on it - #169; the F1 row says so)
+    VkPhysicalDeviceProperties pp;
+    vkGetPhysicalDeviceProperties(phys, &pp);
+    if (!strncmp(pp.deviceName, "Microsoft Direct3D12", 20)) {
+        LOG("[dlaa] Graphics API DirectX 12 (%s): DLAA needs Vulkan, off\n", pp.deviceName);
+        return;
+    }
+    if (!core_load()) return;
     wchar_t wdir[MAX_PATH];
     DWORD len = GetModuleFileNameW(NULL, wdir, MAX_PATH);
     while (len && wdir[len - 1] != L'\\') len--;

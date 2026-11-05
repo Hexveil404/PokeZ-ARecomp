@@ -828,6 +828,40 @@ const char *romfs_file_at(uint64_t off) { return romfs_file_base(off, NULL); }
 
 void romfs_file_read_hook(const char *path);
 
+// The last RomFS reads (image offset, size), for fs_log_recent_reads: #173, "OODLE ERROR : LZ corruption" leaving
+// the lab on 2.0.0, with a romfs.bin the same size as ours - the reads before it, with an FNV-1a 64 of the bytes as
+// read again now, tell a damaged file (another hash than our copy's) from a read gone wrong (the same hash)
+#define RECENT_READS 24
+static struct { uint64_t off, size; } recent_reads[RECENT_READS];
+static unsigned recent_n;
+static pthread_mutex_t recent_lock = PTHREAD_MUTEX_INITIALIZER;
+static void recent_read_note(uint64_t off, uint64_t size) {
+    pthread_mutex_lock(&recent_lock);
+    unsigned i = recent_n++ % RECENT_READS;
+    recent_reads[i].off = off, recent_reads[i].size = size;
+    pthread_mutex_unlock(&recent_lock);
+}
+void fs_log_recent_reads(void) {  // (services/am.c: the game's decompressor said its data is damaged)
+    pthread_mutex_lock(&recent_lock);
+    unsigned n = recent_n < RECENT_READS ? recent_n : RECENT_READS;
+    typeof(recent_reads[0]) r[RECENT_READS];
+    for (unsigned i = 0; i < n; i++) r[i] = recent_reads[(recent_n - n + i) % RECENT_READS];
+    pthread_mutex_unlock(&recent_lock);
+    LOG("[fs] the last %u RomFS reads before the damaged data (file, offset in it, size, FNV-1a 64 of the bytes read "
+        "again; romfs.bin %llu bytes):\n", n, (unsigned long long)base_size());
+    uint8_t *buf = NULL;
+    for (unsigned i = 0; i < n; i++) {
+        uint64_t base = 0, sz = r[i].size;
+        const char *path = romfs_file_base(r[i].off, &base);
+        uint64_t h = 0xCBF29CE484222645ull;
+        bool ok = sz <= (64ull << 20) && (buf = realloc(buf, sz ? sz : 1)) && romfs_read(buf, sz, r[i].off) == (ssize_t)sz;
+        if (ok) for (uint64_t k = 0; k < sz; k++) h = (h ^ buf[k]) * 0x100000001B3ull;
+        LOG("[fs]   %s +%llx %llx %s%016llx\n", path ? path : "?", (unsigned long long)(r[i].off - base),
+            (unsigned long long)sz, ok ? "" : "(not read) ", (unsigned long long)h);
+    }
+    free(buf);
+}
+
 // ------------------------------------------------------------------ IStorage (raw RomFS image)
 typedef struct { uint64_t size; int fd; } Storage;  // (fd: add-on content, plain_storage - the RomFS image reads through base_pread)
 
@@ -842,6 +876,7 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         uint64_t t0 = plat_now_ns();
         ssize_t n = romfs_read((uint8_t *)(uintptr_t)b->addr, size, off);
         uint64_t t1 = plat_now_ns();
+        recent_read_note(off, size);
         if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", off, strerror(errno));
         {   // (test) LARECOMP_FS_MBPS=<MB/s>: each read takes as long as at that speed (the console's storage: tens of MB/s;
             // ours is instant, which may expose races in the game's streaming)

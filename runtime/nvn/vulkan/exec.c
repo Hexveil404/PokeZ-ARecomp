@@ -5333,8 +5333,12 @@ static void gmem_chunk_decide(void) {
         int sh = 0;
         if (e) { uint64_t b = strtoull(e, NULL, 10) << 20; if (b) sh = 63 - __builtin_clzll(b); }
         else if (g_vk.dozen) sh = 29;
-        // (AMD as well, whatever it reports: its device losses right after the crowd shaders (#154 #159 #161 #162: a TDR,
-        // no page fault) look like Dozen's endless loop. Test build; =0 above: one buffer, as before)
+        // (AMD as well, whatever it reports - 4095 MB on an RX 9060 XT: past 2 GB into one buffer its reads go wrong as if
+        // the offset were a signed 32-bit number. The page faults of #146-#151 were always 960-980 MB BELOW the window's
+        // start = 4096 MB minus an offset of ~3.1 GB, near the top of the 3.2 GB window; the device losses after the
+        // crowd shaders (#154 #159 #162, a TDR) are Dozen's endless loop on reads that came back wrong. With 512 MB
+        // windows no offset reaches 2 GB: #151's RX 9060 XT played 31 min on Vulkan past its old crash, test-amd-windows.
+        // =0 above: one buffer, as before)
         else if (g_vk.props.vendorID == 0x1002) sh = 29;
         // (also wherever one storage buffer can't reach the whole window: binding past maxStorageBufferRange is out of
         // spec, and a driver may read 0 there as Dozen did - the crowd shaders' endless loop. Intel: 1 GB, #153)

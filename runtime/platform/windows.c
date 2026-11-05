@@ -1437,3 +1437,41 @@ bool plat_window_screen_hash(void *hwnd, uint32_t *out) {
     ReleaseDC(NULL, sdc);
     return ok;
 }
+
+// (main.c, before logs/play.log is rotated) A session that ended in a crash keeps its log as logs/crash-<date>.log, the
+// last 3 only: two more starts rotated it away before - #151's first start after the recompile crashed and its play.log
+// was gone by the time the player looked. "Ended in a crash" = the crash dialog's "[crash]" line in the log's last 8 KB.
+static int cmp_names(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+void plat_keep_crash_log(void) {
+    FILE *pf = fopen("logs/play.log", "rb");
+    if (!pf) return;
+    static char tail[8193];
+    fseek(pf, 0, SEEK_END);
+    long sz = ftell(pf);
+    fseek(pf, sz > 8192 ? sz - 8192 : 0, SEEK_SET);
+    size_t got = fread(tail, 1, 8192, pf);
+    fclose(pf);
+    tail[got] = 0;
+    for (size_t i = 0; i < got; i++) if (!tail[i]) tail[i] = ' ';
+    if (!strstr(tail, "[crash]")) return;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char cp[64];
+    snprintf(cp, sizeof cp, "logs/crash-%04u%02u%02u-%02u%02u%02u.log", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute,
+             st.wSecond);
+    CopyFileA("logs/play.log", cp, FALSE);
+    static char names[64][64];  // (the oldest beyond 3 removed: the names sort by date)
+    int nn = 0;
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA("logs/crash-*.log", &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do if (nn < 64) snprintf(names[nn++], 64, "%s", fd.cFileName); while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    qsort(names, (size_t)nn, sizeof names[0], cmp_names);
+    for (int i = 0; i + 3 < nn; i++) {
+        char p[80];
+        snprintf(p, sizeof p, "logs/%s", names[i]);
+        remove(p);
+    }
+}

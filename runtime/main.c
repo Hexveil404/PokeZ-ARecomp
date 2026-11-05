@@ -322,6 +322,11 @@ int main(int argc, char **argv) {
             extern int rt_stderr_is_console(void);
             if (rt_stderr_is_console()) {
                 SDL_CreateDirectory("logs");
+                // A session that ended in a crash keeps its log aside (logs/crash-<date>.log, the last 3): two more
+                // starts rotated it away before (#151: the first start after the recompile crashed, its play.log gone
+                // by the time the player looked) - platform/windows.c
+                extern void plat_keep_crash_log(void);
+                plat_keep_crash_log();
                 remove("logs/play-anterior.log");
                 rename("logs/play.log", "logs/play-anterior.log");
                 if (freopen("logs/play.log", "w", stderr)) {

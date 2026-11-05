@@ -732,64 +732,13 @@ static bool hd_candidate(const NvnTexture *t, const TexBackend *b) {
            t->width >= 16 && t->height >= 16 && !(t->flags & 0x10);
 }
 
-static bool hd_load_dds(NvnTexture *t, TexBackend *b, uint64_t h, const char *path);
-
-static bool hd_replace(NvnTexture *t, TexBackend *b, uint64_t h) {
-    char path[440];
-    const char *folder = hd_folder(hd_find(h), h);
-    snprintf(path, sizeof path, "%s/%016llx.dds", folder, (unsigned long long)h);
-    if (hd_load_dds(t, b, h, path)) return true;
-    snprintf(path, sizeof path, "%s/%016llx.png", folder, (unsigned long long)h);
-    SDL_Surface *s0 = SDL_LoadPNG(path);
-    if (!s0) { LOG("[tex] %s: %s\n", path, SDL_GetError()); return false; }
-    SDL_Surface *s = SDL_ConvertSurface(s0, SDL_PIXELFORMAT_ABGR8888);  // (R, G, B, A bytes)
-    SDL_DestroySurface(s0);
-    if (!s) return false;
-    uint32_t w = (uint32_t)s->w, hh = (uint32_t)s->h, levels = 1;
-    for (uint32_t m = w > hh ? w : hh; m > 1; m >>= 1) levels++;
-    VkFormat vf = vk_format_is_srgb(b->format) ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
-    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
-                            .imageType = VK_IMAGE_TYPE_2D, .format = vf, .extent = {w, hh, 1}, .mipLevels = levels,
-                            .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
-                            .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
-    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
-    VkImage img;
-    VmaAllocation mem;
-    if (vmaCreateImage(g_vk.vma, &ci, &ai, &img, &mem, NULL) != VK_SUCCESS) { SDL_DestroySurface(s); return false; }
-    destroy_image(b);
-    b->image = img, b->mem = mem, b->format = vf;
-    b->width = w, b->height = hh, b->depth = 1, b->layers = 1, b->levels = levels, b->samples = 1;
-    b->aspect = VK_IMAGE_ASPECT_COLOR_BIT, b->base_type = VK_IMAGE_VIEW_TYPE_2D, b->astc_bw = b->astc_bh = 0;
-    b->hd = true, b->sx = (float)w / (float)t->width, b->sy = (float)hh / (float)t->height;
-    VkCommandBuffer cb = vk_upload_cmd();
-    vk_image_init_layout(cb, img, VK_IMAGE_ASPECT_COLOR_BIT);
-    VkSpan sp = vk_transient((uint64_t)w * hh * 4, 16);
-    for (uint32_t y = 0; y < hh; y++) memcpy((uint8_t *)sp.ptr + (uint64_t)y * w * 4, (const uint8_t *)s->pixels + (uint64_t)y * s->pitch, (size_t)w * 4);
-    SDL_DestroySurface(s);
-    VkBufferImageCopy rg = {.bufferOffset = sp.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, hh, 1}};
-    rec_CmdCopyBufferToImage(cb, sp.buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
-    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-                           .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                           .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
-    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
-    for (uint32_t lv = 1; lv < levels; lv++) {  // each level a linear downsample of the one above
-        rec_CmdPipelineBarrier2(cb, &di);
-        int32_t sw = (int32_t)level_w(b, lv - 1), sh = (int32_t)level_h(b, lv - 1);
-        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv - 1, 0, 1}, .srcOffsets = {{0, 0, 0}, {sw, sh, 1}},
-                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, 0, 1},
-                          .dstOffsets = {{0, 0, 0}, {(int32_t)level_w(b, lv), (int32_t)level_h(b, lv), 1}}};
-        rec_CmdBlitImage(cb, img, VK_IMAGE_LAYOUT_GENERAL, img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
-    }
-    rec_CmdPipelineBarrier2(cb, &di);
-    static int n;
-    if (n++ < 20) LOG("[tex] HD %016llx: %ux%u for %ux%u\n", (unsigned long long)h, w, hh, t->width, t->height);
-    return true;
-}
+// A pack texture's data as read from its file (any thread): a .dds's block-compressed levels as they are in the file
+// (buf + off, total bytes), or a .png's RGBA8 pixels, tightly packed (png: mip levels made on the GPU)
+typedef struct { uint8_t *buf; uint64_t off, total; uint32_t w, h, levels, bpb; VkFormat vf; bool png; } HdData;
 
 // A .dds pack texture: block-compressed, every mip level in the file (DX10 header: BC7 / BC1 / BC3, sRGB or not; or
-// the legacy DXT1 / DXT5 codes)
-static bool hd_load_dds(NvnTexture *t, TexBackend *b, uint64_t h, const char *path) {
+// the legacy DXT1 / DXT5 codes). False: no such file (quietly), or not one we can use (logged)
+static bool hd_read_dds(const char *path, HdData *o) {
     FILE *f = fopen(path, "rb");
     if (!f) return false;
     fseek(f, 0, SEEK_END);
@@ -826,6 +775,43 @@ static bool hd_load_dds(NvnTexture *t, TexBackend *b, uint64_t h, const char *pa
         total += (uint64_t)((lw + 3) / 4) * ((lh + 3) / 4) * bpb;
     }
     if (off + total > (uint64_t)len) { free(d); LOG("[tex] %s: truncated\n", path); return false; }
+    *o = (HdData){.buf = d, .off = off, .total = total, .w = w, .h = hh, .levels = levels, .bpb = bpb, .vf = vf};
+    return true;
+}
+
+static bool hd_read_png(const char *path, HdData *o) {
+    SDL_Surface *s0 = SDL_LoadPNG(path);
+    if (!s0) { LOG("[tex] %s: %s\n", path, SDL_GetError()); return false; }
+    SDL_Surface *s = SDL_ConvertSurface(s0, SDL_PIXELFORMAT_ABGR8888);  // (R, G, B, A bytes)
+    SDL_DestroySurface(s0);
+    if (!s) return false;
+    uint32_t w = (uint32_t)s->w, hh = (uint32_t)s->h;
+    uint8_t *px = malloc((uint64_t)w * hh * 4);
+    if (px) for (uint32_t y = 0; y < hh; y++) memcpy(px + (uint64_t)y * w * 4, (const uint8_t *)s->pixels + (uint64_t)y * s->pitch, (size_t)w * 4);
+    SDL_DestroySurface(s);
+    if (!px) return false;
+    *o = (HdData){.buf = px, .total = (uint64_t)w * hh * 4, .w = w, .h = hh, .levels = 1, .png = true};
+    return true;
+}
+
+// <folder>/<hash>.dds, else <folder>/<hash>.png (a .dds is preferred when both are there)
+static bool hd_read(uint64_t h, const char *folder, HdData *o) {
+    char path[440];
+    snprintf(path, sizeof path, "%s/%016llx.dds", folder, (unsigned long long)h);
+    if (hd_read_dds(path, o)) return true;
+    snprintf(path, sizeof path, "%s/%016llx.png", folder, (unsigned long long)h);
+    return hd_read_png(path, o);
+}
+
+// The texture drawn from the pack's image from now on (the uploading thread: it records the upload)
+static bool hd_apply(NvnTexture *t, TexBackend *b, uint64_t h, const HdData *d) {
+    uint32_t w = d->w, hh = d->h, levels = d->levels;
+    VkFormat vf = d->vf;
+    if (d->png) {
+        levels = 1;
+        for (uint32_t m = w > hh ? w : hh; m > 1; m >>= 1) levels++;
+        vf = vk_format_is_srgb(b->format) ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    }
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
                             .imageType = VK_IMAGE_TYPE_2D, .format = vf, .extent = {w, hh, 1}, .mipLevels = levels,
                             .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
@@ -834,7 +820,7 @@ static bool hd_load_dds(NvnTexture *t, TexBackend *b, uint64_t h, const char *pa
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     VkImage img;
     VmaAllocation mem;
-    if (vmaCreateImage(g_vk.vma, &ci, &ai, &img, &mem, NULL) != VK_SUCCESS) { free(d); return false; }
+    if (vmaCreateImage(g_vk.vma, &ci, &ai, &img, &mem, NULL) != VK_SUCCESS) return false;
     destroy_image(b);
     b->image = img, b->mem = mem, b->format = vf;
     b->width = w, b->height = hh, b->depth = 1, b->layers = 1, b->levels = levels, b->samples = 1;
@@ -842,25 +828,236 @@ static bool hd_load_dds(NvnTexture *t, TexBackend *b, uint64_t h, const char *pa
     b->hd = true, b->sx = (float)w / (float)t->width, b->sy = (float)hh / (float)t->height;
     VkCommandBuffer cb = vk_upload_cmd();
     vk_image_init_layout(cb, img, VK_IMAGE_ASPECT_COLOR_BIT);
-    VkSpan sp = vk_transient(total, 16);
-    memcpy(sp.ptr, d + off, total);
-    free(d);
-    uint64_t at = 0;
-    for (uint32_t lv = 0; lv < levels; lv++) {
-        uint32_t lw = w >> lv ? w >> lv : 1, lh = hh >> lv ? hh >> lv : 1;
-        VkBufferImageCopy rg = {.bufferOffset = sp.off + at, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, 0, 1},
-                                .imageExtent = {lw, lh, 1}};
-        rec_CmdCopyBufferToImage(cb, sp.buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
-        at += (uint64_t)((lw + 3) / 4) * ((lh + 3) / 4) * bpb;
-    }
+    VkSpan sp = vk_transient(d->total, 16);
+    memcpy(sp.ptr, d->buf + d->off, d->total);
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
                            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                            .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    if (d->png) {
+        VkBufferImageCopy rg = {.bufferOffset = sp.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, hh, 1}};
+        rec_CmdCopyBufferToImage(cb, sp.buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+        for (uint32_t lv = 1; lv < levels; lv++) {  // each level a linear downsample of the one above
+            rec_CmdPipelineBarrier2(cb, &di);
+            int32_t sw = (int32_t)level_w(b, lv - 1), sh = (int32_t)level_h(b, lv - 1);
+            VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv - 1, 0, 1}, .srcOffsets = {{0, 0, 0}, {sw, sh, 1}},
+                              .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, 0, 1},
+                              .dstOffsets = {{0, 0, 0}, {(int32_t)level_w(b, lv), (int32_t)level_h(b, lv), 1}}};
+            rec_CmdBlitImage(cb, img, VK_IMAGE_LAYOUT_GENERAL, img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+        }
+    } else {
+        uint64_t at = 0;
+        for (uint32_t lv = 0; lv < levels; lv++) {
+            uint32_t lw = w >> lv ? w >> lv : 1, lh = hh >> lv ? hh >> lv : 1;
+            VkBufferImageCopy rg = {.bufferOffset = sp.off + at, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, 0, 1},
+                                    .imageExtent = {lw, lh, 1}};
+            rec_CmdCopyBufferToImage(cb, sp.buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+            at += (uint64_t)((lw + 3) / 4) * ((lh + 3) / 4) * d->bpb;
+        }
+    }
     rec_CmdPipelineBarrier2(cb, &di);
     static int n;
     if (n++ < 20) LOG("[tex] HD %016llx: %ux%u (%u levels) for %ux%u\n", (unsigned long long)h, w, hh, levels, t->width, t->height);
     return true;
+}
+
+// Read and applied at once, on the uploading thread (the button prompts; LARECOMP_TEX_HD_ASYNC=0: the pack too)
+static bool hd_replace(NvnTexture *t, TexBackend *b, uint64_t h) {
+    HdData d;
+    if (!hd_read(h, hd_folder(hd_find(h), h), &d)) return false;
+    bool ok = hd_apply(t, b, h, &d);
+    free(d.buf);
+    return ok;
+}
+
+// ---- the pack's textures read in the background
+// Reading a pack texture's file on the uploading (render) thread stopped the frame until it was read: ~85 ms for a
+// group of them as a scene loads, longer when Windows had to read them from the disk. Two worker threads read them
+// now; until a texture's image is read the game's own is drawn, and it switches to the pack's between two frames once
+// read (hd_pending_process, from the present) - a few frames later. The images read are kept in memory up to the
+// setting tex_hd_cache_mb (F1 > Textures > HD texture memory; 0: none), the ones used longest ago let go first: the
+// game frees and loads the same textures again and again (a menu, a battle, an area), and a texture whose image is
+// kept switches at its upload, as before, with no file read. LARECOMP_TEX_HD_ASYNC=0: read at the upload, as before.
+enum { HDC_NONE, HDC_QUEUED, HDC_READY, HDC_FAILED };
+// One per pack texture asked for (open addressing by hash; a slot stays its hash's once taken, its image comes and
+// goes). key 0 can't be told from an empty slot: such a hash is read at the upload.
+typedef struct { uint64_t h; int state; HdData d; uint64_t last_use, req_ns; } HdCacheEnt;
+static HdCacheEnt *hdc;
+static uint32_t hdc_cap, hdc_used;
+static uint64_t hdc_bytes;  // the images held (READY)
+typedef struct { uint64_t h; char folder[400]; } HdReq;
+#define HDQ_CAP 1024
+static HdReq hdq[HDQ_CAP];
+static uint32_t hdq_head, hdq_n;
+static pthread_mutex_t hdc_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t hdq_cv = PTHREAD_COND_INITIALIZER;
+typedef struct { NvnTexture *t; uint64_t h, since_frame; } HdWait;
+static HdWait hd_wait[4096];  // textures drawn from the game's image until their pack image is read
+static int hd_wait_n;
+// (the "[hdload]" line a minute) images read: count, bytes, ms from request to read (sum, longest); drawn from memory at
+// the upload; switched after waiting, frames waited (sum, longest); unreadable; no longer needed when read
+static uint64_t hds_read, hds_read_bytes, hds_read_ms, hds_read_max, hds_hits, hds_waited, hds_wait_frames, hds_wait_max;
+static uint64_t hds_failed, hds_dropped;
+
+static int hd_async(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = ENV("LARECOMP_TEX_HD_ASYNC"); on = !e || atoi(e) != 0; }
+    return on;
+}
+static HdCacheEnt *hdc_get(uint64_t h, bool add) {  // (hdc_lock held)
+    if (!h) return NULL;
+    if (!hdc) {
+        if (!add) return NULL;
+        uint32_t want = 1024;
+        while (want < 2u * (uint32_t)hd_sets[1].n + 64) want <<= 1;
+        hdc = calloc(want, sizeof *hdc);
+        if (!hdc) return NULL;
+        hdc_cap = want;
+    }
+    uint32_t m = hdc_cap - 1, i = (uint32_t)(h ^ (h >> 31)) & m;
+    for (uint32_t k = 0; k < hdc_cap; k++, i = (i + 1) & m) {
+        if (hdc[i].h == h) return &hdc[i];
+        if (!hdc[i].h) {
+            if (!add || hdc_used * 4 >= hdc_cap * 3) return NULL;  // (75% full: the rest are read at the upload)
+            hdc[i].h = h, hdc_used++;
+            return &hdc[i];
+        }
+    }
+    return NULL;
+}
+static void *hd_worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&hdc_lock);
+        while (!hdq_n) pthread_cond_wait(&hdq_cv, &hdc_lock);
+        HdReq r = hdq[hdq_head];
+        hdq_head = (hdq_head + 1) % HDQ_CAP, hdq_n--;
+        pthread_mutex_unlock(&hdc_lock);
+        HdData d;
+        bool ok = hd_read(r.h, r.folder, &d);
+        pthread_mutex_lock(&hdc_lock);
+        HdCacheEnt *e = hdc_get(r.h, false);
+        if (e && e->state == HDC_QUEUED) {
+            e->state = ok ? HDC_READY : HDC_FAILED;
+            if (ok) {
+                e->d = d, hdc_bytes += d.total;
+                uint64_t ms = (plat_now_ns() - e->req_ns) / 1000000;
+                hds_read++, hds_read_bytes += d.total, hds_read_ms += ms;
+                if (ms > hds_read_max) hds_read_max = ms;
+            } else hds_failed++;
+        } else if (ok) free(d.buf);
+        pthread_mutex_unlock(&hdc_lock);
+    }
+    return NULL;
+}
+static void hd_queue_read(HdCacheEnt *e, uint64_t h) {  // (hdc_lock held; the queue full: asked again next frame)
+    static bool started;
+    if (!started) {
+        started = true;
+        for (int i = 0; i < 2; i++) { pthread_t th; if (!pthread_create(&th, NULL, hd_worker, NULL)) pthread_detach(th); }
+    }
+    if (hdq_n == HDQ_CAP) return;
+    HdReq *r = &hdq[(hdq_head + hdq_n) % HDQ_CAP];
+    r->h = h;
+    snprintf(r->folder, sizeof r->folder, "%s", hd_folder(&hd_sets[1], h));
+    hdq_n++;
+    e->state = HDC_QUEUED, e->req_ns = plat_now_ns();
+    pthread_cond_signal(&hdq_cv);
+}
+static void hd_wait_add(NvnTexture *t, uint64_t h) {
+    uint64_t f = vk_frame_counter();
+    for (int i = 0; i < hd_wait_n; i++) if (hd_wait[i].t == t) { hd_wait[i].h = h, hd_wait[i].since_frame = f; return; }
+    if (hd_wait_n < 4096) hd_wait[hd_wait_n++] = (HdWait){t, h, f};
+}
+// Its image applied (the uploading thread). Without memory for them it is let go at once.
+static bool hd_use(NvnTexture *t, TexBackend *b, uint64_t h, HdCacheEnt *e) {
+    bool ok = hd_apply(t, b, h, &e->d);
+    e->last_use = vk_frame_counter();
+    if (g_settings.tex_hd_cache_mb <= 0) {
+        pthread_mutex_lock(&hdc_lock);
+        hdc_bytes -= e->d.total;
+        free(e->d.buf);
+        e->d.buf = NULL, e->state = HDC_NONE;
+        pthread_mutex_unlock(&hdc_lock);
+    }
+    return ok;
+}
+// At a pack texture's upload: 1 its image was in memory and is drawn now; 0 it is being read (the game's image is
+// drawn meanwhile); -1 none to be had (read failed)
+static int hd_request(NvnTexture *t, TexBackend *b, uint64_t h) {
+    if (!hd_async() || hd_find(h) != &hd_sets[1]) return hd_replace(t, b, h) ? 1 : -1;
+    pthread_mutex_lock(&hdc_lock);
+    HdCacheEnt *e = hdc_get(h, true);
+    if (!e) { pthread_mutex_unlock(&hdc_lock); return hd_replace(t, b, h) ? 1 : -1; }
+    int st = e->state;
+    if (st == HDC_NONE) hd_queue_read(e, h);
+    pthread_mutex_unlock(&hdc_lock);
+    if (st == HDC_READY) { hds_hits++; return hd_use(t, b, h, e) ? 1 : -1; }  // (a READY entry only changes on this thread)
+    if (st == HDC_FAILED) return -1;
+    hd_wait_add(t, h);
+    return 0;
+}
+// Between frames (vk_texdump_process): the textures whose pack image has been read switch to it; the memory kept is
+// brought back under the setting; a line a minute
+static void hd_pending_process(void) {
+    uint64_t frame = vk_frame_counter();
+    int k = 0;
+    for (int i = 0; i < hd_wait_n; i++) {
+        HdWait w = hd_wait[i];
+        TexBackend *b = w.t ? w.t->backend : NULL;
+        if (!b || hd_on <= 0 || b->hd || b->data_hash != w.h || !b->image || !hd_candidate(w.t, b)) { hds_dropped++; continue; }
+        pthread_mutex_lock(&hdc_lock);
+        HdCacheEnt *e = hdc_get(w.h, false);
+        int st = e ? e->state : HDC_FAILED;
+        if (e && st == HDC_NONE) hd_queue_read(e, w.h);  // (let go before it was used, or the queue was full: asked again)
+        pthread_mutex_unlock(&hdc_lock);
+        if (st == HDC_READY) {
+            hd_use(w.t, b, w.h, e);
+            uint64_t f = frame - w.since_frame;
+            hds_waited++, hds_wait_frames += f;
+            if (f > hds_wait_max) hds_wait_max = f;
+            continue;
+        }
+        if (st == HDC_FAILED) continue;
+        hd_wait[k++] = w;
+    }
+    hd_wait_n = k;
+    // (the pack switched off in F1: everything kept goes)
+    uint64_t budget = hd_on > 0 && g_settings.tex_hd_cache_mb > 0 ? (uint64_t)g_settings.tex_hd_cache_mb << 20 : 0;
+    for (int n = 0; n < 64 && hdc && hdc_bytes > budget; n++) {  // the images used longest ago go (a few a frame)
+        HdCacheEnt *old = NULL;
+        for (uint32_t i = 0; i < hdc_cap; i++)
+            if (hdc[i].state == HDC_READY && (!old || hdc[i].last_use < old->last_use)) old = &hdc[i];
+        if (!old) break;
+        bool waited_for = false;  // (one a texture is still waiting for stays)
+        for (int i = 0; i < hd_wait_n && !waited_for; i++) waited_for = hd_wait[i].h == old->h;
+        if (waited_for) break;
+        pthread_mutex_lock(&hdc_lock);
+        hdc_bytes -= old->d.total;
+        free(old->d.buf);
+        old->d.buf = NULL, old->state = HDC_NONE;
+        pthread_mutex_unlock(&hdc_lock);
+    }
+    static uint64_t last_log;
+    uint64_t now = plat_now_ns();
+    if (!last_log) last_log = now;
+    if (now - last_log >= 60000000000ull) {
+        last_log = now;
+        if (hds_read || hds_hits || hds_waited || hds_failed) {
+            uint32_t held = 0;
+            for (uint32_t i = 0; hdc && i < hdc_cap; i++) held += hdc[i].state == HDC_READY;
+            LOG("[hdload] last minute: %llu images read in the background (%.1f MB, %.0f ms on average from the request, "
+                "longest %llu ms), %llu drawn from memory at once, %llu switched after %.1f frames on average (longest %llu); "
+                "%llu unreadable, %llu no longer needed; in memory: %u images, %.0f of %d MB\n",
+                (unsigned long long)hds_read, hds_read_bytes / 1048576.0, hds_read ? (double)hds_read_ms / hds_read : 0.0,
+                (unsigned long long)hds_read_max, (unsigned long long)hds_hits, (unsigned long long)hds_waited,
+                hds_waited ? (double)hds_wait_frames / hds_waited : 0.0, (unsigned long long)hds_wait_max,
+                (unsigned long long)hds_failed, (unsigned long long)hds_dropped, held, hdc_bytes / 1048576.0,
+                g_settings.tex_hd_cache_mb);
+        }
+        hds_read = hds_read_bytes = hds_read_ms = hds_read_max = hds_hits = hds_waited = hds_wait_frames = hds_wait_max = 0;
+        hds_failed = hds_dropped = 0;
+    }
 }
 
 // F1 > Textures (setting tex_hd) changed: between frames, every live texture goes back to the game's image or is
@@ -987,12 +1184,14 @@ static void lm_process(void) {
 
 static void hd_forget(NvnTexture *t) {
     for (int i = 0; i < hd_qn; i++) if (hd_q[i].t == t) hd_q[i].t = NULL;
+    for (int i = 0; i < hd_wait_n; i++) if (hd_wait[i].t == t) hd_wait[i].t = NULL;
     for (int i = 0; i < lm_qn; i++) if (lm_q[i].t == t) lm_q[i].t = NULL;
 }
 
 void renderer_save_texture_tex(TexBackend *b, const char *path);
 void vk_texdump_process(void) {  // (device.c backend_present_now, each frame)
     hd_switch();
+    hd_pending_process();
     if (!hd_qn) return;
     int done = 0, k = 0;
     for (int i = 0; i < hd_qn; i++) {
@@ -1240,7 +1439,8 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
         return;
     }
     if (hd_candidate(t, b)) {
-        if (hd_has(h) && hd_replace(t, b, h)) return;
+        // (a pack texture: drawn from its image now when it is in memory, else the game's below until it is read)
+        if (hd_has(h) && hd_request(t, b, h) > 0) return;
         if (hd_dump) hd_queue_dump(t, h);
         if (lm_listed(h)) lm_queue(t, h);
     }

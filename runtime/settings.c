@@ -60,6 +60,7 @@ Settings g_settings = {
     .smooth_anim = true,  // (Pokémon Z-A 2.0.2: distant characters animate every frame)
     .frame_dt = true,    // (Pokémon Z-A: the world step from a wall-clock accumulator - the same speed at any frame rate)
     .tex_hd = true,
+    .tex_hd_cache_mb = 512,
     .taa_render = 100,
     .shadow_res = 1,
     .shadow_sharp = 1,
@@ -323,6 +324,7 @@ void settings_load(void) {
         else if (!strcmp(key, "operation_mode")) g_settings.opmode = !strcmp(val, "handheld") ? 2 : !strcmp(val, "docked") ? 1 : 0;
         else if (!strcmp(key, "dynamic_res")) g_settings.game_drs = !strcmp(val, "game");
         else if (!strcmp(key, "tex_hd")) g_settings.tex_hd = atoi(val) != 0;
+        else if (!strcmp(key, "tex_hd_cache_mb")) { int v = atoi(val); g_settings.tex_hd_cache_mb = v < 0 ? 0 : v > 8192 ? 8192 : v; }
         else if (!strcmp(key, "shadow_resolution")) { int v = atoi(val); g_settings.shadow_res = v < 1 ? 1 : v > 4 ? 4 : v; }
         else if (!strcmp(key, "shadow_sharpness")) { int v = atoi(val); g_settings.shadow_sharp = v < 1 ? 1 : v > 4 ? 4 : v; }
         else if (!strcmp(key, "ambient_occlusion")) { int v = atoi(val); g_settings.gtao = v < 0 ? 0 : v > 3 ? 3 : v; }
@@ -466,6 +468,7 @@ void settings_save(void) {
     fprintf(f, "operation_mode = %s\n", g_settings.opmode == 2 ? "handheld" : g_settings.opmode == 1 ? "docked" : "auto");
     fprintf(f, "dynamic_res = %s\n", g_settings.game_drs ? "game" : "off");
     fprintf(f, "tex_hd = %d\n", g_settings.tex_hd);
+    fprintf(f, "tex_hd_cache_mb = %d\n", g_settings.tex_hd_cache_mb);
     fprintf(f, "shadow_resolution = %d\n", g_settings.shadow_res);
     fprintf(f, "shadow_sharpness = %d\n", g_settings.shadow_sharp);
     fprintf(f, "ambient_occlusion = %d\n", g_settings.gtao);

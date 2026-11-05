@@ -60,7 +60,11 @@ bool widescreen_ui_pane_partial(const float *u, uint64_t size) {
 // Off in rooms that should keep 16:9 framing (interiors, dungeons) -- see widescreen_update.
 static bool g_allowed = true;
 static bool g_indoor;
-bool widescreen_allowed(void) { return g_allowed && g_settings.aspect == ASPECT_UNLOCKED && !ENV("LARECOMP_NO_WIDESCREEN"); }
+// (Link's Awakening only: Pokémon Z-A's camera is always 16:9, so a wider window filled with it was the 16:9 picture
+// stretched - #176, 3440x1440 with aspect = unlocked, za-default.ini's value, and the F1 row hidden since #160)
+bool widescreen_allowed(void) {
+    return g_game_is_la && g_allowed && g_settings.aspect == ASPECT_UNLOCKED && !ENV("LARECOMP_NO_WIDESCREEN");
+}
 void widescreen_set_allowed(bool on) { g_allowed = on; }
 
 // Interiors and dungeons use cameras that never load the patched overworld aspect (site 0). Count

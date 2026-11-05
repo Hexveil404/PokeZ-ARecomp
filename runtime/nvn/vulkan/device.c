@@ -557,6 +557,8 @@ void vk_bad_code_note(void) {
     rt_gpu_bad_code = n;
     LOG("[vk] the GPU met an invalid instruction (%d on this driver): pipeline cache deleted%s\n", n,
         n >= 2 ? ", the next start builds pipelines without optimization" : "");
+    extern void vk_bad_code_suspects(void);
+    vk_bad_code_suspects();
 }
 
 // The driver's shader compiler itself can crash on one pipeline (#93, RTX 5060 Ti, 621.01: always nvgpucomp64.dll+3ec30c0, in
@@ -580,7 +582,38 @@ static void bad_shaders_load(void) {
         if (drv == g_vk.props.driverVersion) bad_sh[n].vs = v, bad_sh[n++].fs = s;
     fclose(f);
     nbad_sh = n;
-    if (n) LOG("[vk] %d pipeline(s) skipped: this driver's compiler crashes on them\n", n);
+    if (n) LOG("[vk] %d pipeline(s) skipped: this driver's compiler crashes on them, or gave the GPU bad code near them (%s)\n", n,
+               BAD_SHADERS_FILE);
+}
+// An invalid instruction on the GPU (vk_bad_code_note) names no pipeline, and a new cache and no optimization don't help
+// (#180: RTX 5060 Ti, 610.88 then 621.14, Houndoom's Snarl every time - #93's move, where the compiler crashed instead).
+// The driver's bad code runs from its first use, so the pipelines first used in the 5 s before the GPU stopped (exec.c
+// vk_first_use_recent: the move's effects) join cache/gpu_bad_shaders: from the next start they are never built and
+// their draws are skipped, so the move plays without those effects instead of stopping the game. Another fault adds
+// the next ones. Per driver, as the list: a new driver starts clean. LARECOMP_VK_BAD_CODE_SUSPECTS=0 off
+bool vk_shader_bad(uint64_t vs, uint64_t fs);
+void vk_bad_code_suspects(void) {
+    const char *e = getenv("LARECOMP_VK_BAD_CODE_SUSPECTS");
+    if (e && !atoi(e)) return;
+    extern int vk_first_use_recent(uint64_t window, uint64_t age, uint64_t (*out)[2], int max);
+    uint64_t s[24][2];
+    int m = vk_first_use_recent(5000, 30000, s, 24);
+    pthread_mutex_lock(&bad_sh_lock);
+    FILE *f = fopen(BAD_SHADERS_FILE, "a");
+    int added = 0;
+    for (int i = 0; i < m; i++) {
+        if (vk_shader_bad(s[i][0], s[i][1])) continue;
+        int n = atomic_load(&nbad_sh);
+        if (n < BAD_SHADERS_MAX) bad_sh[n].vs = s[i][0], bad_sh[n].fs = s[i][1], atomic_store(&nbad_sh, n + 1);
+        if (f) fprintf(f, "%u %llx %llx\n", g_vk.props.driverVersion, (unsigned long long)s[i][0], (unsigned long long)s[i][1]);
+        LOG("[vk]   first used just before it: %s %016llx %s %016llx - skipped from the next start\n", s[i][1] == 0x6373 ? "cs" : "vs",
+            (unsigned long long)s[i][0], s[i][1] == 0x6373 ? "" : "fs", (unsigned long long)(s[i][1] == 0x6373 ? 0 : s[i][1]));
+        added++;
+    }
+    if (f) fclose(f);
+    pthread_mutex_unlock(&bad_sh_lock);
+    LOG("[vk] %d pipeline(s) first used in the 5 s before the GPU stopped: skipped from the next start (%s)\n", added,
+        BAD_SHADERS_FILE);
 }
 bool vk_shader_bad(uint64_t vs, uint64_t fs) {
     int n = atomic_load(&nbad_sh);

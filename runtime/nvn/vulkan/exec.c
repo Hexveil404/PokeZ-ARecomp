@@ -3051,7 +3051,37 @@ typedef struct {
     FixedState fx;    // (no extended dynamic state only: what draw_ sets as dynamic state otherwise)
 } PipeKey;
 
-typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; } Pipe;  // state: 0 building, 1 ready, 2 failed
+typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; _Atomic int used; } Pipe;  // state: 0 building, 1 ready, 2 failed
+// Pipelines by the time of their first draw / dispatch, for device.c vk_bad_code_suspects: an invalid instruction on the
+// GPU (#180, RTX 5060 Ti, 610.88 and 621.14: Houndoom's Snarl in battle, every time) names no shader, but the driver's
+// bad code runs from its first use, so the culprit is among the pipelines first used just before the fault
+#define FIRST_USES 128
+static struct { uint64_t vs, fs, ms; } first_uses[FIRST_USES];
+static _Atomic unsigned nfirst_uses;
+static void first_use(_Atomic int *used, uint64_t vs, uint64_t fs) {
+    if (atomic_exchange(used, 1)) return;
+    unsigned i = atomic_fetch_add(&nfirst_uses, 1) % FIRST_USES;
+    first_uses[i].vs = vs, first_uses[i].fs = fs, first_uses[i].ms = SDL_GetTicks();
+}
+// The pipelines first used within `window` ms before the newest first use, newest first (at most max; their two hashes, as
+// cache/gpu_bad_shaders). From the newest, not from now: once the GPU stops, nothing new is drawn, and the device loss is
+// only seen seconds later (#180: the move's pipelines at 142-146 s, the fault at 147.6 s, its report at ~150 s). None if
+// the newest is older than `age` ms (a fault with nothing new before it)
+int vk_first_use_recent(uint64_t window, uint64_t age, uint64_t (*out)[2], int max) {
+    unsigned n = atomic_load(&nfirst_uses), k = n < FIRST_USES ? n : FIRST_USES;
+    if (!k) return 0;
+    uint64_t newest = first_uses[(n - 1) % FIRST_USES].ms;
+    if (SDL_GetTicks() - newest > age) return 0;
+    int m = 0;
+    for (unsigned j = 0; j < k && m < max; j++) {
+        unsigned i = (n - 1 - j) % FIRST_USES;
+        if (newest - first_uses[i].ms > window) break;
+        bool dup = false;
+        for (int q = 0; q < m; q++) dup |= out[q][0] == first_uses[i].vs && out[q][1] == first_uses[i].fs;
+        if (!dup) out[m][0] = first_uses[i].vs, out[m][1] = first_uses[i].fs, m++;
+    }
+    return m;
+}
 // (planar reflections, below the water reflections) a captured draw's call: kind 0 draw, 1 indexed, 2 GPU-indirect
 typedef struct { int kind; bool indexed; VkBuffer buf; VkDeviceSize off; uint32_t a, b, c, e; int32_t d; } PlDrawCall;
 static bool planar_on(void);
@@ -6720,7 +6750,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
 }
 
 // ================================================================== compute
-typedef struct { Prog p; ShaderInfo *si; VkPipeline pipe; uint32_t local[3]; uint64_t code; } CsProg;
+typedef struct { Prog p; ShaderInfo *si; VkPipeline pipe; uint32_t local[3]; uint64_t code, gh; _Atomic int used; } CsProg;  // (gh: the GLSL's hash, first_use)
 
 // Compute programs run in 32-lane subgroups, as Maxwell's warps do. The game's compute shaders use ballot / shuffle / vote on a 32-lane warp (Pokémon Z-A's GPU culling
 // counts the visible instances of a batch with ballot + a leader's atomicAdd); AMD drivers run compute in 64-lane waves by default (RADV), where those counts are wrong:
@@ -6787,6 +6817,7 @@ static void build_compute(void *arg) {
     }
     extern __thread uint64_t t_build_vs, t_build_fs;
     t_build_vs = gh, t_build_fs = cs_mark;
+    cp->gh = gh;
     t_build_state = &cp->p.state, t_build_slot = bs;
     VkResult r = vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &cp->pipe);
     t_build_vs = t_build_fs = 0;
@@ -7248,6 +7279,7 @@ static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz) {
     }
     if (cp->si->uses_gmem_map) gfast_prepare(cb);
     VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL, NULL, NULL);
+    if (!atomic_load_explicit(&cp->used, memory_order_relaxed)) first_use(&cp->used, cp->gh, 0x6373);
     rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
     if (gc_shift && cp->si->uses_gmem) gmem_chunk_bind(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, GMEM_CHUNK_SET(STAGE_COMPUTE), 1u << STAGE_COMPUTE);
@@ -7991,6 +8023,7 @@ static void draw_(CmdRec *r, bool indexed) {
         if (ps != 1 && !rec_wait_pipes() && !wait_built(&pp->state, r, indexed, true)) { SKIP(SK_PIPE_BUILDING); return; }
     }
     ss_enabled();
+    if (!atomic_load_explicit(&pp->used, memory_order_relaxed)) first_use(&pp->used, pp->k.prog->hash[0], pp->k.prog->hash[1]);
     if (ss_need(SS_PIPE, ss.pipe == pp)) { ss.pipe = pp; rec_CmdBindPipelineObj(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp); }
     if (g_vk.vids && ss_need(SS_VI, !memcmp(&ss.vi, &vl, sizeof vl))) { ss.vi = vl; set_vertex_input(cb, &vl); }
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;

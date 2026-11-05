@@ -34,6 +34,34 @@
 #define SEP "/"
 #endif
 
+// zig's caches live in the install folder (zig-cache), but under Wine / Proton zig can fail to make its manifest files
+// there: "checking cache failed: manifest_create Unexpected" on the first file, every build (#165: a Steam Deck, the
+// folder in the Linux home through Z:, and on another drive H:), where zig doesn't know the error Wine gave back. Once
+// per build the caches move to the user's own local folder (%LOCALAPPDATA%\ZA Recomp\zig-cache: inside the Wine
+// prefix's C: drive; else the temp folder) and that file is compiled again. Logged with zig's message.
+static int zig_cache_moved;
+static bool zig_cache_elsewhere(const char *msg) {
+    zig_cache_moved = 1;
+    const char *base = getenv("LOCALAPPDATA");
+    if (!base || !*base) base = getenv("TEMP");
+    if (!base || !*base) base = getenv("TMPDIR");
+    if (!base || !*base) return false;
+    char d[1200];
+    snprintf(d, sizeof d, "%s" SEP "ZA Recomp", base);
+    mkdir(d, 0755);
+    strlcat(d, SEP "zig-cache", sizeof d);
+    mkdir(d, 0755);
+#ifdef _WIN32
+    _putenv_s("ZIG_GLOBAL_CACHE_DIR", d);
+    _putenv_s("ZIG_LOCAL_CACHE_DIR", d);
+#else
+    setenv("ZIG_GLOBAL_CACHE_DIR", d, 1);
+    setenv("ZIG_LOCAL_CACHE_DIR", d, 1);
+#endif
+    rt_launcher_log("[gamebuild] zig couldn't use its cache in the install folder (%s): its cache is now %s, trying again\n", msg, d);
+    return true;
+}
+
 // ------------------------------------------------------------------ child processes
 // Every one running, so that quitting mid-build ends them too (atexit) instead of leaving compilers behind.
 #define MAX_PROCS 80
@@ -462,6 +490,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         build_cache_close(cache);
         return false;
     }
+    zig_cache_moved = 0;
     if (t.zig) {  // keep its caches with this installation; the explicit Clear action removes them too
         // (an absolute path, made here: zig under Wine / Proton couldn't open the relative one - "unable to open
         // global cache directory: Unexpected" on the Steam Deck, issue #79)
@@ -588,6 +617,15 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             // (the generated C compiles everywhere, so a failure is the compiler dying: on #116 clang crashed on main_569 in
             // one build and main_016 in the next, 12 jobs on 16 GB. Each file gets two more tries, with half the jobs: a
             // crash here cost a player the whole build. A real error costs a few seconds and still ends as one)
+            if (r != 0 && t.zig && zig_cache_moved < 1) {  // (zig's cache refused in the install folder: zig_cache_elsewhere)
+                char last[300];
+                log_tail(u->log, last, sizeof last);
+                if ((strstr(last, "manifest_create") || strstr(last, "checking cache failed") || strstr(last, "cache directory")) &&
+                    zig_cache_elsewhere(last)) {
+                    PlatProc p = start_compile(&t, u);
+                    if (p) { run[k].p = p; continue; }
+                }
+            }
             if (r != 0 && u->tries < 2) {
                 char last[300];
                 log_tail(u->log, last, sizeof last);

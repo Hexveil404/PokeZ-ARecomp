@@ -1609,22 +1609,38 @@ static void present_recover(const char *why) {
 // What the screen really shows (#15, v0.1.8: the window froze again with the presents reported as shown - the
 // compositor kept an old image of the window): once a second, a hash of the desktop over the window (platform:
 // Windows, foreground window only). The game's image changing all along while the screen's stays the same for 3 s:
-// present_recover. LARECOMP_NO_SCREEN_WATCH=1: off; LARECOMP_TEST_SCREEN_STALE=1: a screen that never changes
-// (also hidden / unfocused windows: tests the recovery).
+// present_recover. A recovery after which the grab never changed before the next one did nothing it could see: the
+// grab is blind to the game's frames, and the watch stops for the session (#170: an RTX 4060 at 60 fps, the picture
+// moving all along, got a new swapchain - a flicker, a 60-95 ms frame - every 4 s; also where the desktop isn't
+// what's shown: frames flipped to the display without the compositor, streaming, a screen turned off. #15's freeze
+// ends with the new swapchain, the grab changing again). LARECOMP_NO_SCREEN_WATCH=1: off;
+// LARECOMP_TEST_SCREEN_STALE=1: a screen that never changes over a game image that always does (any scene, also
+// hidden / unfocused windows: one recovery, then off).
 bool plat_window_screen_hash(void *hwnd, uint32_t *out);  // (runtime/platform: false = can't tell)
 static int screen_watch(void *arg) {
     (void)arg;
     bool test = ENV("LARECOMP_TEST_SCREEN_STALE") != NULL, have = false;
+    bool fired = false, moved = false;  // (a recovery asked for; the grab changed since)
     uint32_t last_scr = 0, last_img = 0;
     int stale = 0;
     for (;;) {
         SDL_Delay(1000);
         void *hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
         uint32_t scr = 0, img = atomic_load(&g_img_changes);
-        if (!test && !plat_window_screen_hash(hwnd, &scr)) { have = false, stale = 0; continue; }
-        stale = have && scr == last_scr && img - last_img >= 5 ? stale + 1 : 0;  // (the game's image moving meanwhile)
+        // (in the background or minimised: can't tell - and the window shown anew after it, a recovery counts again)
+        if (!test && !plat_window_screen_hash(hwnd, &scr)) { have = fired = false, stale = 0; continue; }
+        if (have && scr != last_scr) moved = true;
+        // (the game's image moving meanwhile)
+        stale = have && scr == last_scr && (img - last_img >= 5 || test) ? stale + 1 : 0;
         have = true, last_scr = scr, last_img = img;
-        if (stale >= 3) { atomic_store(&g_screen_stale, true); stale = 0; }
+        if (stale < 3) continue;
+        if (fired && !moved) {
+            LOG("[vk] the screen grab didn't change after a new swapchain either: it can't see the game's frames here "
+                "(frames flipped to the display, streaming, a screen turned off) - screen watch off\n");
+            return 0;
+        }
+        atomic_store(&g_screen_stale, true);
+        stale = 0, fired = true, moved = false;
     }
     return 0;
 }

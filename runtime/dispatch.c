@@ -151,7 +151,7 @@ RtJmp *rt_setjmp_site(Cpu *c, uint64_t ret) {
     return j;
 }
 
-// Pokemon Z-A, main 8A1C86C437394B69: two start-up steps that the game only reaches through pointers, on different
+// Pokemon Z-A, main 8A1C86C437394B69 (2.0.0; 2.0.2 below): two start-up steps that the game only reaches through pointers, on different
 // threads. f_7000ac2a2c stores a delegate in the object at 0x7006109cc0 (+0xc0), but silently does nothing if that object
 // isn't ready yet (its flag at +0x140); f_7000bbb0dc then calls the delegate (f_7000bbb174) without checking it. So a step
 // that came too early ends much later in "no function at 0 (lr=7000bbb1ac)": #101 #111, both on a slow first start, both
@@ -159,15 +159,27 @@ RtJmp *rt_setjmp_site(Cpu *c, uint64_t ret) {
 // Skipping the empty delegate is no way out (the game then stays on an empty screen for good), so each step waits for
 // what it needs, within reason. The "[boot]" lines tell which case a report was. LARECOMP_BOOT_DELEGATE_WAIT=0: no waits.
 // LARECOMP_TEST_OBJECT_LATE=<ms>: the object seems not ready at the first step for that long (with no waits: the crash).
-#define BOOT_DELEGATE_OBJ 0x7006109cc0ull
-#define BOOT_DELEGATE_SET 0x7000ac2a2cull
-#define BOOT_DELEGATE_USE 0x7000bbb0dcull
+// The same two steps on 2.0.2 (main B1F12FD919EAE86A): #157's "accessing 0" at lr 7000bb9d9c is f_7000bb9d64+0x38, the
+// twin of 2.0.0's f_7000bbb174+0x38. Found by matching the functions (immediates masked: 20 of 20 / 19 of 20 words)
+// and the object's adrp+add in both the store and the call - the code around them is the same, so are the offsets
+typedef struct { uint8_t id[8]; uint64_t obj, set, use; } BootDelegate;
+static const BootDelegate boot_delegates[] = {
+    {{0x8A, 0x1C, 0x86, 0xC4, 0x37, 0x39, 0x4B, 0x69}, 0x7006109cc0ull, 0x7000ac2a2cull, 0x7000bbb0dcull},  // 2.0.0
+    {{0xB1, 0xF1, 0x2F, 0xD9, 0x19, 0xEA, 0xE8, 0x6A}, 0x700610ecc0ull, 0x7000ac321cull, 0x7000bb9cccull},  // 2.0.2
+};
+static const BootDelegate *g_bd;  // (this game's entry: boot_delegate_build)
+#define BOOT_DELEGATE_OBJ (g_bd->obj)
+#define BOOT_DELEGATE_SET (g_bd->set)
+#define BOOT_DELEGATE_USE (g_bd->use)
 #define BOOT_OBJ_READY ((volatile uint32_t *)(uintptr_t)(BOOT_DELEGATE_OBJ + 0x140))
 #define BOOT_OBJ_DONE ((volatile uint8_t *)(uintptr_t)(BOOT_DELEGATE_OBJ + 0x100))
 #define BOOT_OBJ_FN ((volatile uint64_t *)(uintptr_t)(BOOT_DELEGATE_OBJ + 0xc0 + 0x20))
 static bool boot_delegate_build(void) {
-    static const uint8_t id[8] = {0x8A, 0x1C, 0x86, 0xC4, 0x37, 0x39, 0x4B, 0x69};
-    return !g_game_is_la && !memcmp(g_main_build_id, id, sizeof id);
+    if (g_game_is_la) return false;
+    if (!g_bd)
+        for (size_t i = 0; i < sizeof boot_delegates / sizeof *boot_delegates; i++)
+            if (!memcmp(g_main_build_id, boot_delegates[i].id, 8)) g_bd = &boot_delegates[i];
+    return g_bd != NULL;
 }
 static bool boot_wait_on(void) {
     const char *e = getenv("LARECOMP_BOOT_DELEGATE_WAIT");
@@ -204,8 +216,8 @@ static void boot_delegate_use(Cpu *c) {
 
 __attribute__((noinline)) static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
-    if (pc == BOOT_DELEGATE_SET && boot_delegate_build()) return boot_delegate_set;
-    if (pc == BOOT_DELEGATE_USE && boot_delegate_build()) return boot_delegate_use;
+    if (boot_delegate_build() && pc == BOOT_DELEGATE_SET) return boot_delegate_set;
+    if (boot_delegate_build() && pc == BOOT_DELEGATE_USE) return boot_delegate_use;
     if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
         rt_unwind_point();  // (HLE calls aren't cached below, so every one passes here: a reboot's safe point)
         int i = (int)((pc - HLE_BASE) / 16);

@@ -9964,10 +9964,14 @@ static bool fsr2_copy(Prog *pr) {
     uint64_t f = vk_frame_counter();
     NvnTexture *dst = st.rt.color[0];
     TexBackend *db = dst ? dst->backend : NULL;
+    // (once a frame: FSR has resolved this frame's scene already - #175, the Bag menu: its full-screen background drawn
+    // unblended into the shown image afterwards, from a mipmapped picture whose blurred levels it reads, went through
+    // FSR as a second "copy" and showed as a mosaic of mip 0's stale squares. A copy's source has one level)
+    if (fsr2_ok_frame == f) return false;
     if (!db || st.color_state[0] || !db->presented || mv_frame[0] != f || !mv_depth || !mv_depth->backend) return false;
     NvnTexture *src = frag_tex(pr, 0);
     TexBackend *sb = src ? src->backend : NULL, *zb = mv_depth->backend;
-    if (!sb || !sb->image || src == dst || sb->width != db->width || sb->height != db->height || sb->width != zb->width ||
+    if (!sb || !sb->image || src == dst || sb->levels > 1 || sb->width != db->width || sb->height != db->height || sb->width != zb->width ||
         sb->height != zb->height || (sb->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT))
         return false;
     // (the shown image drawn in a part too - Dynamic resolution: the game's own copy. The picture and its depth drawn

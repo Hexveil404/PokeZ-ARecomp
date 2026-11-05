@@ -1326,7 +1326,14 @@ static void create_swapchain(void) {
     }
 }
 
+// Swapchains made anew and image acquires over 250 ms: the window resized, maximised, switched to fullscreen. #178: an
+// RX 9070 XT's acquire blocked ~2 s for 3-4 frames at each resize step - a border dragged across several steps was 5
+// "slow" seconds, and the 60 fps setting went back to 30 for the session (runtime/hle/framepace.c: seconds with one
+// count neither way, as shader builds)
+static _Atomic uint64_t g_window_stalls;
+uint64_t vk_window_stalls(void) { return atomic_load(&g_window_stalls); }
 static void recreate_swapchain(void) {
+    atomic_fetch_add(&g_window_stalls, 1);
     rec_drain();  // (every queued present and submission made: the queue is idle for the wait)
     vkDeviceWaitIdle(g_vk.dev);
     create_swapchain();
@@ -1398,7 +1405,9 @@ bool vk_frame_begin(const float clear[4]) {
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
     WAITING_AT(0, vk_wait_seq(slot_seq[slot]));
     VkResult r;
+    uint64_t acq0 = plat_now_ns();
     WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image));
+    if (plat_now_ns() - acq0 > 250000000ull) atomic_fetch_add(&g_window_stalls, 1);  // (vk_window_stalls)
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         recreate_swapchain();
         WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE,

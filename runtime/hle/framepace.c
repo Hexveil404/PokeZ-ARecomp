@@ -52,7 +52,7 @@ uint32_t rt_frame_steps(uint32_t interval) {
 // building right after the switch), the game goes back to 30 fps for the rest of the session and the overlay says so
 // (menu_notice). Choosing 60 again in F1 tries again. LARECOMP_FPS=30: as is; LARECOMP_FPS=60 or F1's "60 fps (always)"
 // (fps60_lock): 60, no backing off - for players who'd rather have some slow motion than 30 fps.
-// Seconds spent building shaders count neither way (#22: an RX 9070 XT with a cold pipeline cache had three 1-2 s
+// Seconds spent building shaders, or resizing the window (#178), count neither way (#22: an RX 9070 XT with a cold pipeline cache had three 1-2 s
 // shader stalls in a battle and went back to 30 for the session, holding 60 otherwise).
 #include "../settings.h"
 #include "../platform.h"
@@ -86,6 +86,11 @@ static bool fps60_holds(void) {
     uint64_t b = renderer_shader_builds();
     bool building = (b >> 63) || (b & ~(1ull << 63)) - (b0 & ~(1ull << 63)) >= 2;  // (one now, or a few this second)
     b0 = b;
+    // (nor seconds with the window resized - a new swapchain or a long image acquire, vulkan/device.c, #178)
+    extern uint64_t vk_window_stalls(void) __attribute__((weak));
+    static uint64_t w0;
+    uint64_t wn = vk_window_stalls ? vk_window_stalls() : 0;
+    if (wn != w0) building = true, w0 = wn;
     if (!building) slow = fps < min ? slow + 1 : 0;
     if (slow < FPS60_SLOW_S) return true;
     g_fps60_fell_back = true;

@@ -645,6 +645,22 @@ static void tab_display(bool in_game) {
                           "textura - mais nítido, usa mais memória da GPU.")))
             g_settings.tex_hd = tx == 1;
     }
+    if (g_settings.tex_hd) {  // the pack's images kept in memory once read (textures.c hd_pending_process): applies at once
+        static const int mb[] = {0, 256, 512, 1024, 2048};
+        const char *mbs[] = {TR("Off", "Desligada"), "256 MB", "512 MB", "1 GB", "2 GB"};
+        int ci = 2;
+        for (int i = 0; i < 5; i++) if (mb[i] == g_settings.tex_hd_cache_mb) ci = i;
+        if (opt_choice(TR("HD texture memory", "Memória de texturas HD"), &ci, mbs, 5, 2,
+                       TR("How much RAM keeps the HD pack's images once read from the disk. The game loads the same "
+                          "textures again and again (menus, battles, areas): kept ones show in HD at once, the others "
+                          "are read in the background and show in HD a few frames later. More: fewer reads, more RAM. "
+                          "Off: every one read from the disk again.",
+                          "Quanta RAM guarda as imagens do pacote HD depois de lidas do disco. O jogo carrega as mesmas "
+                          "texturas de novo e de novo (menus, batalhas, áreas): as guardadas aparecem em HD na hora, as "
+                          "outras são lidas em segundo plano e aparecem em HD alguns quadros depois. Mais: menos leituras, "
+                          "mais RAM. Desligada: cada uma lida do disco de novo.")))
+            g_settings.tex_hd_cache_mb = mb[ci];
+    }
 
     opt_section(TR("Rendering", "Renderização"));
     // display order -> RES_* (the ini / enum order predates the menu order)

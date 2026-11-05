@@ -79,6 +79,7 @@ typedef struct {
     bool water_depth;    // water: deeper is darker and bluer (from its real depth), in the same pass
     bool water_caustics; // water: moving light patterns on the floor under it
     bool water_vivid;    // water: a more turquoise, slightly glowing look (stylized; off: the game's colours)
+    int tex_hd_cache_mb;    // HD pack images kept in memory once read (MB; 0: none): vulkan/textures.c hd_pending_process
     bool tex_hd, tex_dump;  // HD texture packs (textures/hd) on; dump the game's textures (textures/dump): vulkan/textures.c
     int shadow_res;    // 1-4: shadow maps drawn at that many times the game's size, from the next start (vulkan/textures.c)
     int shadow_sharp;  // 1-4: the game's shadow filter that many times narrower, up to shadow_res (vulkan/exec.c)

@@ -981,6 +981,19 @@ static void emit_atom(Ctx *c, uint64_t w, bool red) {
     sp(&c->body, "    }\n");
 }
 
+// A gather's 2D coordinates (TLD4S, TLD4 but cubes) through uvs() as glsl_sample's: a scaled texture whose contents
+// occupy its top-left part is gathered there. Without it Pokémon Z-A's lighting gathered its half-size shadow mask
+// over the whole image with FSR's 67% render resolution (and Dynamic resolution): the whole picture's shadows squeezed
+// into a 67% rectangle, older frames' shadows outside it (other lighting in the rectangle, a ghost of the player's
+// shadow beside it)
+static void gather_uv(Ctx *c, int slot, char *xy, size_t n) {
+    if (c->stage == STAGE_VERTEX) return;
+    char w[700];
+    snprintf(w, sizeof w, "uvs(%s, rscale[%d])", xy, slot + 1);
+    snprintf(xy, n, "%s", w);
+    c->uses_rscale = true;
+}
+
 // TLD4S (2D gather, one component or a depth compare; per Ryujinx's EmitTexs Tld4s): x in Ra, y in Rb - or y in Ra+1
 // when Rb holds the offset (.AOFFI: 6-bit signed x, y at bits 0 / 8) and / or the depth reference (.DC, after the
 // offset). Results as TEXS: two components (Rd, Rd+1), four with Rd2 (Rd2, Rd2+1); .F16 (0xdf8) packs them.
@@ -1004,6 +1017,7 @@ static void emit_tld4s(Ctx *c, uint64_t w) {
                  "bitfieldExtract(int(%s), 8, 6)) / vec2(tsize%d(0).xy))", A, y, Bv, Bv, slot);
     else
         snprintf(P, sizeof P, "vec2(as_type<float>(%s), as_type<float>(%s))", A, y);
+    gather_uv(c, slot, P, sizeof P);
     if (dc) snprintf(call, sizeof call, "textureGather(t%d, %s, as_type<float>(%s))", slot, P, dref);
     else snprintf(call, sizeof call, "textureGather(t%d, %s, %d)", slot, P, comp);
     write_tex_result(c, slot, call, d1 == RZ ? 3u : 15u, d0, d1, true, f16);
@@ -1049,6 +1063,7 @@ static void emit_tld4(Ctx *c, uint64_t w) {
         } else {
             snprintf(xy, sizeof xy, "vec2(%s, %s)", co[0], co[1]);
         }
+        if (!cube) gather_uv(c, slot, xy, sizeof xy);
         if (cube && array) snprintf(P, sizeof P, "vec4(%s, %s, %s, %s)", co[0], co[1], co[2], lay);
         else if (cube) snprintf(P, sizeof P, "vec3(%s, %s, %s)", co[0], co[1], co[2]);
         else if (array) snprintf(P, sizeof P, "vec3(%s, %s)", xy, lay);

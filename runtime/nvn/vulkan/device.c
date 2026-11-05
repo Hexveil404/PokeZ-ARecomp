@@ -1617,6 +1617,9 @@ static const char *_Atomic ui_stage;
 #ifdef _WIN32
 __declspec(dllimport) int __stdcall IsHungAppWindow(void *hwnd);
 #endif
+// (the start screen's own loop, runtime/ui/launcher.mm: its events handled - the game's loop isn't running then, and
+// "away for 2.5 s (in input_mouse_update)" was said 2 s into every start screen after a reboot, #151)
+void vk_ui_beat(const char *stage) { atomic_store(&ui_beat, SDL_GetTicksNS()); atomic_store(&ui_stage, stage); }
 static void ui_watch(void) {
     static bool stuck, hung;
     static uint64_t next;
@@ -1633,7 +1636,11 @@ static void ui_watch(void) {
 #ifdef _WIN32
     void *hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
     bool h = hwnd && IsHungAppWindow(hwnd);
-    if (h != hung) LOG("[ui] Windows %s the window as not responding\n", h ? "shows" : "no longer shows");
+    if (h != hung) {
+        uint64_t b2 = atomic_load(&ui_beat);
+        LOG("[ui] Windows %s the window as not responding (events last handled %.1f s ago, in %s)\n",
+            h ? "shows" : "no longer shows", b2 && now > b2 ? (now - b2) / 1e9 : 0.0, atomic_load(&ui_stage));
+    }
     hung = h;
 #endif
 }

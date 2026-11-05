@@ -29,6 +29,7 @@
 
 #include "../platform.h"
 #include "../rt.h"
+#include "../hle.h"  // (RT_ON_RESET)
 
 __thread uint64_t g_rq_wait_ns;
 __thread uint64_t g_rq_lock_ns;
@@ -564,12 +565,17 @@ static bool hang_check(uint64_t limit, char *why, size_t nwhy) {
     static uint64_t last_frames, frames_at;
     static bool reported_first, reported_stall;
     static uint64_t reported_since[NWATCH];
+    static uint64_t seen_start;
     uint64_t t_start = atomic_load(&hang_t_start);
     if (!t_start) return false;
     uint64_t now = plat_now_ns();
-    if (!frames_at) frames_at = now;
     extern uint64_t renderer_present_count(void);
     uint64_t f = renderer_present_count() + atomic_load(&presents_done);
+    if (t_start != seen_start) {  // (a new boot after "return to the start screen": counted afresh)
+        seen_start = t_start, last_frames = f, frames_at = now, reported_first = reported_stall = false;
+        memset(reported_since, 0, sizeof reported_since);
+    }
+    if (!frames_at) frames_at = now;
     if (f != last_frames || g_rt_unwind) last_frames = f, frames_at = now, reported_stall = false;
     bool hit = false;  // (one reason per check: the dump shows every wait anyway)
     if (!f && !reported_first && now - t_start > 2 * limit) {  // (the first frame: twice the time, loading)
@@ -603,4 +609,12 @@ static void watchdog_start_once(void) {
     extern void kernel_hang_hooks(bool (*)(uint64_t, char *, size_t), void (*)(const char *));
     kernel_hang_hooks(hang_check, hang_state);
 }
-void rq_hang_watch_start(void) { pthread_once(&wd_once, watchdog_start_once); }
+void rq_hang_watch_start(void) {
+    pthread_once(&wd_once, watchdog_start_once);
+    uint64_t none = 0;  // (again after a reboot: rq_hang_reset stopped it)
+    atomic_compare_exchange_strong(&hang_t_start, &none, plat_now_ns());
+}
+// "Return to the start screen": the game presents nothing while the start screen is up, and the check above went on
+// counting - a "presenting stopped" dump 30 s into every start screen after a reboot (#151's log). Off until the next
+// boot's GPU device setup.
+RT_ON_RESET(rq_hang_reset) { atomic_store(&hang_t_start, 0); }

@@ -56,6 +56,7 @@ void vk_frame_end(const char *shot_path);
 void *vk_frame_cmd(void);
 bool vk_imgui_backend_init(void);
 void vk_imgui_backend_shutdown(void);
+void vk_ui_beat(const char *stage);
 uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h);
 #endif
 }
@@ -2419,6 +2420,9 @@ extern "C" void launcher_run(const char *root) {
         pthread_mutex_lock(&g_lock);
         bool busy = g_busy;
         pthread_mutex_unlock(&g_lock);
+#ifndef __APPLE__
+        vk_ui_beat("the start screen");  // (device.c ui_watch: the window's events handled here now)
+#endif
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (g_tab == TAB_SETTINGS && bind_capture_event(&e)) continue;  // (waiting for a new binding: controls_ui.mm)

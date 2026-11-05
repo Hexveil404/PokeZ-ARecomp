@@ -847,8 +847,7 @@ static void tab_display(bool in_game) {
                                                      "O DLAA não está disponível: são necessários uma GPU NVIDIA RTX e o nvngx_dlss.dll.")
                                                 : TR("DLAA starts with the next start of the game.",
                                                      "O DLAA começa no próximo início do jogo."));
-        // (exec.c vk_taa_render_share: applies at once; only with LARECOMP_TAA_RENDER set until 67% draws right)
-        if ((g_settings.taa == TAA_FSR2 || g_settings.taa == TAA_FSR3) && getenv("LARECOMP_TAA_RENDER")) {
+        if (g_settings.taa == TAA_FSR2 || g_settings.taa == TAA_FSR3) {  // (exec.c vk_taa_render_share: applies at once)
             int r = g_settings.taa_render < 100 ? 1 : 0;
             const char *rs[] = {"100%", TR("67% (upscaled)", "67% (ampliada)")};
             ImGui::BeginDisabled(g_settings.res_mode == RES_DYNAMIC);

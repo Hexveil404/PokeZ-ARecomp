@@ -89,7 +89,7 @@ for p in "amd_fidelityfx_loader_vk.dll 38a56a01fb3565c0757d9f5c1e4e69de4b65e5f2e
     set -- $p
     mkdir -p $FFX
     [ -f $FFX/$1 ] || { /c/Windows/System32/curl.exe -fsSL -o $FFX/$1.part \
-        "https://media.githubusercontent.com/media/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v2.4.0/Kits/FidelityFX/signedbin/$1" &&
+        "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v2.4.0/Kits/FidelityFX/signedbin/$1" &&
         mv $FFX/$1.part $FFX/$1; }  # (.part: a cut download isn't taken for the file)
     echo "$2 *$FFX/$1" | sha256sum -c --quiet
     cp $FFX/$1 "$D/"

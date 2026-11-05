@@ -11981,6 +11981,9 @@ const char *vk_exec_buffer_kind(uint64_t handle) {
 
 // The [mem] line's counts (device.c): what grows over a long session shows next to the process size (#70).
 void vk_exec_counts(uint32_t *progs, uint32_t *pipes, uint32_t *cs) { *progs = prog_kv.n; *pipes = pipe_kv.n; *cs = cs_content_kv.n; }
+// (the code addresses those compute programs were met at: they grow as areas stream in, the programs stay few - the
+// [mem] line shows both; with a fixed 256-address table this filled after ~20 min and every dispatch rebuilt, 6c7005d)
+uint32_t vk_exec_cs_addresses(void) { return cs_kv.n; }
 
 // nvnTextureReadTexels[Strided] (objects.c, on the translating thread): copy_texture_to_buffer with the call's strides
 // in place of the command buffer's (nvnCommandBufferSetCopyStrides) - the GPU's copy, waited for, into data.

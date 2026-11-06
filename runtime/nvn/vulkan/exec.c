@@ -3748,7 +3748,76 @@ static bool fsr2_scene_pass(void) {
     NvnTexture *d = st.rt.depth;
     TexBackend *b = d ? d->backend : NULL;
     if (!b || !b->scalable || d->width == d->height) return false;
+    // A colour target not drawn at the scene's scale isn't the scene's: the clothing screen draws its character into
+    // an image of its own (1600x1080) with the scene's depth, and the menu draws that image after the scene was resolved
+    // - jittered, its edges shook. It takes the jitter only when DLAA resolves it too (pv_*, below).
+    for (int i = 0; i < 8; i++) {
+        TexBackend *cb = st.rt.color[i] ? st.rt.color[i]->backend : NULL;
+        if (cb && !cb->scalable) return false;
+    }
     return !(st.rt.has_dview && (st.rt.dview.setmask & 1) && st.rt.dview.base_level);
+}
+
+// ---- DLAA for the clothing screen's character (pv_*: the outfit screen, the clothing shop, the hair salon). The menu
+// draws the character into an RGBA8 image of its own (1600x1080: alpha 255 on it, 0 and black around) with the
+// scene's depth, then blends it over the blurred background (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) after the scene was
+// resolved. With DLAA, that image is drawn jittered too and
+// resolved by DLSS features of its own as soon as the menu leaves it (pv_resolve, from the next render target
+// change): one for its colour, one for its alpha (a grey picture), so that its edges are smoothed against whatever
+// is behind. Its motion: the camera stays while the right stick turns the model, so the motion vectors come from
+// the camera x the character's model matrix (vertex constant buffers 5 and 10), the scene's depth where it was drawn.
+// Only at the scene's own scale (1x: the depth's pixels are the image's), else that image takes no jitter at all.
+// LARECOMP_DLAA_PREVIEW=0: off (no jitter, no resolve).
+static struct {
+    NvnTexture *tex, *depth;
+    uint64_t frame;
+    float vp[16];       // (this frame's camera x model matrix, from its first draw)
+    bool mixed, done;   // (draws with other model matrices; resolved)
+} pv_cur;
+static float pv_last_vp[16];
+static uint64_t pv_last_frame = ~0ull, pv_ok_frame = ~0ull;
+static int pv_on(void) {
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_DLAA_PREVIEW") || atoi(ENV("LARECOMP_DLAA_PREVIEW")) != 0;
+    return on;
+}
+// this draw goes into such an image, and DLAA can resolve it
+static bool pv_pass(void) {
+    if (!pv_on() || taa_kind() != TAA_DLAA) return false;
+    int nc = 0;
+    for (int i = 0; i < 8; i++) nc += st.rt.color[i] != NULL;
+    NvnTexture *c = st.rt.color[0], *d = st.rt.depth;
+    if (nc != 1) return false;
+    TexBackend *cb = c ? c->backend : NULL, *db = d ? d->backend : NULL;
+    if (!cb || !db || cb->scalable || !db->scalable || d->width == d->height) return false;
+    if (cb->format != VK_FORMAT_R8G8B8A8_SRGB && cb->format != VK_FORMAT_R8G8B8A8_UNORM) return false;
+    if (db->sx != 1 || db->sy != 1 || vp_sx != 1 || vp_sy != 1 || vp_ox != 0 || vp_oy != 0) return false;  // (1x only)
+    if (cb->width > db->width || cb->height > db->height) return false;
+    return !(st.rt.has_dview && (st.rt.dview.setmask & 1) && st.rt.dview.base_level);
+}
+// notes the draw's transform; true: it takes the jitter (DLSS resolved the image last frame)
+static bool pv_note(void) {
+    extern uint64_t vk_frame_counter(void);
+    uint64_t f = vk_frame_counter();
+    bool jit = pv_ok_frame + 1 == f;
+    if (pv_cur.frame != f || pv_cur.tex != st.rt.color[0]) {
+        pv_cur.frame = f, pv_cur.tex = st.rt.color[0], pv_cur.depth = st.rt.depth;
+        memset(pv_cur.vp, 0, sizeof pv_cur.vp);
+        pv_cur.mixed = pv_cur.done = false;
+    }
+    if (!st.ubuf[0][2].addr || st.ubuf[0][2].size < 64 || !st.ubuf[0][7].addr || st.ubuf[0][7].size < 64) return jit;
+    const float *P = (const float *)(uintptr_t)st.ubuf[0][2].addr, *M = (const float *)(uintptr_t)st.ubuf[0][7].addr;
+    // clip = cb5 x cb10's first 4x4 (the model: columns, as the camera's; its inverse follows it) x the vertex. (Checked
+    // by warping one frame's picture with the motion vectors onto the next, the model turning: error 3.5, against 11.6
+    // with no motion and 18.7 with the model's rotation the other way.)
+    float C[16];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            C[i + 4 * j] = P[i] * M[4 * j] + P[i + 4] * M[4 * j + 1] + P[i + 8] * M[4 * j + 2] + P[i + 12] * M[4 * j + 3];
+    for (int i = 0; i < 16; i++) if (!isfinite(C[i])) return jit;
+    if (pv_cur.vp[15] == 0 && pv_cur.vp[11] == 0 && pv_cur.vp[3] == 0) memcpy(pv_cur.vp, C, sizeof C);  // (the first)
+    else if (memcmp(C, pv_cur.vp, sizeof C)) pv_cur.mixed = true;
+    return jit;
 }
 uint32_t nvn_window_origin(void);
 
@@ -8215,6 +8284,8 @@ static void draw_(CmdRec *r, bool indexed) {
         fsr2_frame_jitter();
         if ((fsr2_jx != 0 || fsr2_jy != 0) && fsr2_scene_pass())  // (FSR 2: the frame's sub-pixel offset)
             vx += fsr2_jx * vw / (float)fsr2_scene_w, vy += fsr2_jy * fabsf(vp[3] * vp_sy) / (float)fsr2_scene_h;
+        else if (pv_pass() && pv_note() && (fsr2_jx != 0 || fsr2_jy != 0))  // (the clothing screen's character: its own pixels)
+            vx += fsr2_jx * vw / (float)st.rt.color[0]->width, vy += fsr2_jy * fabsf(vp[3] * vp_sy) / (float)st.rt.color[0]->height;
         set_viewport(vx, vy, vw, vp[3] * vp_sy, zn, zf);
         if (g_debug_frame) {
             VkRect2D sr = scissor_rect();
@@ -9906,9 +9977,10 @@ static VkImageView post_view(TexBackend *d) {
 // is copied into the shown image. The scene can be drawn smaller, in the top-left part of its images (F1 > FSR 2 render
 // resolution, vk_taa_render_share): FSR 2 then upscales it to the whole shown image. Not with Dynamic resolution.
 
-// Its images (kept until the size changes): 0 motion vectors (RG16F), 1 reactive mask (R8), 2 FSR 2's output (RGBA8)
+// Its images (kept until the size changes): 0 motion vectors (RG16F), 1 reactive mask (R8), 2 FSR 2's output (RGBA8);
+// 3-6 pv_resolve's
 static TexBackend *fsr2_image(int i, VkFormat f, uint32_t w, uint32_t h, VkImageUsageFlags usage) {
-    static TexBackend img[3];
+    static TexBackend img[7];
     TexBackend *d = &img[i];
     if (d->image && (d->width != w || d->height != h)) {
         vk_views_forget(d);
@@ -10168,6 +10240,179 @@ static bool fsr2_copy(Prog *pr) {
     last_w = w;
     fsr2_ok_frame = f;
     return true;
+}
+
+// A full-screen pipeline of pv_resolve: frag (a built-in shader) reading nimg sampled images (+ a uniform buffer at
+// binding nimg) into nfmt colour targets
+static VkPipeline pv_pipeline(const char *frag, int nimg, bool ubo, const VkFormat *fmts, int nfmt, VkDescriptorSetLayout *dsl,
+                              VkPipelineLayout *layout) {
+    VkDescriptorSetLayoutBinding bd[4];
+    int nb = 0;
+    for (int i = 0; i < nimg; i++) bd[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+    if (ubo) bd[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)nimg, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+    VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = (uint32_t)nb, .pBindings = bd};
+    VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, dsl));
+    VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = dsl};
+    VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &ci, NULL, layout));
+    VkPipelineShaderStageCreateInfo stages[2] = {
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
+         .module = vk_builtin_shader("post.vert"), .pName = "main"},
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+         .module = vk_builtin_shader(frag), .pName = "main"}};
+    VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                                                 .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineViewportStateCreateInfo vs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
+    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                                                 .polygonMode = VK_POLYGON_MODE_FILL, .lineWidth = 1};
+    VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+                                               .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkPipelineColorBlendAttachmentState cba[2] = {{.colorWriteMask = 0xF}, {.colorWriteMask = 0xF}};
+    VkPipelineColorBlendStateCreateInfo cbs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+                                               .attachmentCount = (uint32_t)nfmt, .pAttachments = cba};
+    VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    uint32_t ndyn = 2;
+    fullscreen_vertex_dyn(dyn, &ndyn, 3);
+    VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = ndyn, .pDynamicStates = dyn};
+    VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = (uint32_t)nfmt,
+                                        .pColorAttachmentFormats = fmts};
+    VkPipelineDepthStencilStateCreateInfo ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2,
+                                       .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
+                                       .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
+                                       .pColorBlendState = &cbs, .pDynamicState = &dy, .layout = *layout};
+    VkPipeline p;
+    VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p));
+    return p;
+}
+
+// draws pipe's full-screen triangle into the w x h targets
+static void pv_draw(VkCommandBuffer cb, VkPipeline pipe, VkPipelineLayout layout, VkDescriptorSet set, const VkImageView *views, int n,
+                    uint32_t w, uint32_t h) {
+    VkRenderingAttachmentInfo ca[2];
+    for (int i = 0; i < n; i++)
+        ca[i] = (VkRenderingAttachmentInfo){.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = views[i],
+                                            .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                            .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo rinfo = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {w, h}}, .layerCount = 1,
+                             .colorAttachmentCount = (uint32_t)n, .pColorAttachments = ca};
+    rec_CmdBeginRendering(cb, &rinfo);
+    rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, NULL);
+    VkViewport vp = {0, 0, (float)w, (float)h, 0, 1};
+    VkRect2D sc = {{0, 0}, {w, h}};
+    rec_CmdSetViewport(cb, 0, 1, &vp);
+    rec_CmdSetScissor(cb, 0, 1, &sc);
+    fullscreen_vertex_bind(cb);
+    rec_CmdDraw(cb, 3, 1, 0, 0);
+    rec_CmdEndRendering(cb);
+}
+
+static void pv_set_images(VkDescriptorSet set, const VkImageView *views, int n, const VkDescriptorBufferInfo *ubo) {
+    VkDescriptorImageInfo ii[3];
+    VkWriteDescriptorSet wr[4];
+    VkSampler near = vk_default_sampler(false);
+    for (int i = 0; i < n; i++) {
+        ii[i] = (VkDescriptorImageInfo){near, views[i], VK_IMAGE_LAYOUT_GENERAL};
+        wr[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = (uint32_t)i,
+                                       .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[i]};
+    }
+    if (ubo)
+        wr[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = (uint32_t)n,
+                                       .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = ubo};
+    rec_UpdateDescriptorSets((uint32_t)n + (ubo ? 1 : 0), wr);
+}
+
+// (CMD_SET_RENDER_TARGETS) the menu is leaving the character's image: DLSS resolves it now, before the scene's
+// passes reuse the depth and before the menu draws it
+static void pv_resolve(void) {
+    extern uint64_t vk_frame_counter(void);
+    uint64_t f = vk_frame_counter();
+    pv_cur.done = true;
+    NvnTexture *t = pv_cur.tex, *d = pv_cur.depth;
+    TexBackend *cb = t ? t->backend : NULL, *zb = d ? d->backend : NULL;
+    if (!cb || !cb->image || !zb || !zb->image || (pv_cur.vp[15] == 0 && pv_cur.vp[11] == 0 && pv_cur.vp[3] == 0)) return;
+    uint32_t w = cb->width, h = cb->height;
+    {
+        static int said;
+        if (pv_cur.mixed && !said++) LOG("[dlaa] clothing screen: the character's parts drawn with other model matrices (motion from the first)\n");
+    }
+    // a cut (another view) or a frame without the image starts its history again
+    bool reset = pv_last_frame + 1 != f || pv_ok_frame + 1 != f;
+    {
+        const float *a = pv_cur.vp, *b = pv_last_vp;
+        float la = sqrtf(a[3] * a[3] + a[7] * a[7] + a[11] * a[11]), lb = sqrtf(b[3] * b[3] + b[7] * b[7] + b[11] * b[11]);
+        if (!(la > 0 && lb > 0) || (a[3] * b[3] + a[7] * b[7] + a[11] * b[11]) / (la * lb) < 0.95f) reset = true;
+    }
+    float u[36];
+    inv4(pv_cur.vp, u);
+    memcpy(u + 16, reset ? pv_cur.vp : pv_last_vp, 64);
+    bool jittered = pv_ok_frame + 1 == f;  // (pv_note: its draws took this frame's jitter)
+    float jx = jittered ? fsr2_jx : 0, jy = jittered ? fsr2_jy : 0;
+    u[32] = jx, u[33] = jy, u[34] = 1.0f / w, u[35] = 1.0f / h;
+    memcpy(pv_last_vp, pv_cur.vp, 64);
+    pv_last_frame = f;
+    vk_end_pass();
+    TexBackend *mvb = fsr2_image(3, VK_FORMAT_R16G16_SFLOAT, w, h, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    TexBackend *alb = fsr2_image(4, VK_FORMAT_R8G8B8A8_UNORM, w, h, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    TexBackend *oc = fsr2_image(5, VK_FORMAT_R16G16B16A16_SFLOAT, w, h, VK_IMAGE_USAGE_STORAGE_BIT);
+    TexBackend *oa = fsr2_image(6, VK_FORMAT_R16G16B16A16_SFLOAT, w, h, VK_IMAGE_USAGE_STORAGE_BIT);
+    if (!mvb || !alb || !oc || !oa) return;
+    static const VkComponentMapping id = {0};
+    VkImageView zv = vk_image_view(zb, VK_IMAGE_VIEW_TYPE_2D, zb->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
+    VkImageView cv = post_view(cb);
+    if (!zv || !cv) return;
+    static VkPipeline prep, comb;
+    static VkPipelineLayout prep_l, comb_l;
+    static VkDescriptorSetLayout prep_d, comb_d;
+    if (!prep) {
+        VkFormat f1[2] = {VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM};
+        prep = pv_pipeline("pv_prep.frag", 2, true, f1, 2, &prep_d, &prep_l);
+    }
+    static VkFormat comb_fmt;
+    if (!comb || comb_fmt != cb->format) {  // (sRGB or not: the image's own format, once each)
+        VkFormat f2[1] = {cb->format};
+        comb = pv_pipeline("pv_combine.frag", 2, false, f2, 1, &comb_d, &comb_l);
+        comb_fmt = cb->format;
+    }
+    // ---- the motion vectors and the alpha picture
+    VkCommandBuffer c = vk_cmd();
+    vk_full_barrier(c);
+    VkDescriptorSet s1 = vk_alloc_set(prep_d);
+    VkDescriptorBufferInfo bi = ubo_span(vk_transient_copy(u, sizeof u, 256), sizeof u);
+    VkImageView in1[2] = {zv, cv}, out1[2] = {post_view(mvb), post_view(alb)};
+    pv_set_images(s1, in1, 2, &bi);
+    pv_draw(c, prep, prep_l, s1, out1, 2, w, h);
+    vk_full_barrier(c);
+    // ---- DLSS: the colour, then the alpha (features 1 and 2: histories of their own)
+    static uint64_t last_ns;
+    uint64_t now = plat_now_ns();
+    float dt = last_ns ? (float)((now - last_ns) / 1e6) : 16.7f;
+    last_ns = now;
+    VkFsr2Frame fr = {.color = cb->image, .depth = zb->image, .mv = mvb->image, .reactive = mvb->image, .out = oc->image,
+                      .color_view = cv, .depth_view = zv, .mv_view = post_view(mvb), .reactive_view = post_view(mvb),
+                      .out_view = post_view(oc), .color_format = cb->format, .depth_format = zb->format,
+                      .out_format = VK_FORMAT_R16G16B16A16_SFLOAT, .w = w, .h = h, .ow = w, .oh = h, .jx = jx, .jy = jy,
+                      .dt_ms = fminf(fmaxf(dt, 1), 100), .near_z = 0.1f, .fov_y = 1.0f, .reset = reset, .slot = 1};
+    VkCommandBuffer sec = fsr2_cmd();
+    bool ok = vk_dlaa_record(g_vk.dev, sec, &fr);
+    fr.color = alb->image, fr.color_view = post_view(alb), fr.color_format = VK_FORMAT_R8G8B8A8_UNORM;
+    fr.out = oa->image, fr.out_view = post_view(oa), fr.slot = 2;
+    ok = ok && vk_dlaa_record(g_vk.dev, sec, &fr);
+    VK_CHECK(vkEndCommandBuffer(sec));
+    if (!ok) return;  // (not resolved: its next frame takes no jitter)
+    rec_CmdExecuteCommands(c, 1, &sec);
+    vk_full_barrier(c);
+    // ---- back into the character's image
+    VkDescriptorSet s2 = vk_alloc_set(comb_d);
+    VkImageView in2[2] = {post_view(oc), post_view(oa)};
+    pv_set_images(s2, in2, 2, NULL);
+    pv_draw(c, comb, comb_l, s2, &cv, 1, w, h);
+    vk_full_barrier(c);
+    pv_ok_frame = f;
+    static int nlog;
+    if (nlog++ < 3) LOG("[dlaa] clothing screen's character resolved: frame %llu, %ux%u, jitter %.3f %.3f%s\n",
+                        (unsigned long long)f, w, h, jx, jy, reset ? ", reset" : "");
 }
 
 // SMAA's lookup textures (runtime/nvn/smaa_data.c): 0 = area (160 x 560 R8G8), 1 = search (64 x 16 R8), uploaded once.
@@ -11731,6 +11976,10 @@ static void exec_list(uint64_t handle, int depth) {
             static int always = -1;
             if (always < 0) always = ENV("LARECOMP_VK_PASS_RESTART") != NULL;
             if (always || memcmp(&prev, &st.rt, sizeof prev)) st.rt_dirty = true;
+            // (the clothing screen's character image left: DLAA resolves it - its depth is still the one it was drawn with)
+            if (pv_cur.tex && !pv_cur.done && pv_cur.frame == vk_frame_counter() && prev.color[0] == pv_cur.tex &&
+                st.rt.color[0] != pv_cur.tex)
+                pv_resolve();
             break;
         }
         case CMD_SET_VIEWPORTS:

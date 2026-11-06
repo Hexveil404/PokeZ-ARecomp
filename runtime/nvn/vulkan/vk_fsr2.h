@@ -20,6 +20,7 @@ typedef struct {
     uint32_t w, h, ow, oh;
     float jx, jy, dt_ms, near_z, fov_y, sharpness;
     bool reset;
+    int slot;  // (DLAA) which DLSS feature - history: 0 the scene's, 1 / 2 the clothing screen's character (exec.c pv_resolve)
 } VkFsr2Frame;
 
 // Records FSR 2 into cmd (a command buffer the caller records itself, not the recorder's); false: not done (logged)

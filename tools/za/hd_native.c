@@ -1,7 +1,9 @@
 // Helpers for tools/za/hd_pack.py (built by it: gcc -O2 -shared -o hd_native.dll hd_native.c): the runtime's texture
-// hash (runtime/nvn/vulkan/textures.c hash_full) and the Tegra block-linear -> linear deswizzle, at C speed.
+// hashes and the Tegra block-linear -> linear deswizzle, at C speed.
 #include <stdint.h>
 #include <string.h>
+
+#include "../../runtime/nvn/tex_hash.h"
 
 #ifdef _WIN32
 #define EXPORT __declspec(dllexport)
@@ -9,6 +11,10 @@
 #define EXPORT
 #endif
 
+// The name the runtime looks a pack texture up by (runtime/nvn/vulkan/textures.c, since v0.1.10)
+EXPORT uint64_t pack_hash(const uint8_t *p, uint64_t n) { return tex_hash_full(p, n); }
+
+// The previous one (up to v0.1.9; still the runtime's with LARECOMP_TEX_FASTHASH=0)
 EXPORT uint64_t hash_full(const uint8_t *p, uint64_t n) {
     uint64_t h0 = 0x9E3779B97F4A7C15ull ^ n, h1 = 0xC2B2AE3D27D4EB4Full, h2 = 0x165667B19E3779F9ull, h3 = 0x27D4EB2F165667C5ull;
     uint64_t i = 0;

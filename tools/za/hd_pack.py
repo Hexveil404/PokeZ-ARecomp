@@ -42,11 +42,14 @@ for d in (SRC, UP, FIN, args.out): os.makedirs(d, exist_ok=True)
 # ------------------------------------------------------------------ native helpers
 HERE = os.path.dirname(os.path.abspath(__file__))
 DLL = os.path.join(args.work, 'hd_native.dll' if os.name == 'nt' else 'hd_native.so')
-if not os.path.exists(DLL) or os.path.getmtime(DLL) < os.path.getmtime(os.path.join(HERE, 'hd_native.c')):
+NATIVE_SRC = [os.path.join(HERE, 'hd_native.c'), os.path.join(HERE, '..', '..', 'runtime', 'nvn', 'tex_hash.h')]
+if not os.path.exists(DLL) or os.path.getmtime(DLL) < max(os.path.getmtime(p) for p in NATIVE_SRC):
     subprocess.check_call(['gcc', '-O2', '-shared', '-o', DLL, os.path.join(HERE, 'hd_native.c')])
 nat = ctypes.CDLL(os.path.abspath(DLL))
-nat.hash_full.restype = ctypes.c_uint64
-nat.hash_full.argtypes = [ctypes.c_char_p, ctypes.c_uint64]
+# (the file names: the runtime's texture hash - the previous one with LARECOMP_TEX_FASTHASH=0, as the runtime)
+pack_hash = nat.hash_full if os.environ.get('LARECOMP_TEX_FASTHASH', '1') == '0' else nat.pack_hash
+pack_hash.restype = ctypes.c_uint64
+pack_hash.argtypes = [ctypes.c_char_p, ctypes.c_uint64]
 nat.deswizzle.argtypes = [ctypes.c_char_p, ctypes.c_uint64, ctypes.c_char_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32]
 
 # NX texture formats (high byte) -> (block width, height, bytes per block, decoder)
@@ -71,6 +74,17 @@ def decode_top(t):
     if kind == 'bc2': return None
     raw = getattr(td, 'decode_' + kind)(lin, wb * 4, hb * 4)  # (BGRA)
     im = Image.frombytes('RGBA', (wb * 4, hb * 4), raw, 'raw', 'BGRA')
+    if kind == 'bc1':
+        # texture2ddecoder's BC1 is always opaque, but a block in 3-colour mode (colour0 <= colour1) draws index 3
+        # transparent: the holes of chain-link fences, railings, cut-out plants. Without it their HD version was a
+        # solid sheet (the holes dark).
+        c = np.frombuffer(lin, np.uint16).reshape(hb, wb, 4)
+        idx = np.frombuffer(lin, np.uint32).reshape(hb, wb, 2)[..., 1]
+        sel = (idx[..., None] >> (2 * np.arange(16, dtype=np.uint32))) & 3  # (texel i: x = i % 4, y = i // 4)
+        clear = (sel == 3) & (c[..., 0] <= c[..., 1])[..., None]
+        if clear.any():
+            a = np.where(clear, 0, 255).astype(np.uint8).reshape(hb, wb, 4, 4).transpose(0, 2, 1, 3)
+            im.putalpha(Image.fromarray(np.ascontiguousarray(a).reshape(hb * 4, wb * 4)))
     return im.crop((0, 0, t.w, t.h))
 
 
@@ -94,7 +108,7 @@ def extract():
         if (t.fmt >> 8) not in COLOUR or t.layers != 1 or t.depth != 1: continue
         if max(t.w, t.h) > args.max or min(t.w, t.h) < args.min or DATA.search(t.name): continue
         if args.only and not re.search(args.only, t.name): continue
-        h = '%016x' % nat.hash_full(t.data, len(t.data))
+        h = '%016x' % pack_hash(t.data, len(t.data))
         seen += 1
         if h in done: continue
         done.add(h)

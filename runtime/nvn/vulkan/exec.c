@@ -5856,11 +5856,12 @@ static VkDescriptorBufferInfo gfast_info(void) {
 // heap's import (host memory), every vertex was a scattered write across PCIe: 3 ms of GPU time a frame (7 with
 // mods/MaxLOD). Instead the sessions write a device-local mirror of the arena (XFB_BUFFER_INDEX), the vertex streams
 // inside parts written that way read it (guest_direct), and at each session's end the parts written are copied back
-// to the heap (one small DMA transfer), for anything else that reads them there. Ranges outside the mirror's 64 MB
-// window go to the heap as before. LARECOMP_VK_XFB_MIRROR=0: off, =1: on. Off by default on AMD GPUs (#22: an RX 9070 XT
-// lost the device on an invalid GPU read in exactly these skinning draws, with robust access on and submissions made
-// one at a time) - their transform feedback goes to the heap's import as before the mirror.
-#define XM_SIZE (64ull << 20)
+// to the heap (one small DMA transfer), for anything else that reads them there. Ranges outside the mirror's 128 MB
+// window go to the heap as before; the window follows the sessions when they move (xm_prepare). LARECOMP_VK_XFB_MIRROR=0:
+// off, =1: on. Off by default on AMD GPUs (#22: an RX 9070 XT lost the device on an invalid GPU read in exactly these
+// skinning draws, with robust access on and submissions made one at a time) - their transform feedback goes to the
+// heap's import as before the mirror.
+#define XM_SIZE (128ull << 20)  // (64 MB: after going to another area, the sessions spanned 77 MB)
 #define XM_CHUNK 256ull
 static VkBuffer xm_buf;
 static VmaAllocation xm_mem;
@@ -5906,6 +5907,59 @@ static bool xm_prepare(void) {
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
         if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &xm_buf, &xm_mem, NULL) != VK_SUCCESS) { xm_buf = VK_NULL_HANDLE; return false; }
     }
+    // The sessions don't stay where the window was placed: in some runs a few were below it from the first scene on (4-11
+    // of ~110 a frame), and after going to another area they spanned 76-77 MB, ~40 a frame outside 64 MB from then on,
+    // also back in the first scene (where the GPU went from 7.2 to 10.5-10.9 ms a frame: the mirror's gain lost). Each frame's sessions' span is kept; when some fell outside
+    // last frame and the span fits, the window is placed around it again, at the next frame's first session (nothing
+    // is read from the mirror then: only this frame's chunks are, and they're cleared). Not while copies back to the heap
+    // are queued: their offsets are the old window's. LARECOMP_XM_FOLLOW=0: the window stays where it was first placed.
+    static int follow = -1;
+    if (follow < 0) follow = ENV("LARECOMP_XM_FOLLOW") ? atoi(ENV("LARECOMP_XM_FOLLOW")) != 0 : 1;
+    static uint64_t sp_f = ~0ull, sp_lo, sp_hi;
+    static uint32_t sp_out, sp_n;
+    uint64_t fc = vk_frame_counter();
+    if (fc != sp_f) {
+        // (log: the first 3 frames with sessions outside, each move, and every 10 s how many frames had some)
+        static uint32_t out_frames, out_sessions, nlog;
+        static uint64_t last_sum;
+        uint64_t now = SDL_GetTicksNS();
+        if (out_frames && now - last_sum > 10000000000ull) {
+            LOG("[vk] transform feedback mirror: %u frames in the last %.0f s with sessions outside it (%u sessions)\n", out_frames,
+                (now - last_sum) / 1e9, out_sessions);
+            out_frames = out_sessions = 0, last_sum = now;
+        } else if (!out_frames) last_sum = now;
+        if (sp_f != ~0ull && sp_out && xm_lo) {
+            bool fits = sp_hi > sp_lo && sp_hi - sp_lo <= XM_SIZE - (4ull << 20);
+            bool move = follow && fits && !xm_back_n;
+            out_frames++, out_sessions += sp_out;
+            if (nlog < 3 || move) {
+                nlog++;
+                LOG("[vk] frame %llu: %u of %u transform feedback sessions outside the mirror (%llx-%llx; sessions at %llx-%llx)%s\n",
+                    (unsigned long long)sp_f, sp_out, sp_n, (unsigned long long)xm_lo, (unsigned long long)(xm_lo + XM_SIZE),
+                    (unsigned long long)sp_lo, (unsigned long long)sp_hi,
+                    move ? ": moved" : !follow ? "" : !fits ? ": too far apart to move" : ": copies queued, next frame");
+            }
+            if (move) {  // centred on the span, on a 1 MB boundary
+                uint64_t lo = ((sp_lo + sp_hi) / 2 - XM_SIZE / 2) & ~0xFFFFFull;
+                if (lo > sp_lo) lo = sp_lo & ~0xFFFFFull;
+                if (lo < gwin_base) lo = gwin_base;
+                if (sp_hi <= lo + XM_SIZE) {
+                    xm_lo = lo;
+                    memset(xm_written, 0, sizeof xm_written);
+                    LOG("[vk] transform feedback mirror moved to %llx (+%llu MB)\n", (unsigned long long)xm_lo, (unsigned long long)(XM_SIZE >> 20));
+                }
+            }
+        }
+        sp_f = fc, sp_lo = ~0ull, sp_hi = 0, sp_out = sp_n = 0;
+    }
+    sp_n++;
+    for (int b = 0; b < 4; b++) {
+        if (!xfb_addr[b] || !xfb_size[b]) continue;
+        if (xfb_addr[b] < sp_lo) sp_lo = xfb_addr[b];
+        if (xfb_addr[b] + xfb_size[b] > sp_hi) sp_hi = xfb_addr[b] + xfb_size[b];
+    }
+    for (int b = 0; b < 4; b++)
+        if (xfb_addr[b] && xfb_size[b] && xm_lo && !xm_inside(xfb_addr[b], xfb_size[b])) { sp_out++; break; }
     for (int b = 0; b < 4; b++) {
         if (!xfb_addr[b] || !xfb_size[b]) continue;
         if (!xm_lo) {  // placed around the first session's buffers (the arena is a few MB)

@@ -11064,13 +11064,22 @@ static int objmv_on(void) {
     return on && taa_kind() == TAA_DLAA;
 }
 
-static MvCbuf *mo_cbuf(uint64_t key) {
+// An entry not drawn in the last 2 frames is taken for a new mesh. Without that, the table filled up after travelling
+// to a few areas, and from then on no new character got its motion (a 256-entry test build, walking to another area:
+// ~47 characters' draws a frame drawn again instead of ~147).
+static MvCbuf *mo_cbuf(uint64_t key, uint64_t f) {
     uint32_t i = (uint32_t)(key ^ (key >> 21)) & 2047;
+    MvCbuf *stale = NULL;
     for (int k = 0; k < 2048; k++, i = (i + 1) & 2047) {
-        if (mo_cb[i].key == key) return &mo_cb[i];
-        if (!mo_cb[i].key) { mo_cb[i].key = key; return &mo_cb[i]; }
+        MvCbuf *e = &mo_cb[i];
+        if (e->key == key) return e;
+        if (!e->key) { if (!stale) stale = e; break; }
+        uint64_t last = e->frame[0] > e->frame[1] ? e->frame[0] : e->frame[1];
+        if (!stale && last + 2 < f) stale = e;
     }
-    return NULL;
+    if (!stale) return NULL;
+    stale->key = key, stale->size = 0, stale->frame[0] = stale->frame[1] = 0;  // (its buffers are kept, for reuse)
+    return stale;
 }
 
 static void objmv_capture(Prog *pr, Pipe *pp, uint32_t streams, const VkDescriptorSet sets[2], uint32_t ndyn, const uint32_t *dyn,
@@ -11095,8 +11104,12 @@ static void objmv_capture(Prog *pr, Pipe *pp, uint32_t streams, const VkDescript
     if (off < mo.lo) mo.lo = off;
     if (off + v0.size > mo.hi) mo.hi = off + v0.size;
     // this frame's constant buffers kept for the next; last frame's, if this mesh was drawn then
-    MvCbuf *e = mo_cbuf(v0.addr);
-    if (!e) return;
+    MvCbuf *e = mo_cbuf(v0.addr, f);
+    if (!e) {
+        static int nl;
+        if (nl++ < 5) LOG("[objmv] frame %llu: no room for another mesh (2048 drawn in the last 2 frames)\n", (unsigned long long)f);
+        return;
+    }
     // (constant buffer k is the state's slot k - 3, as cbuf_info finds it; 0-2 are the driver's own: not the game's)
     uint32_t mask = pr->vi->cbuf_mask & 0x3FFF8u;
     int cur = (int)(f & 1), prv = !cur;

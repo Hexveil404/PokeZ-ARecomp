@@ -4608,10 +4608,16 @@ static uint64_t gmem_lo, gmem_window;
 // The window is anchored at the end of the physical region (gwin_max: constant for the session, so shaders may bake it): [lo, gwin_max).
 // Only with a physical-memory window (no heap), else the whole heap as before. The generated shader code computes ga = addr - base, ok = ga < size,
 // so translate_program / build_compute set base and size to the window too (the window changed them by lo: text and buildings read the wrong place).
-// default: on an integrated GPU (the Steam Deck: the full import cost 87 % of the render thread), 256 MB; LARECOMP_VK_GMEM_WINDOW=0 imports it all
+// default: on an integrated GPU (the Steam Deck: the full import cost 87 % of the render thread), 256 MB, and on any AMD GPU
+// on Linux (amdgpu revalidates a userptr import at every submit there too: an RX 7800 XT at ~7 fps with all of it);
+// LARECOMP_VK_GMEM_WINDOW=0 imports it all
 static void gmem_window_init(void) {
     const char *w = ENV("LARECOMP_VK_GMEM_WINDOW");
-    gmem_window = w ? strtoull(w, NULL, 10) << 20 : g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 256ull << 20 : 0;
+    bool small = g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+#ifdef __linux__
+    small = small || g_vk.props.vendorID == 0x1002;
+#endif
+    gmem_window = w ? strtoull(w, NULL, 10) << 20 : small ? 256ull << 20 : 0;
 }
 static void gmem_window_get(uint64_t *lo, uint64_t *len) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;  // (the translator and the render thread - run_queued_now - both ask)
@@ -5069,6 +5075,13 @@ static bool guest_heap_dmabuf(void) {
     if (gmem_buf || !g_vk.dev || !(g_vk.dmabuf || g_vk.map_placed) || getenv("LARECOMP_VK_NO_GMEM")) return false;
     const char *e = getenv("LARECOMP_VK_HEAP_DMABUF");
     if (e ? !atoi(e) : !strstr(g_vk.props.deviceName, "RADV")) return false;
+    // Pokémon Z-A has no heap: its memory is the window (gwin: physical memory, 7676b00000 on 2.0.2), past the end of this
+    // mapping. gmem_buf set here kept gmem_info from importing that window, so shaders read this empty buffer: the world
+    // and all text black, the HUD art and 60 fps intact, no error (RX 7800 XT, RADV; an APU's system heap is too small to
+    // get here, which is why the Steam Deck never showed it). Asked of the files as gmem_chunk_shift does: this runs
+    // before the boot sets g_game_is_la. LARECOMP_VK_HEAP_DMABUF=1 still forces it.
+    extern bool game_files_are_la(const char *game_dir);
+    if (!e && (!g_game_is_la || !game_files_are_la("extracted"))) return false;
     const uint64_t size = HEAP_MAX;
     VkPhysicalDeviceMemoryProperties mp;
     vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);

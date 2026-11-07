@@ -877,6 +877,25 @@ void fs_log_recent_reads(void) {  // (services/am.c: the game's decompressor sai
             h == r[i].hash ? "the same" : "DIFFERENT - the read the game got was wrong");
     }
     free(buf);
+    // (#206 #173: every read "the same", and the compressed bytes at the decompressor's entry matched the disk too, yet
+    // the game's Oodle decoder failed - on two PCs, both Windows 11 build 26300, never here on Windows 10 with the same
+    // save, data and game code. So also: is each buffer the game read into still mapped, and does it still hold what
+    // was read - a page decommitted or overwritten under the decoder (memory) vs everything intact (a race between the
+    // game's threads, or the decoder's own computation). A page that isn't committed isn't touched: reading it would
+    // commit a zero page and change what we look at.)
+    extern int kernel_live_threads(void);
+    LOG("[fs] the game's buffers now (last reads first; %d guest threads running):\n", kernel_live_threads());
+    for (unsigned i = n, k = 0; i-- > 0 && k < 8; k++) {
+        uint64_t a = r[i].addr, sz = r[i].got > 0 ? (uint64_t)r[i].got : 0;
+        char s0[160] = "?", s1[160] = "?";
+        bool known0 = plat_page_state(a, s0, sizeof s0), known1 = sz && plat_page_state(a + sz - 1, s1, sizeof s1);
+        bool readable = !known0 || (strstr(s0, "committed") && (!known1 || strstr(s1, "committed")));
+        const char *now = !sz ? "nothing read" : !readable ? "NOT COMMITTED - not read (left as it is)"
+                        : fnv_words((const uint8_t *)(uintptr_t)a, sz) == r[i].hash ? "still as read"
+                        : "CHANGED since the read (overwritten, or reused for something else)";
+        LOG("[fs]   +%llx at %llx (%llx bytes): first page %s; last page %s; contents %s\n", (unsigned long long)r[i].off,
+            (unsigned long long)a, (unsigned long long)sz, known0 ? s0 : "state unknown here", known1 ? s1 : "-", now);
+    }
 }
 
 // ------------------------------------------------------------------ IStorage (raw RomFS image)

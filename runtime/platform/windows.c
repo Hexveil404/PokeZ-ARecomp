@@ -828,7 +828,17 @@ bool plat_exe_path(char *buf, size_t size) {
 }
 
 // RtlGetVersion: the real version (GetVersionEx answers what the manifest declares). Build 22000+ is Windows 11.
+// Wine / Proton: its ntdll exports wine_get_version (Windows' doesn't). The logs then say so - they showed "Windows 10"
+// for Steam Decks and Linux desktops (#165, #201) - and the start screen can say why the game code can't build there.
+const char *plat_wine_version(void) {
+    typedef const char *(CDECL * WineVersionFn)(void);
+    WineVersionFn f = (WineVersionFn)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "wine_get_version");
+    return f ? f() : NULL;
+}
+
 void plat_os_name(char *buf, size_t size) {
+    const char *wine = plat_wine_version();
+    if (wine) { snprintf(buf, size, "Wine %s (Linux / Steam Deck: the Windows build under Wine or Proton)", wine); return; }
     typedef LONG(WINAPI * RtlGetVersionFn)(OSVERSIONINFOW *);
     RtlGetVersionFn f = (RtlGetVersionFn)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlGetVersion");
     OSVERSIONINFOW v = {.dwOSVersionInfoSize = sizeof v};

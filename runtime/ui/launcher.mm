@@ -444,11 +444,39 @@ static const char *fail_hint(int k, bool pt) {
         "O motivo completo está em logs/launcher.log, na pasta de dados."};
     return k >= 1 && k <= 8 ? (pt ? ptb : en)[k] : "";
 }
+// Under Wine / Proton the game code can never build: zig, the compiler, locks its cache files with NtLockFile, which
+// Wine doesn't implement the way zig calls it (WineHQ bug 59935, open; "checking cache failed: manifest_create
+// Unexpected" on the first file, wherever the folder is: #165, #201, #40). Moving the cache (gamebuild.c
+// zig_cache_elsewhere) doesn't help. The native Linux build (AppImage / zip / .deb on the releases page) runs there.
+static const char *wine_build_hint(bool pt) {
+    return pt ? "Você está usando a versão de Windows pelo Wine / Proton, e nele o compilador do jogo (zig) não funciona "
+                "(falta uma função no Wine: WineHQ bug 59935). Baixe a versão de Linux do ZA Recomp (AppImage, .zip ou .deb) "
+                "na página de releases: ela roda direto no Linux e no Steam Deck."
+              : "You're running the Windows version through Wine / Proton, where the game's compiler (zig) can't work (a "
+                "function Wine lacks: WineHQ bug 59935). Download the Linux version of ZA Recomp (AppImage, .zip or .deb) "
+                "from the releases page: it runs natively on Linux and the Steam Deck.";
+}
+static bool build_under_wine(int k) {
+#ifdef _WIN32
+    return k == FAIL_BUILD && plat_wine_version();
+#else
+    (void)k;
+    return false;
+#endif
+}
 static void set_failure(int k, const std::string &detail = "") {
     if (k < 1 || k > 8) return;
     g_fail = k, g_fail_detail = detail;
     rt_launcher_log("[launcher] failure shown: %s%s%s\n", fail_head(k, false), detail.empty() ? "" : ": ", detail.c_str());
-    set_job(fail_head(k, false), true, detail.empty() ? fail_hint(k, false) : detail + "\n" + fail_hint(k, false));
+    if (build_under_wine(k)) rt_launcher_log("[launcher] under Wine %s: the native Linux build is the way (WineHQ bug 59935)\n",
+#ifdef _WIN32
+                                             plat_wine_version()
+#else
+                                             ""
+#endif
+                                             );
+    const char *hint = build_under_wine(k) ? wine_build_hint(false) : fail_hint(k, false);
+    set_job(fail_head(k, false), true, detail.empty() ? hint : detail + "\n" + hint);
 }
 
 static bool is_dir(const std::string &p) {
@@ -2702,7 +2730,8 @@ extern "C" void launcher_run(const char *root) {
                     }
                     ty += 74;
                     if (failed && g_fail) {  // what went wrong, and what to do
-                        std::string hint = g_fail_detail.empty() ? fail_hint(g_fail, g_pt) : g_fail_detail + "\n" + fail_hint(g_fail, g_pt);
+                        const char *fh = build_under_wine(g_fail) ? wine_build_hint(g_pt) : fail_hint(g_fail, g_pt);
+                        std::string hint = g_fail_detail.empty() ? fh : g_fail_detail + "\n" + fh;
                         float hh = text_size(F_BODY, 14, hint.c_str(), w - 48).y;
                         panel(dl, x, ty, w, hh + 64, IM_COL32(40, 12, 10, 220), IM_COL32(255, 138, 112, 90));
                         text(dl, F_LABEL, 16, x + 24, ty + 14, C_RED, fail_head(g_fail, g_pt));

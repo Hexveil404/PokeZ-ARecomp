@@ -30,6 +30,7 @@ static Uint32 duration;
 Uint64 SDL_GetTicks(void) { return ticks; }
 SDL_Window *SDL_GetKeyboardFocus(void) { return focus ? (SDL_Window *)1 : NULL; }
 bool menu_is_open(void) { return menu; }
+bool menu_cursor_needed(void) { return false; }  // (ZA Recomp's input.c: the mouse cursor for F1 / the start screen)
 Settings g_settings = {.rumble = true, .rumble_strength = 100};  // (the Rumble settings: on, full, as by default)
 void SDL_LockSpinlock(SDL_SpinLock *p) { (void)p; }
 void SDL_UnlockSpinlock(SDL_SpinLock *p) { (void)p; }

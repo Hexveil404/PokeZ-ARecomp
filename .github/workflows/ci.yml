@@ -183,7 +183,7 @@ jobs:
       - name: Windows lazy guest-memory commit race regression
         run: |
           clang -std=gnu11 -O1 -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -DWIN32_LEAN_AND_MEAN -DNOMINMAX \
-            tools/test_windows_lazy_commit.c -lwinmm -lole32 -lshell32 -o build/test-lazy-commit.exe
+            tools/test_windows_lazy_commit.c -lwinmm -lole32 -lshell32 -lgdi32 -o build/test-lazy-commit.exe
           build/test-lazy-commit.exe
       - name: Windows session log regression
         run: python tools/test_windows_logs.py

@@ -5,6 +5,10 @@
 #undef NDEBUG
 #include <assert.h>
 #include "../runtime/platform/windows.c"
+#include <stdarg.h>
+void rt_launcher_log(const char *fmt, ...) { va_list a; va_start(a, fmt); vfprintf(stderr, fmt, a); va_end(a); }  // (ZA Recomp: spawn / data folder logs)
+uint64_t g_watch_lo;  // (ZA Recomp: the guest write-watch window - off here)
+int g_watch_write;
 
 // The rest of the runtime, which the code under test doesn't reach
 void rt_crash_explain(char *out, size_t n, const char *log_path) { (void)out; (void)n; (void)log_path; abort(); }
@@ -53,7 +57,9 @@ int main(void) {
     // Protected on purpose: not ours to retry
     uint64_t watched = last + COMMIT_CHUNK;
     assert(plat_protect(watched, 4096, PLAT_PROT_READ) == 0);
+    g_watch_lo = watched;  // (ZA Recomp looks at protection only while a watch is armed: no VirtualQuery on the hot path)
     assert(!lazy_commit(watched));
+    g_watch_lo = 0;
     // Outside the window: not ours either
     assert(!lazy_commit(lo + size));
 

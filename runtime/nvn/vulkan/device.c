@@ -1066,10 +1066,23 @@ static void create_device(void) {
     // vkCreateDevice -4 on Dozen two minutes after a device loss on AMD's Vulkan driver - D3D12 refused the new device,
     // likely Windows still recovering the GPU or blocking this program after the reset). The settings file already says
     // Vulkan (the Graphics API choice is only kept once the device and swapchain are up), so this can't loop.
-    if (created != VK_SUCCESS && g_vk.dozen && !ENV("LARECOMP_DX12_NO_FALLBACK")) {
-        LOG("[vk] DirectX 12 (Dozen) could not create its device (%d: %s): starting again on Vulkan\n", created,
-            created == VK_ERROR_DEVICE_LOST ? "Direct3D 12 reports the GPU removed or reset" : "Direct3D 12 refused");
-        launcher_log_file("[vk] DirectX 12 could not create its device (%d): started again on Vulkan\n", created);
+    // DirectX 12 on an NVIDIA GPU (the setting, not LARECOMP_DX12=1): the same. It is there for AMD cards whose Vulkan
+    // driver crashes the game; on NVIDIA, Vulkan is the right path, and Dozen there crashed in its own layer at the
+    // first frames (#172, RTX 4050 Laptop, v0.1.17) and, on v0.1.18, froze on the start screen (a fence waited 2 s and
+    // more, nothing drawn) - no crash, so e380c58's switch never came.
+    bool dzn_nvidia = created == VK_SUCCESS && g_vk.dozen && !ENV("LARECOMP_DX12") &&
+                      (g_vk.props.vendorID == 0x10de || strstr(g_vk.props.deviceName, "NVIDIA"));
+    if ((created != VK_SUCCESS || dzn_nvidia) && g_vk.dozen && !ENV("LARECOMP_DX12_NO_FALLBACK")) {
+        if (dzn_nvidia) {
+            LOG("[vk] DirectX 12 (Dozen) on an NVIDIA GPU (%s): starting again on Vulkan, this GPU's own driver "
+                "(LARECOMP_DX12=1 keeps DirectX 12)\n", g_vk.props.deviceName);
+            launcher_log_file("[vk] DirectX 12 on an NVIDIA GPU: started again on Vulkan\n");
+            vkDestroyDevice(g_vk.dev, NULL), g_vk.dev = VK_NULL_HANDLE;
+        } else {
+            LOG("[vk] DirectX 12 (Dozen) could not create its device (%d: %s): starting again on Vulkan\n", created,
+                created == VK_ERROR_DEVICE_LOST ? "Direct3D 12 reports the GPU removed or reset" : "Direct3D 12 refused");
+            launcher_log_file("[vk] DirectX 12 could not create its device (%d): started again on Vulkan\n", created);
+        }
         g_settings.dx12 = false;
         settings_save();
         _putenv_s("VK_DRIVER_FILES", "");

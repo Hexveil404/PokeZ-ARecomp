@@ -1987,6 +1987,8 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     }
 }
 
+static _Atomic long debug_frames_at, debug_frames_n;  // (present_hooks: the frames to dump; debug_frame_after_present)
+void debug_frame_after_present(uint64_t frame);
 // The game thread's side of a present: the frame counters and the per-frame hooks (input, pacing, test hooks).
 static void present_hooks(void) {
     total_frames++;
@@ -2015,7 +2017,16 @@ static void present_hooks(void) {
     // LARECOMP_DEBUG_FRAMES=<n> (with LARECOMP_DEBUG_FRAME / F9): dump n consecutive frames (build/pass_<frame>_NNN.png)
     static long debug_n = -1;
     if (debug_n < 0) { const char *e = ENV("LARECOMP_DEBUG_FRAMES"); debug_n = e && atol(e) > 1 ? atol(e) : 1; }
-    g_debug_frame = debug_at && total_frames >= (uint64_t)debug_at && total_frames < (uint64_t)debug_at + (uint64_t)debug_n;
+    atomic_store(&debug_frames_at, debug_at), atomic_store(&debug_frames_n, debug_n);
+    if (!rq_on()) debug_frame_after_present(total_frames - 1);
+}
+
+// The frames dumped (F9 / LARECOMP_DEBUG_FRAME) are decided where their lists are translated: with the render thread
+// that is after it ran the present before them (rqueue.c) - set here, on the game thread, the flag was over by the
+// time the render thread got to the frame, and F9 caught only its first few passes.
+void debug_frame_after_present(uint64_t frame) {
+    long at = atomic_load(&debug_frames_at), n = atomic_load(&debug_frames_n);
+    g_debug_frame = at && frame + 1 >= (uint64_t)at && frame + 1 < (uint64_t)at + (uint64_t)n;
 }
 
 void backend_present(NvnTexture *t) {

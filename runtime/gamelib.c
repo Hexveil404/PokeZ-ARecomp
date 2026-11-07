@@ -111,8 +111,13 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
                 continue;
             }
             g_tables = open_lib(c[i], want);
-            if (g_tables) LOG("[gamelib] %s (%llu + %llu functions)\n", c[i], (unsigned long long)*g_tables->main_count,
-                              (unsigned long long)*g_tables->sdk_count);
+            if (g_tables) {
+                char n[160] = "";
+                for (uint32_t k = 0, o = 0; k < g_tables->nmods && o < sizeof n; k++)
+                    o += snprintf(n + o, sizeof n - o, "%s%s %llu", k ? ", " : "", g_tables->mods[k].name,
+                                  (unsigned long long)*g_tables->mods[k].count);
+                LOG("[gamelib] %s (functions: %s)\n", c[i], n);
+            }
         }
     }
     if (!g_tables && why) snprintf(why, why_size, "%s", g_error);

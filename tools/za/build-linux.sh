@@ -73,7 +73,7 @@ fi
 FLAGS=$(make -s --eval='pv: ; @echo $(GENFLAGS)' GENOPT="$GENOPT" pv)
 HOT=$(sed -n '/HOT_GIANTS\[\] = {/,/};/p' runtime/gamebuild.c | grep -o 'f_[0-9a-f]*' | sort -u)
 giants=()
-for f in generated/main/*.c generated/sdk/*.c; do
+for f in generated/main/*.c generated/sdk/*.c generated/subsdk*/*.c; do  # (subsdkN: Pokémon Legends Arceus)
     name=$(awk '/^void f_.*\(Cpu \*c\) \{/ {n++; s=$2} /^L_/ {l++} END {if (n == 1 && l > 1000) {sub(/\(.*/, "", s); print s}}' "$f")
     [ -n "$name" ] && ! grep -qx "$name" <<<"$HOT" && giants+=("$f")
 done

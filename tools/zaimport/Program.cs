@@ -18,7 +18,6 @@ using LibHac.Tools.FsSystem;
 using LibHac.Tools.FsSystem.NcaUtils;
 using Path = System.IO.Path;
 
-const ulong ZaBase = 0x0100F43008C44000;  // Pokémon Legends Z-A (update: +0x800, DLC: +0x1000 + n)
 
 try
 {
@@ -92,10 +91,14 @@ static int Run(string[] args)
 
     Nca? base_ = null, upd = null;
     var dlcs = new List<Nca>();
+    // The games set up from their packages (update: +0x800, DLC: +0x1000 + n); the first one found among them is taken
+    var Games = new (ulong id, string name)[] { (0x0100F43008C44000, "Pokémon Legends Z-A"),
+                                                (0x01001F5010DFA000, "Pokémon Legends Arceus") };
+    ulong ZaBase = Games.Select(g => g.id).FirstOrDefault(id => ncas.Any(n => n.nca.Header.TitleId == id));
     foreach (var (nca, name) in ncas)
     {
         ulong tid = nca.Header.TitleId;
-        if ((tid & ~0x1FFFUL) != ZaBase) continue;
+        if (ZaBase == 0 || (tid & ~0x1FFFUL) != ZaBase) continue;
         Console.WriteLine($"{name}: title {tid:x16} {nca.Header.ContentType}");
         if (nca.Header.ContentType == NcaContentType.Program)
         {
@@ -109,7 +112,7 @@ static int Run(string[] args)
         }
     }
     if (base_ == null)
-        return Fail(ncas.Count == 0 ? "no game packages found" : "the base game of Pokémon Legends Z-A isn't among these files");
+        return Fail(ncas.Count == 0 ? "no game packages found" : $"the base game of {string.Join(" or ", Games.Select(g => g.name))} isn't among these files");
     foreach (var n in new[] { base_, upd }.Concat(dlcs))
         if (n != null && n.Header.HasRightsId && !ks.ExternalKeySet.Contains(new RightsId(n.Header.RightsId)))
             return Fail($"no title key for {n.Header.TitleId:x16}: put title.keys from your Switch in the folder with " +

@@ -26,6 +26,9 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 > [!IMPORTANT]
 > **You need your own copy of the game.** ZA Recomp does not include any game files, code, assets or fonts.
 
+> [!NOTE]
+> **Experimental: *Pokémon Legends: Arceus* (1.1.1) runs too.** See [docs/ARCEUS.md](docs/ARCEUS.md).
+
 ## Contents
 
 - [Screenshots](#screenshots)

@@ -284,7 +284,13 @@ static void *run(void *arg) {
             if (it.nlists > 1) { backend_execute_batch(it.lists, it.nlists); free(it.lists); }
             else backend_execute(it.handle);
             break;
-        case IT_PRESENT: backend_present_now(it.tex, it.frame); break;
+        case IT_PRESENT: {
+            backend_present_now(it.tex, it.frame);
+            // (vulkan/device.c: F9's frame, as translated; weak - the Metal backend decides it on the game thread)
+            extern void debug_frame_after_present(uint64_t frame) __attribute__((weak));
+            if (debug_frame_after_present) debug_frame_after_present(it.frame);
+            break;
+        }
         case IT_DESTROY: { extern void nvn_texture_destroy(NvnTexture *t); nvn_texture_destroy(it.tex); break; }
         case IT_UPLOAD: backend_upload_now(it.tex, it.up_kind, it.data, it.w, it.h, it.stride, it.uv_off); break;
         case IT_FLUSH: { extern void renderer_flush(void); renderer_flush(); break; }

@@ -26,6 +26,9 @@ para *The Legend of Zelda: Link's Awakening*.
 > [!IMPORTANT]
 > **Você precisa da sua própria cópia do jogo.** O ZA Recomp não inclui arquivos, código, assets nem fontes do jogo.
 
+> [!NOTE]
+> **Experimental: *Pokémon Legends: Arceus* (1.1.1) também roda.** Veja [docs/ARCEUS.pt-BR.md](docs/ARCEUS.pt-BR.md).
+
 ## Conteúdo
 
 - [Imagens](#imagens)

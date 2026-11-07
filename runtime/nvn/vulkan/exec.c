@@ -2164,9 +2164,11 @@ static void compile_program(void *arg) {
 }
 
 // The guest memory window that shader global memory, the vertex cache and the texture upload checks cover: the heap
-// (SetHeapSize), or for a game on the SDK's virtual address memory, which has no heap (Pokémon Legends Z-A), its
-// largest physical memory region (svcMapPhysicalMemory, at most HEAP_MAX). Picked once, at first use: shaders bake
-// the base in.
+// (SetHeapSize), or for a game on the SDK's virtual address memory (Pokémon Legends Z-A: no heap) its largest physical
+// memory region (svcMapPhysicalMemory, at most HEAP_MAX). A game with both gets the larger: Pokémon Legends Arceus sets
+// a heap but keeps its graphics memory in a 3.1 GB physical pool (0x7b77b00000) - on the heap window its characters'
+// skinning (transform feedback) and storage buffers were outside it, and characters and text weren't drawn. Picked
+// once, at first use: shaders bake the base in.
 typedef struct { uint64_t base, max; bool phys; } GWin;
 static GWin gwin_ = {HEAP_BASE, HEAP_MAX, false};
 static atomic_bool gwin_done;
@@ -2183,11 +2185,11 @@ static void gwin_pick(void) {
             plat_commit(fb, fs);  // (the host import needs every page committed)
             LOG("[vk] guest memory window forced: %llx +%llx\n", fb, fs);
             atomic_store(&gwin_done, true);
-        } else if (kernel_heap_size()) atomic_store(&gwin_done, true);
+        } else if (kernel_heap_size() && kernel_heap_size() >= sz) atomic_store(&gwin_done, true);
         else if (sz >= (64ull << 20)) {
             gwin_ = (GWin){a, sz < HEAP_MAX ? sz : HEAP_MAX, true};
-            LOG("[vk] guest memory window: physical memory %llx +%llx (no heap)\n", (unsigned long long)a,
-                (unsigned long long)gwin_.max);
+            LOG("[vk] guest memory window: physical memory %llx +%llx (heap %llu MB)\n", (unsigned long long)a,
+                (unsigned long long)gwin_.max, (unsigned long long)kernel_heap_size() >> 20);
             atomic_store(&gwin_done, true);
         }
     }
@@ -3938,11 +3940,18 @@ static void gmem_window_init(void) {
     const char *w = ENV("LARECOMP_VK_GMEM_WINDOW");
     gmem_window = w ? strtoull(w, NULL, 10) << 20 : g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 256ull << 20 : 0;
 }
+// A game with a heap besides the physical window (Pokémon Legends Arceus) spreads its storage buffers lower: its glyph
+// instances 450 KB below the top 256 MB, its exposure's compute buffers ~790 MB below the top - read as zero outside
+// the window (no dialogue text, every character overexposed). It gets the top 1 GB (unless LARECOMP_VK_GMEM_WINDOW
+// says otherwise). Not the whole pool: the import makes the driver keep all of it resident, and the whole 3.2 GB on a
+// 7.4 GB machine pushed the rest into swap - vkQueueSubmit2 stalled 20-30 s, twice in half an hour of play.
 static void gmem_window_get(uint64_t *lo, uint64_t *len) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;  // (the translator and the render thread - run_queued_now - both ask)
     pthread_once(&once, gmem_window_init);
-    if (!gmem_window || !gwin()->phys || gwin_max <= gmem_window) { *lo = 0; *len = gwin_max; return; }
-    *lo = (gwin_max - gmem_window) & ~0xFFFFFull;
+    uint64_t w = gmem_window;
+    if (w && w < (1ull << 30) && !ENV("LARECOMP_VK_GMEM_WINDOW") && kernel_heap_size()) w = 1ull << 30;
+    if (!w || !gwin()->phys || gwin_max <= w) { *lo = 0; *len = gwin_max; return; }
+    *lo = (gwin_max - w) & ~0xFFFFFull;
     *len = gwin_max - *lo;
 }
 

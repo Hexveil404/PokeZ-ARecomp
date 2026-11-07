@@ -28,3 +28,5 @@ __pycache__/
 /tools/hdtools/
 # Claude Code: machine-specific notes
 CLAUDE.local.md
+# screenshots taken in game (F10): game images, never committed
+/screenshots/

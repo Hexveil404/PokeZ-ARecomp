@@ -49,6 +49,14 @@ jobs:
                 -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
           cmake --build sdl-build
           cmake --install sdl-build
+      # (Ubuntu's Vulkan headers lack VK_KHR_shader_quad_control / maximal_reconvergence, which device.c asks for: the
+      # pinned ones tools/linux/build_deps.sh puts in the AppImage's deps, into the same include folder as SDL3)
+      - name: Vulkan headers 1.4.350.1
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors -o vh.tar.gz https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.350.1.tar.gz
+          echo "6d1bb65e49520344cc0a48af3dc02e993781efff14c7ebdcb8ae9fa23ddf7e83  vh.tar.gz" | sha256sum -c
+          mkdir -p vh "$HOME/sdl3/include" && tar xf vh.tar.gz -C vh --strip-components 1
+          cp -R vh/include/vulkan vh/include/vk_video "$HOME/sdl3/include/"
       - name: App builds
         run: make -j"$(nproc)" build/lasrecomp DEPS="$HOME/sdl3"
       - name: Build cache and resume tests

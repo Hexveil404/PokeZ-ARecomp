@@ -41,6 +41,11 @@ extern "C" void plat_sleep_until_ns(uint64_t t) { auto now=plat_now_ns(); if(t>n
 extern "C" intptr_t plat_spawn(const char *const *a,const char *l,bool append) { return start_cb(a,l,append); }
 extern "C" int plat_proc_wait(intptr_t p,bool block) { return wait_cb(p,block); }
 extern "C" void plat_proc_kill(intptr_t p) { kill_cb(p); }
+// (ZA Recomp's gamebuild.c also logs to launcher.log, asks for free memory after a failed compile and for the CPU level)
+#include <cstdarg>
+extern "C" void rt_launcher_log(const char *fmt, ...) { va_list a; va_start(a, fmt); vfprintf(stderr, fmt, a); va_end(a); }
+extern "C" void plat_mem_free(uint64_t *phys, uint64_t *commit) { *phys = *commit = 0; }
+extern "C" bool gamelib_old_cpu(void) { return false; }
 '''
 GENERATOR = r'''
 import pathlib,sys,time

@@ -1327,6 +1327,22 @@ static const char *builtin_src(const char *name, int *stage) {
                "  if (v != w && (pc.cpu_wins == 0u || h[pc.dst + i] == w)) h[pc.dst + i] = v;\n"
                "}\n";
     }
+    // (exec.c snap_merge_back) a storing dispatch's writes into a storage snapshot, back to the original - all three in
+    // the guest heap: the words the dispatch changed (copy vs its pristine image) that the CPU didn't rewrite meanwhile
+    // (the original still the image's), and the image follows them, so the next dispatch's changes are told the same way
+    if (!strcmp(name, "snap_merge.comp")) {
+        *stage = STAGE_COMPUTE;
+        return "#version 450\n"
+               "layout(local_size_x = 256) in;\n"
+               "layout(std430, set = 0, binding = 0) buffer H { uint h[]; };\n"
+               "layout(push_constant) uniform P { uint copy; uint pristine; uint dst; uint n; } pc;\n"
+               "void main() {\n"
+               "  uint i = gl_GlobalInvocationID.x;\n"
+               "  if (i >= pc.n) return;\n"
+               "  uint v = h[pc.copy + i], w = h[pc.pristine + i];\n"
+               "  if (v != w && h[pc.dst + i] == w) { h[pc.dst + i] = v; h[pc.pristine + i] = v; }\n"
+               "}\n";
+    }
     // (exec.c ia_refresh) GPU-filled indirect draw parameters copied out of the guest heap (g) into private records, the
     // draw size bounded. s holds pc.cap slots: pc.cap records of 5 words, then pc.cap source word offsets into the heap,
     // then pc.cap caps {count, instances} the draws' translation writes; the first pc.n slots are in use. pc.work bounds

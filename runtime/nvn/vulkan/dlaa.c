@@ -68,8 +68,10 @@ static struct {
     PFN_Release release;
     bool tried, loaded, available, failed;
     NgxParam *params;
-    NgxHandle *feat;
-    uint32_t fw, fh;  // the feature's size
+    // DLSS features, each with its own history and size: [0] the scene's, [1] / [2] the clothing screen's character -
+    // its colour and its alpha (exec.c pv_resolve)
+    NgxHandle *feat[3];
+    uint32_t fw[3], fh[3];
 } N;
 
 typedef void (*SetI)(NgxParam *, const char *, int);
@@ -232,12 +234,13 @@ bool vk_dlaa_record(VkDevice dev, VkCommandBuffer cmd, const VkFsr2Frame *f) {
     if (!N.params && !NGX_OK(N.alloc_params(&N.params))) return fail("parameter allocation", 0);
     NgxParam *p = N.params;
     bool reset = f->reset;
-    if (N.feat && (N.fw != f->w || N.fh != f->h)) {  // (another size: a new feature)
+    int sl = f->slot > 0 && f->slot < 3 ? f->slot : 0;
+    if (N.feat[sl] && (N.fw[sl] != f->w || N.fh[sl] != f->h)) {  // (another size: a new feature)
         vkDeviceWaitIdle(dev);
-        N.release(N.feat);
-        N.feat = NULL;
+        N.release(N.feat[sl]);
+        N.feat[sl] = NULL;
     }
-    if (!N.feat) {
+    if (!N.feat[sl]) {
         p_setu(p, "CreationNodeMask", 1);
         p_setu(p, "VisibilityNodeMask", 1);
         p_setu(p, "Width", f->w);
@@ -257,17 +260,25 @@ bool vk_dlaa_record(VkDevice dev, VkCommandBuffer cmd, const VkFsr2Frame *f) {
         }
         // DLAA's quality value; an older DLSS (before it had one) gets Max Quality at the same size
         p_seti(p, "PerfQualityValue", NGX_PERFQ_DLAA);
-        NgxResult r = N.create(cmd, NGX_FEATURE_SUPERSAMPLING, p, &N.feat);
-        if (!NGX_OK(r) || !N.feat) {
-            N.feat = NULL;
+        NgxResult r = N.create(cmd, NGX_FEATURE_SUPERSAMPLING, p, &N.feat[sl]);
+        if (!NGX_OK(r) || !N.feat[sl]) {
+            N.feat[sl] = NULL;
             p_seti(p, "PerfQualityValue", NGX_PERFQ_MAXQUALITY);
-            r = N.create(cmd, NGX_FEATURE_SUPERSAMPLING, p, &N.feat);
-            if (!NGX_OK(r) || !N.feat) return fail("DLSS feature creation", r);
+            r = N.create(cmd, NGX_FEATURE_SUPERSAMPLING, p, &N.feat[sl]);
+            if (!NGX_OK(r) || !N.feat[sl]) {
+                N.feat[sl] = NULL;
+                if (sl) {  // (the clothing screen's character: only that one goes without - the scene's DLAA stays)
+                    LOG("[dlaa] DLSS feature %d creation failed (%08x)\n", sl, (unsigned)r);
+                    return false;
+                }
+                return fail("DLSS feature creation", r);
+            }
             LOG("[dlaa] this DLSS has no DLAA quality value: Max Quality at the scene's size\n");
         }
-        N.fw = f->w, N.fh = f->h;
+        N.fw[sl] = f->w, N.fh[sl] = f->h;
         reset = true;
-        LOG("[dlaa] DLSS feature created at %ux%u -> %ux%u\n", f->w, f->h, f->ow, f->oh);
+        if (sl) LOG("[dlaa] DLSS feature %d (clothing screen's character) created at %ux%u\n", sl, f->w, f->h);
+        else LOG("[dlaa] DLSS feature created at %ux%u -> %ux%u\n", f->w, f->h, f->ow, f->oh);
     }
     NgxResourceVK rc = res_image(f->color_view, f->color, f->color_format, f->w, f->h, VK_IMAGE_ASPECT_COLOR_BIT, false);
     NgxResourceVK ro = res_image(f->out_view, f->out, f->out_format, f->ow, f->oh, VK_IMAGE_ASPECT_COLOR_BIT, true);
@@ -294,8 +305,15 @@ bool vk_dlaa_record(VkDevice dev, VkCommandBuffer cmd, const VkFsr2Frame *f) {
     p_setf(p, "DLSS.Pre.Exposure", 1.0f);
     p_setf(p, "DLSS.Exposure.Scale", 1.0f);
     p_setf(p, "FrameTimeDeltaInMsec", f->dt_ms);
-    NgxResult r = N.evaluate(cmd, N.feat, p, NULL);
-    if (!NGX_OK(r)) return fail("DLSS evaluation", r);
+    NgxResult r = N.evaluate(cmd, N.feat[sl], p, NULL);
+    if (!NGX_OK(r)) {
+        if (sl) {
+            static int nl;
+            if (nl++ < 5) LOG("[dlaa] DLSS feature %d evaluation failed (%08x)\n", sl, (unsigned)r);
+            return false;
+        }
+        return fail("DLSS evaluation", r);
+    }
     return true;
 }
 

@@ -62,6 +62,9 @@ Settings g_settings;
 #include "../runtime/input_bind.h"
 int16_t g_bind_pad[BIND_PAD_COUNT];
 int g_game_is_la = 1;
+// (fs.c's Oodle-error report: page state and the running threads - not known here)
+bool plat_page_state(uint64_t addr, char *out, size_t n) { (void)addr; (void)out; (void)n; return false; }
+int kernel_live_threads(void) { return 0; }
 int rt_mods_on;
 void settings_load(void) {}
 bool settings_list_has(const char *list, const char *name) { return false; }

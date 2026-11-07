@@ -208,8 +208,10 @@ for path in (ROOT/'runtime').rglob('*'):
     code = strip_c.sub('', path.read_text(encoding='utf-8'))
     assert not re.search(r'\bGA_(?!ADDR\b|VERSION\b|RELEASE\b|FIELD\b|AT\b)[A-Z]', code), f'{path}: use GA(NAME)'
     assert set(re.findall(r'\bGA(?:_FIELD)?\(([A-Z][A-Z0-9_]*)\)', code)) <= values.keys(), str(path)
+    # (ZA Recomp: 0x7008000000 is Pokémon Z-A's sdk base; dispatch.c holds Z-A's own boot delegate sites, one per game
+    # build - 1.0.0 / 2.0.0 / 2.0.2 - which belong to that game, not to Link's Awakening's shared table)
     for match in re.finditer(r'0x(700[0-9a-fA-F]{7})', code):
-        assert int(match[1], 16) in (0x7000000000, 0x7004000000), str(path)
+        assert path.name == 'dispatch.c' or int(match[1], 16) in (0x7000000000, 0x7004000000, 0x7008000000), str(path)
     assert not re.search(r'(?:MAIN_BASE|SDK_BASE)\s*\+\s*0x[0-9a-fA-F]+', code), str(path)
 tree = ast.parse((ROOT/'tools/patches.py').read_text(encoding='utf-8'))
 used = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == 'A'}

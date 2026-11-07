@@ -228,3 +228,7 @@ int main(int argc, char **argv) {
     if (r.hold_end > 0) check(r.fps_end >= 0.95 * r.hold_end, "the held frame rate is met");
     return g_fail;
 }
+// (ZA Recomp's output_scale.c: Pokémon Z-A's handheld image - Link's Awakening here)
+#include <stdbool.h>
+bool g_za_frame_hook;
+bool am_handheld(void) { return false; }

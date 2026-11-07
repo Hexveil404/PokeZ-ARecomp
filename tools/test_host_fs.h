@@ -53,6 +53,42 @@ void save_editor_file_read(const char *p, uint64_t a, int64_t o, int64_t n) {}
 void pace_hitch(const char *why) {}  // (runtime/nvn/pace.c: a save commit is a stall)
 static int notices;  // save-failed warnings shown (fs.c tells the player once per run)
 void plat_notice(const char *text) { notices++; }
+// (ZA Recomp's fs.c: mods from the settings, host open / rename with Windows sharing, the button prompts' romfs patch,
+// read timings)
+#include "../runtime/settings.h"
+#include <fcntl.h>
+#include <time.h>
+Settings g_settings;
+#include "../runtime/input_bind.h"
+int16_t g_bind_pad[BIND_PAD_COUNT];
+int g_game_is_la = 1;
+int rt_mods_on;
+void settings_load(void) {}
+bool settings_list_has(const char *list, const char *name) { return false; }
+const char *pl_prompt_set(void) { return NULL; }
+#ifdef _WIN32  /* (as runtime/platform/windows.c: shared for delete, so an open save can be renamed over - the autosave fix) */
+#include <windows.h>
+#include <io.h>
+static void test_errno_win(DWORD e) { errno = e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS ? EEXIST : e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND ? ENOENT : EACCES; }
+int plat_open_file(const char *path, int flags) {
+    DWORD access = (flags & O_RDWR) ? GENERIC_READ | GENERIC_WRITE : GENERIC_READ;
+    DWORD disp = !(flags & O_CREAT) ? OPEN_EXISTING : (flags & O_EXCL) ? CREATE_NEW : OPEN_ALWAYS;
+    HANDLE h = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, disp, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { test_errno_win(GetLastError()); return -1; }
+    int fd = _open_osfhandle((intptr_t)h, ((flags & O_RDWR) ? _O_RDWR : _O_RDONLY) | _O_BINARY);
+    if (fd < 0) CloseHandle(h);
+    return fd;
+}
+int plat_rename(const char *from, const char *to) {
+    if (MoveFileExA(from, to, 0)) return 0;
+    test_errno_win(GetLastError());
+    return -1;
+}
+#else
+int plat_open_file(const char *path, int flags) { return open(path, flags, 0644); }
+int plat_rename(const char *from, const char *to) { return rename(from, to); }
+#endif
+uint64_t plat_now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
 #include "../runtime/game_addresses.h"
 static uint8_t live_save[0x6000];
 static GameAddrs test_ga = {  // the 1.0.0 table, with the live save in host memory

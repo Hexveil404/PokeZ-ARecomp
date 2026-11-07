@@ -208,3 +208,5 @@ int main(int argc, char **argv) {
     if (i < 0 || i >= ncases) return 2;
     return run(&cases[i]) ? 0 : 1;
 }
+// (ZA Recomp's pace.c asks which game runs: Link's Awakening here)
+int g_game_is_la = 1;

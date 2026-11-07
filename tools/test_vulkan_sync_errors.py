@@ -14,7 +14,8 @@ def read(path):
     return subprocess.check_output(['git', 'show', f'{args.ref}:{path}'], cwd=root, text=True) if args.ref else (root/path).read_text()
 source = read('runtime/nvn/vulkan/exec.c')
 header = read('runtime/nvn/vulkan/vk.h')
-query = source[source.index('uint64_t vk_completed_seq(void) {'):source.index('// (LARECOMP_VK_PROF) waits')]
+_q = source.index('uint64_t vk_completed_seq(void) {')
+query = source[_q:source.index('\n}\n', _q) + 3]  # (the function alone: ZA Recomp keeps device-lost reports after it)
 wait = source[source.index('void vk_wait_seq(uint64_t seq) {'):source.index('uint64_t vk_pending_seq(void)')]
 start = header.index('#define VK_CHECK(x)')
 check = header[start:header.index('\n\n', start)]
@@ -41,7 +42,8 @@ static void wait_account(uint64_t elapsed) { assert(elapsed); accounts++; wait_w
 static void cq_resolve_done(uint64_t seq) { resolved=seq; }
 void vk_device_fault_report(void) { faults++; }
 void vk_devlost_dump(void) { dumps++; }
-void rq_watch(const char *what, uint64_t arg) { (void)what; (void)arg; }  // (the render thread's hang dump view)
+void rq_watch(const char *what, uint64_t arg) { (void)what; (void)arg; }
+static void ir_dump(void) {}  // (ZA Recomp: the indirect draws in flight, on a timeout or device loss)  // (the render thread's hang dump view)
 // the recorder thread (record.c): what the translating thread queued (submit_seq), what the driver has (rec_submitted)
 static pthread_mutex_t seq_lock=PTHREAD_MUTEX_INITIALIZER;
 static uint64_t submit_seq=100, rec_sub=100, rec_waited;

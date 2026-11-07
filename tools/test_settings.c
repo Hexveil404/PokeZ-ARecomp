@@ -72,3 +72,6 @@ int main(int argc, char **argv) {
     settings_save();
     return 0;
 }
+// (ZA Recomp's settings.c sizes its recommended video settings by the machine)
+int SDL_GetNumLogicalCPUCores(void) { return 8; }
+int SDL_GetSystemRAM(void) { return 16384; }

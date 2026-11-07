@@ -29,6 +29,12 @@ static const char *scenario;
 static unsigned instance_calls, callback_calls;
 static bool requested_validation;
 #define LOG(...) fprintf(stderr,__VA_ARGS__)
+// (ZA Recomp's create_instance: ENV caches getenv, and DLAA's NGX may add instance extensions - none here)
+#define ENV(name) getenv(name)
+static void vk_dlaa_instance_exts(const char **ext, uint32_t *n, uint32_t max) { (void)ext; (void)n; (void)max; }
+// (and asks the loader for HDR colour spaces / debug utils for the address binding report: none offered here)
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(const char *layer, uint32_t *n, VkExtensionProperties *p) { (void)layer; (void)p; *n = 0; return VK_SUCCESS; }
+static void ab_messenger_create(void) {}
 #define FATAL(...) do { fprintf(stderr,__VA_ARGS__); fflush(stderr); _Exit(19); } while (0)
 static const char *const *SDL_Vulkan_GetInstanceExtensions(Uint32 *count) {
     static const char *extensions[]={"VK_KHR_surface"}; *count=1; return extensions;

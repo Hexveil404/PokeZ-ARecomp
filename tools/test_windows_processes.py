@@ -16,6 +16,8 @@ harness = r'''
 #include <assert.h>
 #include <stdio.h>
 #include "platform.h"
+#include <stdarg.h>
+void rt_launcher_log(const char *fmt, ...) { va_list a; va_start(a, fmt); vfprintf(stderr, fmt, a); va_end(a); }  // (ZA Recomp's spawn logs to launcher.log)
 static bool reject_job;
 static BOOL assign_job(HANDLE job, HANDLE process) {
     if (reject_job) { SetLastError(ERROR_ACCESS_DENIED); return FALSE; }

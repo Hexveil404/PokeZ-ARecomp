@@ -115,7 +115,10 @@ with tempfile.TemporaryDirectory() as temporary:
         if command[0] == str(relocated): command[0] = compiler
         if command[0]==str(generator): command=[sys.executable,*command]
         elif (fail_compile and '-c' in command) or (fail_link and '-c' not in command):
-            fail_compile=fail_link=False
+            # (a compile fails every try: ZA Recomp's gamebuild.c tries a failed file twice more - clang crashing
+            # under memory pressure, #116 - so a one-shot failure would just be retried)
+            if '-c' in command: fail_compile-=1
+            else: fail_link=False
             command=[sys.executable,'-c','import sys;print("synthetic failure");sys.exit(7)']
         stream=open(log.decode(),'ab' if append else 'wb')
         try:
@@ -178,8 +181,9 @@ with tempfile.TemporaryDirectory() as temporary:
         assert not (work/'in-progress').exists()
         assert hashlib.sha256(output.read_bytes()).digest()==before
         (work/'sdk_000.o').write_bytes(b'corrupt')
-        fail_compile=True
+        fail_compile=3
         assert not run(),why.value
+        fail_compile=0
         assert hashlib.sha256(output.read_bytes()).digest()==before
         assert run(),why.value
         assert len(compiles())==2 and not generators()

@@ -150,3 +150,10 @@ int main(int argc, char **argv) {
     printf("delete guard: all checks passed\n");
     return 0;
 }
+// (ZA Recomp's paths.c / platform: the launcher log and the guest write-watch window, unused here)
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+void rt_launcher_log(const char *fmt, ...) { va_list a; va_start(a, fmt); vfprintf(stderr, fmt, a); va_end(a); }
+uint64_t g_watch_lo;
+int g_watch_write;

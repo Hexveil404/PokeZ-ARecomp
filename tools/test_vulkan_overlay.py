@@ -41,6 +41,7 @@ static struct { VkDevice dev; uint32_t qfam; VkFormat sc_format; VkExtent2D sc_e
     (VkDevice)0x10, 0, VK_FORMAT_B8G8R8A8_UNORM, {1280, 800}, {(VkImageView)0x100, (VkImageView)0x101}};
 typedef struct { uint32_t image; VkSemaphore acquired; bool ok, secondary; uint64_t id; } Frame;
 static Frame cur_frame;
+static struct { bool render_pass; } g_vkc;  // (ZA Recomp: Vulkan 1.2 render passes draw the overlay directly - dynamic rendering here)
 static int slot;
 static bool recorder_on;
 static uint64_t pending = 1, completed, waited_for;

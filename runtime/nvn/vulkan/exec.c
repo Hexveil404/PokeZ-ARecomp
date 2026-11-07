@@ -4151,8 +4151,28 @@ static bool snap_on(void) {
     return snap_state;
 }
 static uint64_t snap_ring_end(void) { return snap_on() ? snap_base + SNAP_RING : 0; }  // (heap offset; 0: no ring)
+// The ring for the copies of a compute dispatch's uniform buffers outside the window (cbuf_info): the snapshots' own
+// when they are on; with them off (no overlap - AMD's default) the same ring after a physical-memory window, which
+// gwin_pick reserved and the import covers. Not over lazy chunks without the snapshots (the ring isn't imported then).
+static int uring_state = -1;  // -1 not decided, 0 none, 1 the ring set up here (snapshots off)
+static bool copy_ring_on(void) {
+    if (snap_on()) return true;
+    if (snap_state < 0 || gc_lazy) return false;  // (not decided yet / lazy chunks)
+    if (uring_state < 0) {
+        uring_state = 0;
+        uint64_t base = (gwin_.ring + 0xFFFF) & ~0xFFFFull;
+        if (gwin()->phys && gwin_.ring && base + SNAP_RING <= gwin_max) {
+            snap_base = base;
+            plat_commit(gwin_base + snap_base, SNAP_RING);
+            uring_state = 1;
+            LOG("[vk] compute uniform buffers outside the guest memory window: copies at %llx\n", (unsigned long long)(gwin_base + snap_base));
+        }
+    }
+    return uring_state == 1;
+}
 static void snap_reset(void) {  // (vk_exec_reset: a reboot - the heap is set up again, its pages replaced)
     snap_state = -1;
+    uring_state = -1;
     snap_base = snap_off = 0;
     snap_half = 0;
     snap_half_seq[0] = snap_half_seq[1] = 0;
@@ -4632,10 +4652,26 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
             for (int i = 0; i < 16; i++) key.ub[i][0] = st.ubuf[5][i].addr, key.ub[i][1] = st.ubuf[5][i].size;
             key.g[0] = gx, key.g[1] = gy, key.g[2] = gz;
         }
+        // A compute shader reads its uniform buffers through the table below with global memory loads, which reach
+        // only the guest memory window: one outside it read zero (Pokémon Z-A: the rain's particle update read its
+        // gravity and drag from 0x745... as 0 - every drop stopped after one step). Those get a copy in the ring, made
+        // now (its contents at this dispatch: no table shared with an earlier dispatch then).
+        uint16_t ucopy = 0;
+        if (stage == 5 && si->uses_gmem)
+            for (int i = 0; i < 16; i++) {
+                uint64_t a = st.ubuf[5][i].addr, sz = st.ubuf[5][i].size;
+                if (a && sz && sz <= 0x10000 && (a < gwin_base || a + sz > gwin_base + gwin_max)) ucopy |= 1u << i;
+            }
+        if (ucopy && !copy_ring_on()) {
+            static int nlog;
+            if (nlog++ < 4) LOG("[vk] compute uniform buffers outside the gmem window (mask %#x, program %llx): no ring for copies, read as zero\n",
+                                ucopy, (unsigned long long)st.program->stages[5].code_addr);
+            ucopy = 0;
+        }
         static struct { uint64_t seq; __typeof__(key) key; VkSpan span; } last[3];
         int slot = stage == 5 ? 2 : stage == 1 ? 1 : 0;
         uint64_t seq = vk_pending_seq();
-        if (last[slot].seq == seq && !memcmp(&last[slot].key, &key, sizeof key)) return ubo_span(last[slot].span, size);
+        if (!ucopy && last[slot].seq == seq && !memcmp(&last[slot].key, &key, sizeof key)) return ubo_span(last[slot].span, size);
         uint32_t drv[0x800 / 4] = {0};
         if (si->uses_gmem) {  // storage buffers outside the guest memory window: their shader accesses read zero
             static int nlog;
@@ -4652,7 +4688,12 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
             drv[0x200 / 4] = gx; drv[0x204 / 4] = gy; drv[0x208 / 4] = gz;
             for (int i = 0; i < 16; i++) {
                 uint32_t *u = &drv[(0x210 + 16 * i) / 4];
-                u[0] = (uint32_t)st.ubuf[5][i].addr; u[1] = (uint32_t)(st.ubuf[5][i].addr >> 32); u[2] = (uint32_t)st.ubuf[5][i].size;
+                uint64_t ua = st.ubuf[5][i].addr, us = st.ubuf[5][i].size;
+                if ((ucopy >> i) & 1) {
+                    uint64_t c = ring_take((us + 255) & ~255ull);
+                    if (c) { memcpy((void *)(uintptr_t)c, (const void *)(uintptr_t)ua, us); ua = c; stat_snap_bytes += us; }
+                }
+                u[0] = (uint32_t)ua; u[1] = (uint32_t)(ua >> 32); u[2] = (uint32_t)us;
                 uint32_t *e = &drv[(0x310 + 16 * i) / 4];
                 e[0] = (uint32_t)sb[i].addr; e[1] = (uint32_t)(sb[i].addr >> 32); e[2] = (uint32_t)sb[i].size;
             }
@@ -7376,6 +7417,69 @@ static void args_trace(const char *what, uint64_t code) {
     }
 }
 
+// After a storing dispatch: its writes into storage snapshots, back to the originals. A range the CPU keeps rewriting
+// is bound to compute as a copy (snap_storage), and the GPU's writes stayed in the copy - but draws read vertex streams
+// from the original, in place (Pokémon Z-A's rain: the particle update moves each drop in buffers the CPU also writes
+// new drops into, and the drops were drawn where they were spawned, a sheet hanging ~10 m up). snap_merge.comp writes
+// back the words the dispatch changed (copy vs pristine image) where the CPU hasn't rewritten the original since, the
+// rule rs_copy_make's remake follows. The original's pages are then the GPU's (vc_mark_gpu: draws read them in place).
+// LARECOMP_VK_SNAP_MERGE=0: off (the writes stay in the copy, as before).
+static VkPipeline smerge_pipe;
+static VkPipelineLayout smerge_layout;
+static VkDescriptorSetLayout smerge_set_layout;
+static bool smerge_init(void) {
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_VK_SNAP_MERGE") || atoi(ENV("LARECOMP_VK_SNAP_MERGE")) != 0;
+    if (!on || smerge_pipe) return on && smerge_pipe;
+    VkDescriptorSetLayoutBinding b = {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+                                      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
+    VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
+    VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &smerge_set_layout));
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+    VkPipelineLayoutCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                     .pSetLayouts = &smerge_set_layout, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+    VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &pi, NULL, &smerge_layout));
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = smerge_layout,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                                                .module = vk_builtin_shader("snap_merge.comp"), .pName = "main"}};
+    VK_CHECK(vkCreateComputePipelines(g_vk.dev, VK_NULL_HANDLE, 1, &ci, NULL, &smerge_pipe));
+    return true;
+}
+static void snap_merge_back(VkCommandBuffer cb) {
+    if (!sb_eff_on || gc_lazy || gmem_lo || !gmem_buf) return;  // (the import's offsets must be the window's)
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    for (int i = 0; i < 16; i++) {
+        const Range *o = &st.sbuf[5][i];
+        uint64_t c = sb_eff[5][i].addr;
+        if (!o->addr || !o->size || c == o->addr) continue;
+        const RangeState *e = NULL;
+        for (int k = 0; k < nrs && !e; k++) if (rs_tab[k].addr == o->addr && rs_tab[k].size == o->size) e = &rs_tab[k];
+        if (!e || e->copy != c || !e->pristine) continue;  // (a copy without an image: not a compute slot's)
+        uint64_t lo = o->addr - gwin_base;
+        if ((o->addr | c | e->pristine | o->size) & 3 || o->addr < gwin_base || lo + o->size > gmem_size ||
+            c < gwin_base || e->pristine - gwin_base + o->size > gmem_size)
+            continue;
+        if (!set) {
+            if (!smerge_init()) return;
+            vk_full_barrier(cb);
+            set = vk_alloc_set(smerge_set_layout);
+            VkDescriptorBufferInfo bi = gmem_info();
+            VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0,
+                                      .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi};
+            rec_UpdateDescriptorSets(1, &w);
+            rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, smerge_pipe);
+            rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, smerge_layout, 0, 1, &set, 0, NULL);
+        }
+        uint32_t pc[4] = {(uint32_t)((c - gwin_base) / 4), (uint32_t)((e->pristine - gwin_base) / 4), (uint32_t)(lo / 4),
+                          (uint32_t)(o->size / 4)};
+        rec_CmdPushConstants(cb, smerge_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+        rec_CmdDispatch(cb, (pc[3] + 255) / 256, 1, 1);
+        vc_mark_gpu(lo, lo + o->size);
+    }
+    if (set) vk_full_barrier(cb);
+}
+
 static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz);
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     dispatch_compute_(gx, gy, gz);
@@ -7458,7 +7562,7 @@ static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz) {
     if (gc_shift && cp->si->uses_gmem) gmem_chunk_bind(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, GMEM_CHUNK_SET(STAGE_COMPUTE), 1u << STAGE_COMPUTE);
     rec_CmdDispatch(cb, gx, gy, gz);
     if (cp->si->uses_gmem_map && cp->si->uses_gmem_store) gfast_finish(cb);
-    if (cp->si->uses_gmem_store) vc_mark_sbufs(5);
+    if (cp->si->uses_gmem_store) snap_merge_back(cb), vc_mark_sbufs(5);
     stat_dispatches++;
     subr_now.dispatches++, subr_now.cs = cp->code;
     if (g_debug_frame && g_fullcap) fullcap_dispatch(true, gx, gy, gz);  // (after: gfast's copy back included)

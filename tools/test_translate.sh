@@ -25,6 +25,9 @@ RENAME="-Dmaxwell_translate=old_maxwell_translate -Dmaxwell_free=old_maxwell_fre
 PRE=""
 case "$(uname -s)" in MINGW*|MSYS*) PRE="-include malloc.h";; esac
 $CC -O2 -w $PRE $RENAME -c "$OUT/old/translate.c" -o "$OUT/old.o"
+# (globals the RENAME list doesn't cover - ZA Recomp added maxwell_quad_control_* and others - would be defined twice:
+# the reference copy's become weak, so new.o's win the link)
+${OBJCOPY:-objcopy} --weaken "$OUT/old.o"
 $CC -O2 -Wall -c runtime/nvn/maxwell/translate.c -o "$OUT/new.o"
 if [ "${GLSL:-1}" = 1 ]; then
   $CC -O2 -Wall -DWITH_GLSL tools/test_translate.c "$OUT/new.o" "$OUT/old.o" -o "$OUT/test_translate" \

@@ -1039,6 +1039,110 @@ static void tab_quit(float scale, bool in_game) {
 }
 
 // Pokémon Z-A's Game page: its text language, and how to reach this menu
+// F1 > Online (experimental, runtime/services/net.c): link trades and battles with a friend over the internet. Each
+// player copies their connection code, sends it (WhatsApp, Discord...) and pastes the friend's: both games then reach
+// each other directly (no server), and Link Play > Nearby Players finds the friend as if on the same network - as
+// often as wanted while the game runs.
+extern "C" void net_online_open(void);
+extern "C" bool net_online_code(char *out, size_t n);
+extern "C" int net_online_connect(const char *code);
+extern "C" int net_online_status(char *out, size_t n);
+extern "C" int net_online_nat(void);
+extern "C" bool net_inet_time_synced(void);  // (net_inet.c: network time known - the PCs' clocks don't matter)
+static void tab_online(void) {
+    static bool opened;
+    if (!opened) opened = true, net_online_open();  // (the transport, on a port of its own, and our public address)
+    static char note[96];  // what the last paste did
+    static uint64_t copied_at, pasted_at;  // pasted_at: the friend's code, for "didn't connect" after 2 minutes
+    char code[48] = {0};
+    bool have = net_online_code(code, sizeof code);
+    char peers[512];
+    int live = net_online_status(peers, sizeof peers);
+    opt_begin("##online", ImGui::GetFontSize() / 34);
+    opt_section(TR("Play with a friend over the internet (test)", "Jogar com um amigo pela internet (teste)"));
+    opt_disable_next();  // (a notice: this feature is a test - it may change or go away in a later version)
+    opt_action(TR("Test feature", "Recurso em teste"), TR("may change or be removed", "pode mudar ou ser removido"),
+               TR("Online play is a test in this version: link trades and private battles with a friend, game to game, "
+                  "with no server. It may not connect on every network, and it may change or be removed in a later "
+                  "version. Your save is not sent anywhere.",
+                  "O jogo online é um teste nesta versão: trocas e batalhas privadas com um amigo, de jogo para jogo, "
+                  "sem servidor. Pode não conectar em todas as redes, e pode mudar ou ser removido numa versão futura. "
+                  "O seu save não é enviado para lugar nenhum."), false);
+    bool just_copied = copied_at && SDL_GetTicks() - copied_at < 2500;
+    if (!have) opt_disable_next();
+    if (opt_action(TR("Your code", "Seu código"), have ? (just_copied ? TR("Copied!", "Copiado!") : code)
+                                                       : TR("Finding your address...", "Descobrindo seu endereço..."),
+                   TR("Copy it (A / click) and send it to your friend. Share it only with who you'll play with: it "
+                      "carries your internet address. It's valid while the game stays open.",
+                      "Copie (A / clique) e mande para o seu amigo. Compartilhe só com quem vai jogar com você: ele "
+                      "leva o seu endereço de internet. Vale enquanto o jogo estiver aberto."), false)) {
+        SDL_SetClipboardText(code);
+        copied_at = SDL_GetTicks();
+    }
+    if (opt_action(TR("Paste friend's code", "Colar código do amigo"), note[0] ? note : "",
+                   TR("Copy your friend's code, then choose this: it's read from the clipboard. Both of you paste "
+                      "the other's code - that is what lets the two connections through.",
+                      "Copie o código do seu amigo e escolha esta opção: ele é lido da área de transferência. Os dois "
+                      "colam o código um do outro - é isso que deixa as duas conexões passarem."), false)) {
+        char *clip = SDL_GetClipboardText();
+        int r = clip ? net_online_connect(clip) : 0;
+        if (r > 0) pasted_at = SDL_GetTicks();
+        snprintf(note, sizeof note, "%s", r > 0 ? TR("Connecting...", "Conectando...")
+                                          : r < 0 ? TR("That's your own code", "Esse é o seu próprio código")
+                                                  : TR("No code in the clipboard", "Nenhum código copiado"));
+        SDL_free(clip);
+    }
+    // Not connected 2 minutes after the friend's code (hole punching tries once a minute, and the friend may
+    // paste later: net_inet_punch): say why when we know it (this PC's NAT gives a new port per
+    // destination - the address in our code is useless to the friend), and what works anyway - a virtual LAN (Radmin
+    // VPN, ZeroTier, Hamachi): the two games then find each other as on one network, no codes needed
+    bool failed = !live && pasted_at && SDL_GetTicks() - pasted_at > 120000;
+    int nat = net_online_nat();
+    char st[64];
+    if (live) snprintf(st, sizeof st, TR("Connected (%d)", "Conectado (%d)"), live);
+    else if (failed) snprintf(st, sizeof st, "%s", TR("Didn't connect", "Não conectou"));
+    else snprintf(st, sizeof st, "%s", pasted_at ? TR("Waiting for your friend", "Esperando o seu amigo") : "-");
+    const char *vpn_en = "Radmin VPN, ZeroTier or Hamachi: install the same one, join the same network, and Link Play > "
+                         "Nearby Players finds your friend as if you were at the same place - no codes needed.";
+    const char *vpn_pt = "Radmin VPN, ZeroTier ou Hamachi: instalem o mesmo, entrem na mesma rede, e o Link Play > Nearby "
+                         "Players acha o seu amigo como se vocês estivessem no mesmo lugar - sem precisar de código.";
+    char why[640];
+    if (live)
+        snprintf(why, sizeof why, "%s", TR("Connected. Now open Link Play > Nearby Players (Link Trade or Private Battles) in the "
+                                           "game, both of you with the same link code / room.",
+                                           "Conectado. Agora abram Link Play > Nearby Players (Link Trade ou Private Battles) no "
+                                           "jogo, os dois com o mesmo código de troca / sala."));
+    else if (failed && nat == 2)
+        snprintf(why, sizeof why, TR("Your internet connection gives each destination a different port (a \"symmetric\" NAT, "
+                                     "common on mobile data), so your friend can't reach the address in your code. Try "
+                                     "another connection (home Wi-Fi instead of mobile data), or a virtual network: %s",
+                                     "A sua conexão usa uma porta diferente para cada destino (NAT \"simétrico\", comum em "
+                                     "dados móveis), então o seu amigo não consegue chegar no endereço do seu código. Tente "
+                                     "outra conexão (Wi-Fi de casa em vez de dados móveis) ou uma rede virtual: %s"),
+                 TR(vpn_en, vpn_pt));
+    else if (failed && net_inet_time_synced())  // (network time: the PCs' clocks don't matter)
+        snprintf(why, sizeof why, TR("Check that both of you pasted the other's code (new codes after a game restart). If it still doesn't "
+                                     "connect, one of your networks blocks direct connections - use a virtual network: %s",
+                                     "Confiram se os dois colaram o código um do outro (o código muda quando o jogo reinicia). Se ainda não "
+                                     "conectar, a rede de um de vocês bloqueia conexões diretas - usem uma rede virtual: %s"),
+                 TR(vpn_en, vpn_pt));
+    else if (failed)
+        snprintf(why, sizeof why, TR("Check that both of you pasted the other's code (new codes after a game restart) and that both PCs show the "
+                                     "right time, to the second (Windows: Sync now). If it still doesn't connect, one of your networks blocks direct connections - use a virtual "
+                                     "network: %s",
+                                     "Confiram se os dois colaram o código um do outro (o código muda quando o jogo reinicia) e se os dois PCs "
+                                     "estão com a hora certa, nos segundos (Windows: Sincronizar agora). Se ainda não conectar, a rede de um de vocês bloqueia conexões diretas - usem uma rede "
+                                     "virtual: %s"),
+                 TR(vpn_en, vpn_pt));
+    else
+        snprintf(why, sizeof why, "%s", TR("Once both codes are pasted, this says Connected, usually within a minute.",
+                                           "Com os dois códigos colados, aqui aparece Conectado, normalmente em até um minuto."));
+    opt_disable_next();
+    opt_action(TR("Status", "Situação"), st, why, false);
+    (void)peers;
+    opt_end();
+}
+
 static void tab_game(void) {
     opt_begin("##game", ImGui::GetFontSize() / 34);
     opt_section(TR("Game", "Jogo"));  // (its button icons: the Controls tab, with the rest of the controller)
@@ -1232,10 +1336,10 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     if (prelaunch) tabs[ntabs++] = {TR("Files", "Arquivos"), -1, true};
     if (!menu_la_tabs) {
         const char *names[] = {TR("Controls", "Controles"), TR("Video", "Vídeo"), TR("Audio", "Áudio"), TR("Game", "Jogo"),
-                               TR("Quit", "Sair")};
-        static const int ids[] = {8, 0, 1, 10, 9};
-        for (int i = 0; i < 5; i++)
-            if (ids[i] != 9 || !prelaunch) tabs[ntabs++] = {names[i], ids[i], true};
+                               "Online", TR("Quit", "Sair")};
+        static const int ids[] = {8, 0, 1, 10, 11, 9};
+        for (int i = 0; i < 6; i++)
+            if ((ids[i] != 9 || !prelaunch) && (ids[i] != 11 || in_game)) tabs[ntabs++] = {names[i], ids[i], true};
     } else {
         static const char *names[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Gameplay",
                                       "Cosmetics", "Controls", "Quit"};
@@ -1359,6 +1463,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 case 8: controls_tab_draw(scale); break;
                 case 9: tab_quit(scale, in_game); break;
                 case 10: tab_game(); break;
+                case 11: tab_online(); break;
                 }
                 static const char *scroll_test = getenv("LARECOMP_MENU_SCROLL");  // test hook: page scroll, 0..1
                 if (scroll_test) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(scroll_test));

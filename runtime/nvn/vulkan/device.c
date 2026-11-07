@@ -2501,6 +2501,11 @@ void ui_window_init(void) {
     window = SDL_CreateWindow("ZA Recomp", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
+    if (ENV("LARECOMP_WINDOW_POS")) {  // (two games side by side: local play tests)
+        int x = 0, y = 0;
+        sscanf(ENV("LARECOMP_WINDOW_POS"), "%d,%d", &x, &y);
+        SDL_SetWindowPosition(window, x, y);
+    }
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
     if (g_settings.fullscreen && !ENV("LARECOMP_WINDOW") && !ENV("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     create_instance();

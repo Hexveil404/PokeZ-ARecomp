@@ -3,6 +3,7 @@
 // (runtime/ui/menu.mm menu_keyboard_run) asks for the text - typed directly with a keyboard, an on-screen keyboard
 // with a controller - while this (game) thread keeps re-presenting the last frame.
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../hle.h"
@@ -45,7 +46,9 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
         initial[i] = ch < 0x80 ? (char)ch : '?';
     }
     char text[96];
-    int ok = menu_keyboard_run(initial, max_len, text, sizeof text);
+    // (research aid) LARECOMP_SWKBD_ANSWER=<text>: answered without the overlay (hidden test runs: the link code)
+    const char *answer = getenv("LARECOMP_SWKBD_ANSWER");
+    int ok = answer ? (snprintf(text, sizeof text, "%s", answer), 1) : menu_keyboard_run(initial, max_len, text, sizeof text);
     if (!ok) snprintf(text, sizeof text, "%s", initial);  // cancelled: keep what was there
     bool utf8 = *(const uint8_t *)(uintptr_t)(arg + 0x3bd) != 0;
     LOG("[swkbd] name entry (max %d, initial \"%s\", %s): %s \"%s\"\n", max_len, initial, utf8 ? "UTF-8" : "UTF-16",

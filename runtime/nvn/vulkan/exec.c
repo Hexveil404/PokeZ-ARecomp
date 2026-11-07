@@ -1299,6 +1299,16 @@ static void skip_note(int why, bool compute) {
 #define SKIP(why) do { stat_skipped++; if (log_skips) skip_note(why, false); } while (0)
 #define SKIP_CS(why) do { stat_skipped++; if (log_skips) skip_note(why, true); } while (0)
 static void skip_log(void) {
+    // An interval with nothing drawn and draws skipped (#185: an RX 550 on a 2022 driver, "0 draws, 3133 skipped" from the
+    // first frames on - a black screen with sound and menus working - and nothing in the log to say why): the reasons
+    // are logged by themselves for the next 3 intervals, up to 3 times a session
+    static int auto_left, auto_times;
+    if (log_skips <= 0 && !auto_left && auto_times < 3 && stat_draws == 0 && stat_skipped >= 100) {
+        auto_times++, auto_left = 3, log_skips = 1;
+        LOG("[skips] nothing drawn in the last interval, %llu draws skipped: the reasons follow for 3 intervals\n",
+            (unsigned long long)stat_skipped);
+        return;
+    }
     if (log_skips <= 0) return;
     uint64_t total = 0;
     for (int i = 0; i < SK_N; i++) total += skip_n[i];
@@ -1323,6 +1333,7 @@ static void skip_log(void) {
         LOG("\n");
     }
     memset(skip_n, 0, sizeof skip_n);
+    if (auto_left && !--auto_left) log_skips = 0;
     int k = 0;  // (an offender not skipped this interval is dropped: its "for N s" starts again if it comes back)
     for (int i = 0; i < skip_ntop; i++)
         if (skip_top[i].n) { skip_top[k] = skip_top[i]; skip_top[k++].n = 0; }

@@ -1551,11 +1551,16 @@ void vk_exec_init(void) {
     // wrong without it: a dotted pattern over clothes and hair, turned off by this switch alone (5600G, #74).
     // LARECOMP_SHADER_FLAT=1: on, =0: off everywhere
     // (F1 > Compatibility: On / Off over the per-GPU default)
+    // On Linux AMD (RADV) it is on again where the guest memory goes in through the 256 MB import window - the default
+    // there since #195 (gmem_window_init) - and #51's crash came with the whole-window import only: without this form
+    // RADV drew clothes and hair dotted as AMD's Windows driver did (#204, after v0.1.19 made discrete AMD on RADV draw
+    // at all). LARECOMP_VK_GMEM_WINDOW=0 (the whole import) keeps it off there.
     int fcs = g_settings.gpu_compat[GPU_STRAIGHT];
 #ifdef _WIN32
     bool flat_auto = true;
 #else
-    bool flat_auto = g_vk.props.vendorID != 0x1002;
+    const char *gw = getenv("LARECOMP_VK_GMEM_WINDOW");
+    bool flat_auto = g_vk.props.vendorID != 0x1002 || !(gw && strtoull(gw, NULL, 10) == 0);
 #endif
     maxwell_flat_default = fcs != GPU_AUTO ? fcs == GPU_ON : flat_auto;
     VkPhysicalDeviceSubgroupProperties sg = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};

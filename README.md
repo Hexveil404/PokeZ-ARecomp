@@ -35,6 +35,7 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 - [Controls](#controls)
 - [Saves](#saves)
 - [Mods](#mods)
+- [Multiplayer (test)](#multiplayer-test)
 - [Troubleshooting](#troubleshooting)
 - [Building from source](#building-from-source)
 - [Developer tools](#developer-tools)
@@ -230,6 +231,70 @@ Mods that replace game files (a `romfs` folder): translations, textures, models.
 list wins.
 
 Mods that change the game's code (`exefs`, IPS patches, cheat plugins) do not work with a recompiled game.
+
+## Multiplayer (test)
+
+> **This is a test feature.** It may not connect on every network, and it may change or be removed in a later
+> version. Please report how it works for you.
+
+Pokémon Legends Z-A's **Link Play** (link trades and private battles) works between two copies of ZA Recomp, with no
+server and no account.
+
+**Same network (home LAN, or a virtual LAN like Radmin VPN / ZeroTier / Hamachi):** nothing to set up. In the game,
+**Link Play > Nearby Players** finds the other PC as it would find a nearby Switch. Then use the game's own link code
+or room passcode, as on the console.
+
+**Over the internet:**
+1. Both players open **F1 > Online** in game and copy **Your code** (A / click copies it).
+2. Send it to your friend (WhatsApp, Discord...) and paste theirs with **Paste friend's code** (it's read from the
+   clipboard). Both of you have to paste the other's code.
+3. Wait for **Status: Connected**, usually within a minute. Then use **Link Play > Nearby Players** in the game as
+   above.
+
+If it says **Didn't connect**, one of the two networks blocks direct connections (some mobile networks and
+corporate routers). A virtual LAN (Radmin VPN, ZeroTier, Hamachi) works around that, and then no codes are needed.
+
+### How it works
+
+- **Local wireless, emulated:** the Switch's local wireless and the game's network sockets are re-created on top of
+  normal UDP on your PC (ports 47810-47817 on a LAN). The game sends and receives the same data it would on a console.
+- **Connection codes:** your code holds your public internet address and port, as seen from outside (learned from
+  public STUN servers: Google, Cloudflare), plus a random **session token** made when the game starts.
+- **No server in the middle:** after both codes are pasted, the two games send packets straight to each other until
+  both routers let them through ("hole punching"). They try at fixed times of the clock, using the time from public
+  NTP servers (Cloudflare, Google, pool.ntp.org), so the PCs' own clocks don't need to be right. No ports to forward
+  and nothing changed on your router.
+- **What is sent:** only what the game itself sends during Link Play (the trade or battle data, as on the console).
+  Your save file, your game files and your keys never leave your PC.
+
+### Security
+
+- **Your code shows your IP address.** Share it only with the person you're playing with, as with any direct
+  (peer-to-peer) game. Codes change every time the game starts, and nothing listens on the internet once the game is
+  closed.
+- **Friends only:** over the internet, the game only accepts players whose code you pasted. Every packet is signed
+  (HMAC-SHA1) with a key made from both players' session tokens. Packets from anyone else, or that fail the check,
+  are dropped before the game sees them, and so are floods (over 4000 packets a second).
+- **Signed, not encrypted:** nobody else can inject or change what you send, but the trade data itself isn't hidden
+  from someone who can watch your traffic (your network or internet provider). It is the game's own trade data, so
+  nothing personal.
+- **Same network:** local play isn't signed, just like a Switch's local wireless. Anyone on your LAN or virtual LAN can
+  see your room, and the game's own link code or passcode decides who gets in.
+- **Trust who you play with:** the other player's game sends data that your game processes, as on a console. Play
+  with people you know.
+- No accounts, no data sent to us: the project has no server at all. The only outside services used are the public
+  STUN and NTP servers above, which see your address and nothing else.
+
+### Why it works this way (and why there's no ranked mode)
+
+- **Ranked battles, random matchmaking and "Faraway Players" trades need a server** that is always online: to find
+  opponents you don't know, keep rankings and check results. In the original game those run on Nintendo's servers,
+  which a PC port can't (and shouldn't) use.
+- **ZA Recomp has no servers and doesn't ask for donations or any money.** Running a public server costs money every
+  month and needs someone to keep it up and secure, so there is no ranked or matchmaking mode, and none is planned for
+  now.
+- **What you can do today:** link trades and private battles with friends, game to game, over the internet or on the
+  same network, using the steps above. Nothing in between can go offline, and nobody but your friend is involved.
 
 ## DirectX 12
 

@@ -35,6 +35,7 @@ para *The Legend of Zelda: Link's Awakening*.
 - [Controles](#controles)
 - [Saves](#saves)
 - [Mods](#mods)
+- [Multiplayer (teste)](#multiplayer-teste)
 - [Solução de problemas](#solução-de-problemas)
 - [Compilando o código-fonte](#compilando-o-código-fonte)
 - [Ferramentas de desenvolvimento](#ferramentas-de-desenvolvimento)
@@ -225,6 +226,71 @@ arraste o mod para a janela); eles ficam em `mods/`. Quando dois mods trocam o m
 acima na lista.
 
 Mods que mudam o código do jogo (`exefs`, patches IPS, plugins de cheats) não funcionam num jogo recompilado.
+
+## Multiplayer (teste)
+
+> **Este recurso é um teste.** Pode não conectar em todas as redes, e pode mudar ou ser removido numa versão futura.
+> Conte pra gente como funcionou para você.
+
+O **Link Play** de Pokémon Legends Z-A (trocas e batalhas privadas) funciona entre duas cópias do ZA Recomp, sem
+servidor e sem conta.
+
+**Na mesma rede (rede de casa, ou uma rede virtual como Radmin VPN / ZeroTier / Hamachi):** nada para configurar. No
+jogo, **Link Play > Nearby Players** encontra o outro PC como encontraria um Switch por perto. Depois é só usar o código
+de troca ou a senha da sala do próprio jogo, como no console.
+
+**Pela internet:**
+1. Os dois jogadores abrem **F1 > Online** no jogo e copiam o **Seu código** (A / clique copia).
+2. Mandem para o amigo (WhatsApp, Discord...) e colem o código dele em **Colar código do amigo** (ele é lido da área
+   de transferência). Os dois precisam colar o código um do outro.
+3. Esperem aparecer **Situação: Conectado**, normalmente em até um minuto. Aí é só usar **Link Play > Nearby Players**
+   no jogo, como acima.
+
+Se aparecer **Não conectou**, uma das duas redes bloqueia conexões diretas (algumas redes de celular e roteadores de
+empresa). Uma rede virtual (Radmin VPN, ZeroTier, Hamachi) resolve, e aí nem precisa de código.
+
+### Como funciona
+
+- **Comunicação local, emulada:** a comunicação local sem fio do Switch e os sockets de rede do jogo são recriados em
+  cima de UDP comum no seu PC (portas 47810-47817 na rede local). O jogo manda e recebe os mesmos dados que mandaria
+  num console.
+- **Códigos de conexão:** o seu código leva o seu endereço de internet público e a porta, como são vistos de fora
+  (descobertos por servidores STUN públicos: Google, Cloudflare), mais um **token de sessão** aleatório criado quando o
+  jogo abre.
+- **Sem servidor no meio:** depois que os dois colam os códigos, os dois jogos mandam pacotes direto um para o outro
+  até os dois roteadores deixarem passar ("hole punching"). Eles tentam em horários fixos do relógio, usando a hora de
+  servidores NTP públicos (Cloudflare, Google, pool.ntp.org), então o relógio dos PCs não precisa estar certo. Não
+  precisa abrir porta nem mexer no roteador.
+- **O que é enviado:** só o que o próprio jogo manda durante o Link Play (os dados da troca ou da batalha, como no
+  console). O seu save, os arquivos do jogo e as suas keys nunca saem do seu PC.
+
+### Segurança
+
+- **O seu código mostra o seu IP.** Compartilhe só com quem vai jogar com você, como em qualquer jogo de conexão direta
+  (peer-to-peer). O código muda toda vez que o jogo abre, e nada fica escutando na internet depois que o jogo fecha.
+- **Só amigos:** pela internet, o jogo só aceita jogadores cujo código você colou. Cada pacote é assinado (HMAC-SHA1)
+  com uma chave feita dos tokens de sessão dos dois jogadores. Pacotes de qualquer outra pessoa, ou que falham na
+  conferência, são descartados antes de chegar ao jogo, e também enxurradas (mais de 4000 pacotes por segundo).
+- **Assinado, não criptografado:** ninguém de fora consegue injetar ou alterar o que você manda, mas os dados da troca
+  não ficam escondidos de quem consegue ver o seu tráfego (a sua rede ou o seu provedor). São os dados da troca do
+  próprio jogo, nada pessoal.
+- **Mesma rede:** o jogo local não é assinado, igual à comunicação local de um Switch. Qualquer um na sua rede local ou
+  rede virtual vê a sua sala, e quem entra é decidido pelo código de troca ou pela senha da sala do próprio jogo.
+- **Confie em quem joga com você:** o jogo do outro jogador manda dados que o seu jogo processa, como num console.
+  Jogue com pessoas que você conhece.
+- Sem contas e sem dados enviados para nós: o projeto não tem servidor nenhum. Os únicos serviços de fora usados são os
+  servidores públicos de STUN e NTP citados acima, que veem o seu endereço e mais nada.
+
+### Por que funciona desse jeito (e por que não tem modo ranqueado)
+
+- **Batalhas ranqueadas, partidas com desconhecidos e trocas "Faraway Players" precisam de um servidor** ligado o
+  tempo todo: para achar adversários que você não conhece, guardar o ranking e conferir os resultados. No jogo original
+  isso roda nos servidores da Nintendo, que um port para PC não pode (nem deve) usar.
+- **O ZA Recomp não tem servidor e não pede doação nem qualquer apoio financeiro.** Manter um servidor público custa
+  dinheiro todo mês e exige alguém cuidando dele e da segurança, então não existe modo ranqueado nem de partidas
+  aleatórias, e por enquanto não está nos planos.
+- **O que já dá para fazer hoje:** trocas e batalhas privadas com amigos, de jogo para jogo, pela internet ou na mesma
+  rede, seguindo os passos acima. Não há nada no meio que possa cair, e ninguém além do seu amigo participa.
 
 ## DirectX 12
 

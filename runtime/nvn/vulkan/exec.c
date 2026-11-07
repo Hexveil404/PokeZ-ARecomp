@@ -3807,6 +3807,13 @@ static bool pv_pass(void) {
     if (cb->format != VK_FORMAT_R8G8B8A8_SRGB && cb->format != VK_FORMAT_R8G8B8A8_UNORM) return false;
     if (db->sx != 1 || db->sy != 1 || vp_sx != 1 || vp_sy != 1 || vp_ox != 0 || vp_oy != 0) return false;  // (1x only)
     if (cb->width > db->width || cb->height > db->height) return false;
+    // (the character's image is 1600x1080 at any output size; smaller ones drawn the same way - a 274x262 one while the
+    // game loads after Continue - only lose the jitter, as fsr2_scene_pass says: no DLSS features of their own)
+    if (cb->width < 1280 || cb->height < 720) {
+        static int nl;
+        if (nl++ < 3) LOG("[dlaa] %ux%u image drawn with the scene's depth: no jitter, not resolved (not the clothing screen's)\n", cb->width, cb->height);
+        return false;
+    }
     return !(st.rt.has_dview && (st.rt.dview.setmask & 1) && st.rt.dview.base_level);
 }
 // notes the draw's transform; true: it takes the jitter (DLSS resolved the image last frame)
@@ -5962,6 +5969,9 @@ static VkDescriptorBufferInfo gfast_info(void) {
 static VkBuffer xm_buf;
 static VmaAllocation xm_mem;
 static uint64_t xm_lo;  // guest address of the mirror's first byte (0: not placed yet)
+// how many times the window moved (xm_prepare): offsets into the mirror from before a move name other memory - the
+// per-object motion vectors' copy of last frame's arena (objmv_*) is only used when no move came after it
+static uint32_t xm_moves;
 // the frame each chunk was last written by transform feedback (+1; 0: never): only this frame's are read from the
 // mirror - the game reuses the arena's memory (other data written by the CPU when areas / outfits change: read from
 // the mirror, a stale skinning drew the player black)
@@ -6042,6 +6052,7 @@ static bool xm_prepare(void) {
                 if (sp_hi <= lo + XM_SIZE) {
                     xm_lo = lo;
                     memset(xm_written, 0, sizeof xm_written);
+                    xm_moves++;
                     LOG("[vk] transform feedback mirror moved to %llx (+%llu MB)\n", (unsigned long long)xm_lo, (unsigned long long)(XM_SIZE >> 20));
                 }
             }
@@ -6590,7 +6601,7 @@ void vk_exec_reset(void) {
     }
     gmem_size = gmem_tried = 0;
     gmem_lo = 0;
-    xm_lo = 0, xm_back_n = 0;  // (the transform feedback mirror: placed again, nothing written yet)
+    xm_lo = 0, xm_back_n = 0, xm_moves++;  // (the transform feedback mirror: placed again, nothing written yet)
     memset(xm_written, 0, sizeof xm_written);
     for (int k = 0; k < gc_n; k++) {  // (lazy chunks: their pages are replaced too)
         if (gc[k].buf) { vkDestroyBuffer(g_vk.dev, gc[k].buf, NULL); vkFreeMemory(g_vk.dev, gc[k].mem, NULL); }
@@ -11395,6 +11406,7 @@ static struct {
     VkBuffer prev;            // the previous frame's arena (as large as the mirror)
     VmaAllocation prev_mem;
     uint64_t prev_frame;      // the frame whose arena is in prev
+    uint32_t prev_moves;      // xm_moves when it was copied (the mirror's window moved since: its offsets are stale)
     int captured, no_prev, replayed, failed, built;  // (the frame's counts, logged)
 } mo;
 
@@ -11472,7 +11484,7 @@ static void objmv_capture(Prog *pr, Pipe *pp, uint32_t streams, const VkDescript
         e->len[cur][i] = len;
     }
     mo.captured++;
-    bool have_prev = e->frame[prv] + 1 == f && e->size == v0.size && mo.prev_frame + 1 == f;
+    bool have_prev = e->frame[prv] + 1 == f && e->size == v0.size && mo.prev_frame + 1 == f && mo.prev_moves == xm_moves;
     e->size = v0.size, e->mask = mask;
     if (!have_prev) { mo.no_prev++; return; }
     if (!mv_pin) mv_pin = vk_pending_seq(), mo.seq = submit_seq;  // (its copies stay until objmv_replay)
@@ -11809,7 +11821,7 @@ static void objmv_replay(TexBackend *mvb, VkImageView zv, uint32_t w, uint32_t h
         VkBufferCopy c = {mo.lo, mo.lo, mo.hi - mo.lo};
         rec_CmdCopyBuffer(cb, xm_buf, mo.prev, 1, &c);
         vk_full_barrier(cb);
-        mo.prev_frame = f;
+        mo.prev_frame = f, mo.prev_moves = xm_moves;
     }
     mv_unpin();  // (the copies kept for the draws: until this submission is done)
     static int nlog;

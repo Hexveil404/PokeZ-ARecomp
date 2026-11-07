@@ -14,7 +14,9 @@ mkdir -p "$S" "$P/include" "$W"
 JOBS=$(nproc)
 
 fetch() {  # url sha256 file
-    [ -f "$S/$3" ] || { curl -fsSL -o "$S/$3.part" "$1" && mv "$S/$3.part" "$S/$3"; }
+    # (--retry: ffmpeg.org resets connections from CI runners now and then - "Connection reset by peer"; the sha256
+    # below still decides what is used)
+    [ -f "$S/$3" ] || { curl -fsSL --retry 8 --retry-delay 20 --retry-all-errors -o "$S/$3.part" "$1" && mv "$S/$3.part" "$S/$3"; }
     echo "$2  $S/$3" | sha256sum -c --quiet
 }
 unpack() { rm -rf "$W/$2" && mkdir -p "$W/$2" && tar -xf "$S/$1" -C "$W/$2" --strip-components 1; }

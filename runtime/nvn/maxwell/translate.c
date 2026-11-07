@@ -456,10 +456,21 @@ static bool quad_control_on(void) {
 // Fall-through between cases becomes a jump, so a block only starts at the top of a turn. A finished pixel waits (pc
 // 0xffffff) until the quad is done; KIL kills it after the loop. LARECOMP_SHADER_QUAD_LOCKSTEP=1 on (default), 0 off,
 // 3 test: every fragment shader with branches; 4 test: on, those shaders blue and red where a pixel waited for its
-// quad; 5 test: off, red by the turns each pixel took (the iris: rings of turns, quads split at their edges)
+// quad; 5 test: off, red by the turns each pixel took (the iris: rings of turns, quads split at their edges).
+// The quad's lowest pc counts its helper invocations (the pixels outside the triangle): it needs them to step with the
+// others. AMD without VK_KHR_shader_quad_control (every GCN card - Vega iGPUs, RX 400/500 - and drivers without it)
+// doesn't promise that: there the quad's lowest pc stayed a helper's, no real pixel could step, and the loop ran to its
+// guard - eyes cut short (solid cyan) and 9 fps whenever NPC eyes were on screen (#203, Ryzen 7 5700G's Vega 8; #189;
+// #192 RX 570 slower since v0.1.18). Simulated here with helpers that never step (6 / 7 below): 9 fps, as reported;
+// leaving helpers out of the lowest pc gave back the speed but garbled irises (their values feed the derivatives). So
+// on AMD the lockstep only runs with quad control (full quads: helpers guaranteed), else off - v0.1.17's eyes there.
+// 6 test: helpers never step, and don't count; 7 test: helpers never step and do count (v0.1.18 on GCN: the bug).
 static int quad_lockstep(void) {
     static int m = -1;
-    if (m < 0) { const char *e = getenv("LARECOMP_SHADER_QUAD_LOCKSTEP"); m = e ? atoi(e) : 1; }
+    if (m < 0) {
+        const char *e = getenv("LARECOMP_SHADER_QUAD_LOCKSTEP");
+        m = e ? atoi(e) : !(maxwell_quad_deriv_default && !quad_control_on());  // (maxwell_quad_deriv_default: an AMD GPU)
+    }
     return m;
 }
 
@@ -2897,11 +2908,15 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         bool report = maxwell_guard_word && c->stage == STAGE_COMPUTE && c->info->uses_gmem;
         sp(&s, "  uint guard = 0u;\n  for (; guard < %uu; guard++) {\n", loop_guard());
         if (c->quad_lockstep && quad_lockstep() != 5) {  // (the quad's lowest pc runs, the others wait: quad_lockstep)
-            sp(&s, "  { float pf_ = float(min(pc, 16777215u));\n"
+            sp(&s, quad_lockstep() != 6 ? "  { float pf_ = float(min(pc, 16777215u));\n"
+                                        : "  { float pf_ = gl_HelperInvocation ? 16777215.0f : float(min(pc, 16777215u));\n");
+            sp(&s, "%s"
                    "    float m_ = min(pf_, pf_ + dFdxFine(pf_) * ((uint(gl_FragCoord.x) & 1u) == 0u ? 1.0f : -1.0f));\n"
                    "    m_ = min(m_, m_ + dFdyFine(m_) * ((uint(gl_FragCoord.y) & 1u) == 0u ? 1.0f : -1.0f));\n"
                    "    if (m_ >= 16777215.0f) break;\n    if (float(min(pc, 16777215u)) != m_) { %scontinue; } }\n",
-               quad_lockstep() == 4 ? "waited_ = true; " : "");
+               "", quad_lockstep() == 4 ? "waited_ = true; " : "");
+            if (quad_lockstep() == 6 || quad_lockstep() == 7)  // (test: helpers never step, as on AMD without quad control)
+                sp(&s, "  if (gl_HelperInvocation) continue;\n");
             // a case's fall-through into the next one: a jump, so the next block starts at the top of a turn
             const char *b = body.buf ? body.buf : "";
             bool first = true;

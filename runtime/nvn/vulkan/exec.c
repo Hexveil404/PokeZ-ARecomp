@@ -1575,7 +1575,8 @@ void vk_exec_init(void) {
             : getenv("LARECOMP_SHADER_QUAD_DERIV") ? getenv("LARECOMP_SHADER_QUAD_DERIV")
             : maxwell_quad_deriv_default ? "the hardware's (AMD: helpers in quad swaps)" : "quad swaps",
             g_vk.quad_control ? "yes" : "no",
-            getenv("LARECOMP_SHADER_QUAD_LOCKSTEP") ? getenv("LARECOMP_SHADER_QUAD_LOCKSTEP") : "yes");
+            getenv("LARECOMP_SHADER_QUAD_LOCKSTEP") ? getenv("LARECOMP_SHADER_QUAD_LOCKSTEP")
+            : maxwell_quad_deriv_default && !qc_on ? "no (AMD without quad control: helpers can't be relied on, #203)" : "yes");
     }
     LOG("[vk] subgroups: %u lanes, quad operations in fragment shaders: %s\n", sg.subgroupSize, maxwell_quad_ops ? "yes" : "no");
     if (!getenv("LARECOMP_SHADER_FLAT") && !maxwell_flat_default)

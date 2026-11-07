@@ -25,6 +25,7 @@ typedef int hsock_t;
 #define BAD_HSOCK (-1)
 #define hsock_close close
 #endif
+#include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>

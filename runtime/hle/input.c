@@ -223,6 +223,31 @@ static void recompute_pad(void) {
         rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX);
         ry = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
     }
+    // Left stick dead zone + steadiness (pad only): the stick went to the game raw, and the game picks walk or run from
+    // its length, so a pad whose stick wobbles by a few hundred around that threshold flipped walk <-> run every frame.
+    // A radial dead zone (lstick_deadzone, percent, default 10, 0 = off) is cut off and the rest rescaled to the full
+    // range; a pad's stick often stops short of full travel on the diagonals (85-90%) and never reached the game's run
+    // threshold, so from lstick_outer (default 90) up it reads as full. Then a length that moved less than ~2% from the
+    // last one keeps the last (the direction always follows), so noise can't carry it back and forth over the
+    // threshold. Keyboard and d-pad values are not touched.
+    if (pad && !host_test) {
+        static double last_m;
+        int dz_pct = g_settings.lstick_deadzone, out_pct = g_settings.lstick_outer;
+        if (out_pct < dz_pct + 10) out_pct = dz_pct + 10;
+        if (dz_pct > 0) {
+            double x = pad_lx, y = pad_ly, m = sqrt(x * x + y * y), dz = 32767.0 * dz_pct / 100, outer = 32767.0 * out_pct / 100;
+            if (m <= dz) m = 0;
+            else {
+                double n = (m - dz) / (outer - dz) * 32767.0;  // (the length, rescaled)
+                if (n > 32767) n = 32767;
+                if (fabs(n - last_m) < 650 && n < 32000) n = last_m;  // (near full tilt it still reaches the end)
+                x *= n / m, y *= n / m;
+                m = n;
+            }
+            last_m = m;
+            pad_lx = (int32_t)lround(m ? x : 0), pad_ly = (int32_t)lround(m ? y : 0);
+        }
+    }
     // rstick_snap: a stick pushed sideways also reads a little up or down (an Xbox One pad: 4 degrees on average, up
     // to 12), and the camera tilts with it. That close to an axis the stick is put on the axis; the angles in between
     // are spread over the rest, so nothing jumps at the edge. The length is kept.

@@ -73,6 +73,8 @@ Settings g_settings = {
     .diff_damage = 1.0f,
     .mouse_camera = MOUSE_CAM_CAPTURED,
     .mouse_sens = 1.0f,
+    .lstick_deadzone = 10,
+    .lstick_outer = 90,
     .walk_speed = 1.0f,
     .walk_speed_dungeons = false,
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
@@ -372,6 +374,8 @@ void settings_load(void) {
         else if (!strcmp(key, "mouse_camera")) g_settings.mouse_camera = !strcmp(val, "off") ? MOUSE_CAM_OFF : !strcmp(val, "hold") ? MOUSE_CAM_HOLD : MOUSE_CAM_CAPTURED;
         else if (!strcmp(key, "mouse_sens")) g_settings.mouse_sens = (float)atof(val);
         else if (!strcmp(key, "rstick_snap")) { int d = atoi(val); g_settings.rstick_snap = d < 0 ? 0 : d > 30 ? 30 : d; }
+        else if (!strcmp(key, "lstick_deadzone")) g_settings.lstick_deadzone = atoi(val);
+        else if (!strcmp(key, "lstick_outer")) g_settings.lstick_outer = atoi(val);
         else if (!strcmp(key, "blur_removal")) g_settings.blur_removal = atoi(val) != 0;
         else if (!strcmp(key, "hide_hero_icon")) g_settings.hide_hero_icon = atoi(val) != 0;
         else if (!strcmp(key, "mirror_mode")) g_settings.mirror_mode = atoi(val) != 0;
@@ -433,6 +437,8 @@ void settings_load(void) {
     if (g_settings.volume < 0) g_settings.volume = 0;
     if (g_settings.volume > 2) g_settings.volume = 2;
     if (!(g_settings.mouse_sens >= 0.1f && g_settings.mouse_sens <= 5)) g_settings.mouse_sens = 1.0f;
+    if (g_settings.lstick_deadzone < 0 || g_settings.lstick_deadzone > 30) g_settings.lstick_deadzone = 10;
+    if (g_settings.lstick_outer < 70 || g_settings.lstick_outer > 100) g_settings.lstick_outer = 90;
     if (g_settings.rumble_strength < 25 || g_settings.rumble_strength > 100) g_settings.rumble_strength = 100;
     settings_env_overrides();
     LOG("[settings] loaded %s\n", SETTINGS_FILE);
@@ -500,6 +506,7 @@ void settings_save(void) {
     fprintf(f, "controller_light = %d\n", g_settings.controller_light);
     fprintf(f, "background_input = %d\n", g_settings.bg_input);
     fprintf(f, "rstick_snap = %d\n", g_settings.rstick_snap);
+    fprintf(f, "lstick_deadzone = %d\nlstick_outer = %d\n", g_settings.lstick_deadzone, g_settings.lstick_outer);
     fprintf(f, "move_360 = %d\nblur_removal = %d\nhide_hero_icon = %d\n", g_settings.move_360, g_settings.blur_removal,
             g_settings.hide_hero_icon);
     static const char *const prompts[] = {"auto", "nintendo", "xbox", "playstation", "keyboard", "steamdeck"};

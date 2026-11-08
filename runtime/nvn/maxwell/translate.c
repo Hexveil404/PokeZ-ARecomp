@@ -34,6 +34,7 @@ bool maxwell_flat_default = true;
 bool maxwell_quad_ops;  // (vk_exec_init: the device has quad subgroup operations in fragment shaders)
 bool maxwell_quad_deriv_default;  // (vk_exec_init: AMD; quad_deriv)
 bool maxwell_quad_control_ok, maxwell_quad_control_default;  // (vk_exec_init: the device has quad control; AMD: on)
+bool maxwell_lockstep_default = true;  // (vk_exec_init: helpers guaranteed - NVIDIA, or quad control on; quad_lockstep)
 // (vulkan/device.c: the device has shaderOutputLayer. Without it - Dozen, DirectX 12 underneath - a vertex shader's
 // render target layer is written to a local and dropped: the draw goes to layer 0 instead of its pipeline failing)
 bool maxwell_output_layer = true;
@@ -463,13 +464,14 @@ static bool quad_control_on(void) {
 // guard - eyes cut short (solid cyan) and 9 fps whenever NPC eyes were on screen (#203, Ryzen 7 5700G's Vega 8; #189;
 // #192 RX 570 slower since v0.1.18). Simulated here with helpers that never step (6 / 7 below): 9 fps, as reported;
 // leaving helpers out of the lowest pc gave back the speed but garbled irises (their values feed the derivatives). So
-// on AMD the lockstep only runs with quad control (full quads: helpers guaranteed), else off - v0.1.17's eyes there.
+// the lockstep only runs where helpers are guaranteed: NVIDIA (seen here) or quad control on; elsewhere off - v0.1.17's eyes
+// (AMD GCN #203; Intel's frozen Ice Lake driver hung the GPU on it, #208).
 // 6 test: helpers never step, and don't count; 7 test: helpers never step and do count (v0.1.18 on GCN: the bug).
 static int quad_lockstep(void) {
     static int m = -1;
     if (m < 0) {
         const char *e = getenv("LARECOMP_SHADER_QUAD_LOCKSTEP");
-        m = e ? atoi(e) : !(maxwell_quad_deriv_default && !quad_control_on());  // (maxwell_quad_deriv_default: an AMD GPU)
+        m = e ? atoi(e) : maxwell_lockstep_default;  // (vk_exec_init: NVIDIA, or quad control on)
     }
     return m;
 }

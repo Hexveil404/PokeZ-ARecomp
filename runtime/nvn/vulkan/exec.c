@@ -1574,6 +1574,12 @@ void vk_exec_init(void) {
     {
         const char *qc = getenv("LARECOMP_SHADER_QUAD_CONTROL");
         bool qc_on = g_vk.quad_control && (qc ? atoi(qc) != 0 : maxwell_quad_control_default);  // (as translate.c decides)
+        // The iris lockstep (translate.c quad_lockstep) needs helper invocations that step with the quad: NVIDIA's do (seen
+        // here), and quad control's full quads promise it. Elsewhere it ran to its loop guard on every eye: 9 fps on AMD
+        // GCN (#203), and on Intel's frozen Ice Lake driver (Vulkan 1.3.215, no quad control) the slow iGPU took long
+        // enough to hang the GPU - device lost after 25 s to 4 min, at any resolution (#208)
+        extern bool maxwell_lockstep_default;
+        maxwell_lockstep_default = g_vk.props.vendorID == 0x10de || qc_on;
         LOG("[vk] fragment shaders' own derivatives: %s (LARECOMP_SHADER_QUAD_CONTROL, LARECOMP_SHADER_QUAD_DERIV); the driver's "
             "quad control and maximal reconvergence: %s; quads in step through the iris loop: %s (LARECOMP_SHADER_QUAD_LOCKSTEP)\n",
             qc_on ? "quad swaps in full quads, quads kept together (quad control)"
@@ -1581,7 +1587,7 @@ void vk_exec_init(void) {
             : maxwell_quad_deriv_default ? "the hardware's (AMD: helpers in quad swaps)" : "quad swaps",
             g_vk.quad_control ? "yes" : "no",
             getenv("LARECOMP_SHADER_QUAD_LOCKSTEP") ? getenv("LARECOMP_SHADER_QUAD_LOCKSTEP")
-            : maxwell_quad_deriv_default && !qc_on ? "no (AMD without quad control: helpers can't be relied on, #203)" : "yes");
+            : !maxwell_lockstep_default ? "no (no quad control: helpers can't be relied on, #203 #208)" : "yes");
     }
     LOG("[vk] subgroups: %u lanes, quad operations in fragment shaders: %s\n", sg.subgroupSize, maxwell_quad_ops ? "yes" : "no");
     if (!getenv("LARECOMP_SHADER_FLAT") && !maxwell_flat_default)

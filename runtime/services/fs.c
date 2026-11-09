@@ -852,6 +852,40 @@ static void recent_read_note(uint64_t off, uint64_t size, const uint8_t *dst, ss
     recent_reads[i].hash = h, recent_reads[i].got = got;
     pthread_mutex_unlock(&recent_lock);
 }
+// The game's one OodleLZ_Decompress call for its archive reads (FileLoaderFromArchive: f_7001a9bd38 on 2.0.0,
+// f_7001a9b718 on 2.0.2 - serial, threadPhase 3, with a 512 KB decoder memory kept in the thread's TLS), through
+// tools/za_patches.py OODLE_CALL: a decode that returns 0 for data whose bytes are right is decoded again. #173 #206
+// (Windows 11 build 26300 only): the bytes read were the file's own and still intact in memory, yet the decode
+// failed while two of the game's worker threads crashed together - something else wrote into the decoder's state at
+// that moment, and the same bytes decode fine here every time. A retry gets a clean run instead of the svcBreak that
+// ended the session. The arguments (x0-x7 and the 6 on the stack: sp + 0 .. 0x2f) are restored for each try.
+// LARECOMP_OODLE_RETRY=<n> tries after the first (default 2, 0 off). Log: "[oodle] decode failed ... retry n: ok".
+void rt_za_oodle_call(Cpu *c, uint64_t target) {
+    static int tries = -1;
+    if (tries < 0) { const char *e = getenv("LARECOMP_OODLE_RETRY"); tries = e ? atoi(e) : 2; }
+    GuestFn fn = dispatch_lookup(target);
+    uint64_t x[8], st[6], lr = c->x[30];
+    memcpy(x, c->x, sizeof x);
+    for (int i = 0; i < 6; i++) st[i] = LD64(c->sp + 8 * (uint64_t)i);
+    fn(c);
+    {   // LARECOMP_TEST_OODLE_FAIL=<n> (test): every n-th decode reads as failed once - the retry path, on real data
+        static long every = -1, calls;
+        if (every < 0) { const char *e = getenv("LARECOMP_TEST_OODLE_FAIL"); every = e ? atol(e) : 0; }
+        if (every > 0 && ++calls % every == 0) LOG("[oodle] test: decode %ld made to fail\n", calls), c->x[0] = 0;
+    }
+    for (int t = 1; t <= tries && c->x[0] == 0 && x[3] != 0; t++) {
+        LOG("[oodle] decode failed (%llu bytes from %llu): retry %d\n", (unsigned long long)x[3], (unsigned long long)x[1], t);
+        memcpy(c->x, x, sizeof x);
+        for (int i = 0; i < 6; i++) ST64(c->sp + 8 * (uint64_t)i, st[i]);
+        c->x[30] = lr;
+        fn(c);
+        if (c->x[0] != 0) {
+            LOG("[oodle] retry %d: ok (%llu bytes)\n", t, (unsigned long long)c->x[0]);
+            rt_game_data_bad = false;  // (the data was fine after all: a crash later isn't about it)
+        }
+    }
+}
+
 void fs_log_recent_reads(void) {  // (services/am.c: the game's decompressor said its data is damaged)
     pthread_mutex_lock(&recent_lock);
     unsigned n = recent_n < RECENT_READS ? recent_n : RECENT_READS;

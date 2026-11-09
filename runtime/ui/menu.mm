@@ -93,6 +93,49 @@ extern "C" void menu_notice(const char *text, int seconds) {
 
 bool menu_is_open(void) { return g_open.load(); }
 static void set_open(bool open);
+
+// Options read only when the game starts (their rows say "from the next start"): in game, a change to them stays
+// pending until the player applies it - F1 shows it at the top with Apply / Discard, closing F1 with one pending asks,
+// and once applied F1 says a restart is needed. (On the start screen they all apply at Play: nothing pending there.)
+// The values when F1 opened (or when last applied) are the ones this session runs with or will start with.
+struct RestartSnap {
+    int gpu_compat[GPU_COMPAT_N];
+    char gpu_name[256];
+    int video_rec, opmode, shadow_res, language;
+    bool dx12, full_detail;
+};
+static RestartSnap g_rs;      // (taken when F1 opens in game, and on Apply)
+static bool g_rs_taken;       // (F1 opened in game this session)
+static bool g_rs_applied;     // (something was applied: a restart is needed)
+static bool g_rs_ask;         // (closing with changes pending: the question, next frame)
+static void rs_take(RestartSnap *r) {
+    memset(r, 0, sizeof *r);
+    memcpy(r->gpu_compat, g_settings.gpu_compat, sizeof r->gpu_compat);
+    memcpy(r->gpu_name, g_settings.gpu_name, sizeof r->gpu_name);
+    r->video_rec = g_settings.video_rec, r->opmode = g_settings.opmode, r->shadow_res = g_settings.shadow_res;
+    r->language = g_settings.language, r->dx12 = g_settings.dx12, r->full_detail = g_settings.full_detail;
+}
+static void rs_put(const RestartSnap *r) {
+    memcpy(g_settings.gpu_compat, r->gpu_compat, sizeof r->gpu_compat);
+    memcpy(g_settings.gpu_name, r->gpu_name, sizeof r->gpu_name);
+    g_settings.video_rec = r->video_rec, g_settings.opmode = r->opmode, g_settings.shadow_res = r->shadow_res;
+    g_settings.language = r->language, g_settings.dx12 = r->dx12, g_settings.full_detail = r->full_detail;
+}
+static bool rs_pending(void) {
+    if (!g_rs_taken) return false;
+    RestartSnap now;
+    rs_take(&now);
+    return memcmp(&now, &g_rs, sizeof now) != 0;
+}
+static void rs_apply(void) {
+    rs_take(&g_rs);
+    g_rs_applied = true;
+    settings_save();
+    LOG("[menu] options for the next start applied (a restart is needed)\n");
+    menu_notice(TR("Saved: restart the game for these changes to take effect.",
+                   "Salvo: reinicie o jogo para essas mudanças valerem."), 6);
+}
+static void rs_discard(void) { rs_put(&g_rs); settings_save(); }
 extern "C" void menu_test_open(void) {
     set_open(true);
     if (getenv("LARECOMP_MENU_TAB")) { extern int g_tab_request_ext; g_tab_request_ext = atoi(getenv("LARECOMP_MENU_TAB")); }
@@ -101,6 +144,10 @@ extern "C" void menu_test_open(void) {
 void menu_tabs_focus(bool first_tab);
 static void set_open(bool open) {
     if (open == g_open.load()) return;
+    if (!open && rs_pending()) { g_rs_ask = true; return; }  // (F1 stays open: the question first)
+    if (open && !g_rs_taken) rs_take(&g_rs), g_rs_taken = true;
+    if (open && getenv("LARECOMP_TEST_RESTART_CHANGE"))  // (test: an option for the next start changed as F1 opens)
+        g_settings.full_detail = !g_rs.full_detail;
     g_open.store(open);
     input_reset();  // nothing held while the menu had focus leaks into the game
     bind_capture_cancel();
@@ -1045,6 +1092,7 @@ static void tab_quit(float scale, bool in_game) {
         if (opt_action(ask == 1 ? TR("Yes, quit to Start Screen", "Sim, sair para a tela inicial")
                                 : TR("Yes, quit to Desktop", "Sim, sair para a área de trabalho"), "", ask == 1 ? d1 : d2)) {
             settings_save();
+            rs_take(&g_rs);  // (leaving the game: what's set now applies at the next Play - nothing to ask)
             if (ask == 1) {
                 rt_request_reboot(2);
                 set_open(false);
@@ -1231,6 +1279,7 @@ static void fps_note(double now, float dt) {
 
 // Reboot (runtime/main.c): the game is gone - menu and name dialog close; the ImGui context stays.
 RT_ON_RESET(menu_reset) {
+    g_rs_taken = g_rs_applied = g_rs_ask = false;  // (a new session: its own start values, taken at the next F1)
     set_open(false);
     g_kbd = 0;
     osk_cancel();
@@ -1421,6 +1470,46 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     ImGuiWindow *root = ImGui::GetCurrentWindow()->RootWindow;
     static bool nav_in_page;  // (the frame before: the cursor on a control of the page - its child windows)
     if (nav_in_page && g.NavJustMovedToId && g.NavWindow == root && !any_popup) g_focus_tab = -100, g_focus_frames = 0;
+    if (in_game) {  // options for the next start (RestartSnap): pending / applied, and the question on closing
+        static const ImVec4 gold(0.95f, 0.71f, 0.27f, 1);
+        if (rs_pending()) {
+            ImGui::TextColored(gold, "%s", TR("Some changes only take effect after restarting the game and aren't applied yet.",
+                                              "Algumas mudanças só valem depois de reiniciar o jogo e ainda não foram aplicadas."));
+            if (ImGui::Button(TR("Apply (after restart)", "Aplicar (ao reiniciar)"))) rs_apply();
+            ImGui::SameLine();
+            if (ImGui::Button(TR("Discard", "Descartar"))) rs_discard();
+            ImGui::Separator();
+        } else if (g_rs_applied) {
+            ImGui::TextColored(gold, "%s", TR("Changes saved: restart the game for them to take effect (Quit > Start screen, then Play).",
+                                              "Mudanças salvas: reinicie o jogo para elas valerem (Sair > Tela inicial, depois Jogar)."));
+            ImGui::Separator();
+        }
+        if (g_rs_ask) { g_rs_ask = false; ImGui::OpenPopup("###restart_ask"); }
+        ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        if (ImGui::BeginPopupModal(TR("Apply changes?###restart_ask", "Aplicar mudanças?###restart_ask"), NULL,
+                                   ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
+            ImGui::TextUnformatted(TR("You changed options that only take effect after restarting the game.\n"
+                                      "Apply them? They'll be used from the next start.",
+                                      "Você mudou opções que só valem depois de reiniciar o jogo.\n"
+                                      "Aplicar? Elas serão usadas a partir da próxima abertura."));
+            ImGui::Spacing();
+            int pick = 0;
+            if (ImGui::Button(TR("Apply", "Aplicar"))) pick = 1;
+            ImGui::SameLine();
+            if (ImGui::Button(TR("Discard", "Descartar"))) pick = 2;
+            ImGui::SameLine();
+            if (ImGui::Button(TR("Back", "Voltar")) || ImGui::IsKeyPressed(ImGuiKey_Escape) ||
+                ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight))
+                pick = 3;
+            if (pick) {
+                ImGui::CloseCurrentPopup();
+                if (pick == 1) rs_apply();
+                if (pick == 2) rs_discard();
+                if (pick != 3) set_open(false);  // (nothing pending now: F1 closes)
+            }
+            ImGui::EndPopup();
+        }
+    }
     if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons)) {
         for (int k = 0; k < ntabs; k++) {
             const Tab &t = tabs[k];

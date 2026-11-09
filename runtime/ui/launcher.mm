@@ -812,6 +812,38 @@ static void xbox_layout_before_play(void) {
     rt_launcher_log("[launcher] Xbox battle layout: %s (zaprompts exit %d; textures/xbox-layout.log)\n",
             r == 0 ? "prepared" : "not prepared", r);
 }
+// F1 > Full-detail models (#190): cache/maxlod made from the player's own game files by zaprompts --maxlod
+// (tools/za/lod_mod.py: ~1100 models in ~2 min, in the background, ~2 MB) when the setting is on and there is none for
+// this game's data (cache/maxlod.src: the data's size and time; runtime/services/fs.c checks the version again before
+// layering it). From the next start. Log: cache/maxlod.log.
+static PlatProc g_maxlod_proc;
+extern "C" int launcher_maxlod_state(void) {  // 0 off / nothing to do, 1 being made, 2 ready
+    if (g_maxlod_proc) {
+        if (plat_proc_wait(g_maxlod_proc, false) < 0) return 1;
+        g_maxlod_proc = 0;
+    }
+    return file_exists("cache/maxlod/.made") ? 2 : 0;
+}
+extern "C" void launcher_maxlod_kick(void) {
+    char tool[1100];
+    if (!g_settings.full_detail || g_root.empty() || g_maxlod_proc) return;
+    std::string romfs = file_exists(g_root + "/romfs.bin") ? g_root + "/romfs.bin" : g_root + "/romfs";
+    std::string data = romfs + (is_dir(romfs) ? "/arc/data.trpfs" : "");
+    char src[64] = "", had[64] = "";
+    struct stat sb;
+    if (stat(data.c_str(), &sb)) return;
+    snprintf(src, sizeof src, "%lld %lld", (long long)sb.st_size, (long long)sb.st_mtime);
+    if (FILE *f = fopen("cache/maxlod.src", "rb")) { size_t n = fread(had, 1, sizeof had - 1, f); had[n] = 0; fclose(f); }
+    if (!strcmp(src, had) && file_exists("cache/maxlod/.made")) return;
+    if (!rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool))
+        return;
+    mkdir("cache", 0755);
+    if (FILE *f = fopen("cache/maxlod.src", "wb")) fputs(src, f), fclose(f);
+    const char *argv[] = {tool, "--romfs", romfs.c_str(), "--maxlod", "cache/maxlod", NULL};
+    g_maxlod_proc = plat_spawn(argv, "cache/maxlod.log", false);
+    rt_launcher_log("[launcher] full-detail models: %s\n", g_maxlod_proc ? "being made (cache/maxlod.log)" : "zaprompts didn't start");
+}
+
 // runtime/main.c, a set-up copy booting straight into the game: the icons made in the background if they never were,
 // or were made for other bindings
 extern "C" void launcher_prompts_kick(const char *root) {
@@ -819,6 +851,7 @@ extern "C" void launcher_prompts_kick(const char *root) {
     settings_load();  // (the bindings: the boot loads them later, runtime/main.c boot)
     xbox_layout_before_play();
     if (prompts_wanted()) make_prompts(false);
+    launcher_maxlod_kick();
 }
 // runtime/ui/controls_ui.mm, a binding changed (larecomp.ini saved): the icons made again for it, from the next start
 extern "C" void launcher_prompts_refresh(void) {
@@ -2296,6 +2329,7 @@ extern "C" void launcher_run(const char *root) {
     g_start_screen = 1;
     settings_load();
     lang_update();
+    launcher_maxlod_kick();  // (F1 > Full-detail models on and none made for this game yet: made now, in the background)
     static bool update_checked;  // (once per launch, not again after a "Title screen" reboot)
     if (!update_checked && !getenv("LARECOMP_NO_UPDATE_CHECK")) {
         update_checked = true;

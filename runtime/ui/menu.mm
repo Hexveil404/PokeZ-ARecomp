@@ -17,6 +17,9 @@
 #include "imgui_internal.h"  // (NavCursorVisible)
 #include "osk.h"
 #include "pad_nav.h"
+extern "C" void launcher_maxlod_kick(void);  // runtime/ui/launcher.mm: F1 > Full-detail models (#190)
+extern "C" int launcher_maxlod_state(void);
+extern "C" bool g_maxlod_on;  // runtime/services/fs.c
 #ifdef __APPLE__
 #include "imgui_impl_metal.h"
 #else
@@ -543,6 +546,25 @@ static void tab_display(bool in_game) {
                           "Personagens e Pokémon longe da câmera animam a cada quadro, como os que estão perto, em vez de "
                           "em passos visíveis. Custa um pouco de CPU em lugares cheios. Desligado: o do próprio jogo. "
                           "Apenas na versão 2.0.2 do jogo."));
+            {   // #190: cache/maxlod (runtime/ui/launcher.mm launcher_maxlod_kick), layered from the next start
+                bool was = g_settings.full_detail;
+                opt_toggle(TR("Full-detail models", "Modelos sempre detalhados"), &g_settings.full_detail, false,
+                           TR("Characters, Pokémon and buildings keep their full detail at any distance, instead of the "
+                              "simpler versions the game swaps in far away (less visible popping as you walk). Costs some "
+                              "GPU time in crowded places. Made from your own game files the first time (about 2 "
+                              "minutes, in the background); applies from the next start.",
+                              "Personagens, Pokémon e construções ficam com todo o detalhe a qualquer distância, em vez "
+                              "das versões mais simples que o jogo troca de longe (menos troca visível enquanto anda). "
+                              "Custa um pouco de GPU em lugares cheios. Feito a partir dos seus próprios arquivos do jogo "
+                              "na primeira vez (cerca de 2 minutos, em segundo plano); vale a partir da próxima abertura."));
+                if (g_settings.full_detail && !was) launcher_maxlod_kick();
+                int st = g_settings.full_detail ? launcher_maxlod_state() : 0;
+                if (st == 1)
+                    ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s",
+                                       TR("Preparing the full-detail models...", "Preparando os modelos detalhados..."));
+                else if (st == 2 && in_game && !g_maxlod_on)
+                    ImGui::TextDisabled("%s", TR("Ready: applies from the next start.", "Pronto: vale a partir da próxima abertura."));
+            }
             if (in_game && g_settings.fps60 && g_fps60_fell_back)
                 ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s",
                                    TR("Running at 30 fps: this PC didn't keep 60 fps.", "Rodando a 30 fps: este PC não segurou 60 fps."));

@@ -41,6 +41,7 @@ ap.add_argument('--scale', type=int, default=4)
 ap.add_argument('--font', default=None, help='bold TrueType font for the labels')
 ap.add_argument('--mods', default='mods', help="mods folder (runtime/services/fs.c): their UI archives' icons too")
 ap.add_argument('--party-icons', metavar='DIR', help="the Pokémon box icons into DIR as PNG (then make nothing else)")
+ap.add_argument('--maxlod', metavar='DIR', help='DIR/romfs: every model at its full detail (lod_mod.py; then make nothing else)')
 ap.add_argument('--xbox-attack-layout', action='store_true', help='prepare the optional battle layout during setup')
 ap.add_argument('--xbox-attack-layout-only', action='store_true', help='prepare only the battle layout (release smoke test)')
 ap.add_argument('--xbox-attack-layout-version', action='store_true', help='check the frozen helper includes battle layout support')
@@ -259,6 +260,22 @@ def deswizzle_np(src, wb, hb, bpb, bh_log2):  # deswizzle() with numpy: the same
     a = np.frombuffer(src, np.uint8)
     return np.where(o < len(a), a[np.minimum(o, len(a) - 1)], 0).astype(np.uint8).tobytes()
 
+
+# ------------------------------------------------------------------ full-detail models (--maxlod)
+# F1 > Full-detail models (runtime/ui/launcher.mm launcher_maxlod_kick): tools/za/lod_mod.py on the player's own game
+# files, into DIR.new and then swapped in whole; DIR/.made holds data.trpfs's size, which runtime/services/fs.c checks
+# against the game it serves (another version's models are never layered over it).
+if args.maxlod:
+    import shutil, lod_mod
+    trpfs, trpfd = open_game(args.romfs[0])
+    new = args.maxlod.rstrip('/\\') + '.new'
+    shutil.rmtree(new, ignore_errors=True)
+    made, miss = lod_mod.make(trpfs, trpfd, unpack, new, log=lambda *a: print(*a, flush=True))
+    if not made: sys.exit(1)
+    with open(os.path.join(new, '.made'), 'w') as f: f.write('%d\n' % len(trpfs))
+    shutil.rmtree(args.maxlod, ignore_errors=True)
+    os.replace(new, args.maxlod)
+    sys.exit(0)
 
 if args.party_icons:
     import texture2ddecoder

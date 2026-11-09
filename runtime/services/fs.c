@@ -256,7 +256,7 @@ static void rom_dir_path(const uint8_t *dmeta, uint32_t dsize, uint32_t dir, cha
 // Pokémon Z-A keeps its files in packs (arc/data.trpfs) listed by arc/data.trpfd, and reads a file from the RomFS
 // only when the list doesn't have it: so the game's data.trpfd is served without the layered files' entries
 // (trpfd_unlist). A mod's own data.trpfd is never used (it's made for the mod's game version).
-static char layer_root[17][1100];  // seed + optional Xbox presentation + 15 user mods
+static char layer_root[18][1100];  // seed + optional Xbox presentation + 15 user mods + full-detail models
 static int nlayers = -1;
 static bool trinity;  // the RomFS has arc/data.trpfd
 static uint8_t *xbox_arc;
@@ -307,6 +307,31 @@ static bool xbox_layer_prepare(void) {
     return true;
 }
 
+// F1 > Full-detail models (#190): cache/maxlod/romfs, every model's mesh slots on its full mesh (tools/za/lod_mod.py,
+// made by zaprompts --maxlod from the player's own files: runtime/ui/launcher.mm launcher_maxlod_kick). The last layer:
+// a player's mod with the same model wins. Only for the game it was made from: cache/maxlod/.made holds that game's
+// data.trpfs size (each version's differs), checked against the RomFS served now.
+bool g_maxlod_on;  // (this session serves cache/maxlod: F1 says so)
+static void maxlod_layer(void) {
+    if (!g_settings.full_detail) return;
+    unsigned long long made = 0;
+    FILE *f = fopen("cache/maxlod/.made", "rb");
+    if (!f) { LOG("[fs] full-detail models: not made yet (cache/maxlod.log)\n"); return; }
+    if (fscanf(f, "%llu", &made) != 1) made = 0;
+    fclose(f);
+    RomFile *pack = NULL;
+    for (int i = 0; i < rom_nfiles && !pack; i++)
+        if (!strcmp(rom_files[i].path, "arc/data.trpfs")) pack = &rom_files[i];
+    if (!pack || pack->size != made) {
+        LOG("[fs] full-detail models: made for another game version (data.trpfs %llu, now %llu): off until made again\n",
+            made, pack ? (unsigned long long)pack->size : 0ull);
+        return;
+    }
+    strlcpy(layer_root[nlayers++], "cache/maxlod/romfs", sizeof *layer_root);
+    g_maxlod_on = true;
+    LOG("[fs] full-detail models: on (cache/maxlod)\n");
+}
+
 static int name_cmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
 // mods_order's place (unlisted: after every listed one), then the name
 static int mod_rank(const char *name) {
@@ -333,7 +358,7 @@ static void layer_init(void) {
     const char *seed = rando_seed_dir();
     if (seed) snprintf(layer_root[nlayers++], sizeof *layer_root, "%s/romfs", seed);
     DIR *d = opendir("mods");
-    if (!d) return;
+    if (!d) { maxlod_layer(); return; }  // (no mods folder: the full-detail models still)
     char names[15][256];
     int n = 0;
     settings_load();  // (the start screen's Mods page: mods_off, mods_order)
@@ -352,6 +377,7 @@ static void layer_init(void) {
         LOG("[fs] mod: %s\n", names[i]);
         rt_mods_on++;
     }
+    maxlod_layer();
 }
 
 static bool layer_file(const char *path, char *out, size_t cap) {

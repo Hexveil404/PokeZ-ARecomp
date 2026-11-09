@@ -189,23 +189,46 @@ static bool keeps_game_step(uint32_t channel) {
     }
     return channel < 64 && (mask >> channel & 1);
 }
+extern bool g_za_mode_dyn;  // (rt_za_frame_cfg, below)
+static uint32_t frame_step(uint32_t game_step, uint32_t channel, bool on) {
+    // The per-frame mode (rt_za_frame_cfg, below) brought the stuck-after-a-roll back: the player's code takes the
+    // game's frame mode a frame late, so the first frame run in the 30 fps mode after a 60 fps one handed channel 0 two
+    // ticks while that code still went by the 60 fps mode - the mismatch above. That frame keeps channel 0 on one tick.
+    // The way back has the same mismatch the other way: the first frame in the 60 fps mode after a 30 fps one gave
+    // channel 0 one tick while that code still went by the 30 fps mode, which on the Switch always hands two - and the
+    // tick held back on the way in was never given back, so between 40 and 59 fps (the mode flipping every frame or two)
+    // channel 0 ran slower than the world: the camera shaking while running and the player stuck after a few rolls
+    // (#179 #188, RX 7600 at ~45-48 fps). So channel 0 goes by the previous frame's mode, as that code does: one tick
+    // after a 60 fps frame, two after a 30 fps one; over any run of frames it gets the world's ticks.
+    // LARECOMP_DYN_CH0=3 that (default); =2 v0.1.20's (one tick on the way in only); =0: two ticks on the way in (stuck
+    // on the Deck); =1: one tick on every frame in the 30 fps mode
+    static int ch0 = -1;
+    if (ch0 < 0) ch0 = ENV("LARECOMP_DYN_CH0") ? atoi(ENV("LARECOMP_DYN_CH0")) : 3;
+    if (on && g_settings.frame_dt && channel == 0 && keeps_game_step(0) && g_za_mode_dyn && ch0 == 3)
+        return za_dyn30_prev ? (game_step > 1 ? game_step : 1) : (za_dyn30 ? 0 : game_step);
+    if (!on || !g_settings.frame_dt || (game_step == 0 && keeps_game_step(channel))) return game_step;
+    if (channel == 0 && keeps_game_step(0) && za_dyn30 && (ch0 == 1 || (ch0 == 2 && !za_dyn30_prev))) return 0;
+    return za_step_n > game_step ? za_step_n : game_step;
+}
+bool g_za_step_hook;  // (rt_za_frame_step has run: this game code hands each clock channel its step through it)
 uint32_t rt_za_frame_step(uint32_t game_step, uint32_t channel) {
+    g_za_step_hook = true;
     static int on = -1;
     if (on < 0) { const char *e = ENV("LARECOMP_FRAME_STEP"); on = !e || atoi(e) != 0; }
     static uint32_t last_channel;
     static bool counted;
     if (!counted && channel == 0 && last_channel > 0) counted = true, LOG("[pace] clock channels: %u\n", last_channel + 1);
     last_channel = channel;
-    if (!on || !g_settings.frame_dt || (game_step == 0 && keeps_game_step(channel))) return game_step;
-    // The per-frame mode (rt_za_frame_cfg, below) brought the stuck-after-a-roll back: the player's code takes the
-    // game's frame mode a frame late, so the first frame run in the 30 fps mode after a 60 fps one handed channel 0 two
-    // ticks while that code still went by the 60 fps mode - the mismatch above. That frame keeps channel 0 on one tick
-    // (LARECOMP_DYN_CH0=2, the default). Tested on the Deck: never stuck, the banners still clear. =0: two ticks there
-    // (stuck again); =1: one tick on every frame in the 30 fps mode
-    static int ch0 = -1;
-    if (ch0 < 0) ch0 = ENV("LARECOMP_DYN_CH0") ? atoi(ENV("LARECOMP_DYN_CH0")) : 2;
-    if (channel == 0 && keeps_game_step(0) && za_dyn30 && (ch0 == 1 || (ch0 == 2 && !za_dyn30_prev))) return 0;
-    return za_step_n > game_step ? za_step_n : game_step;
+    uint32_t r = frame_step(game_step, channel, on);
+    {   // ticks handed to channel 0 and channel 1 (the world's speed), logged once a minute of channel-0 calls: with
+        // the per-frame mode they must stay equal, or channel 0 runs slower than the world (see frame_step)
+        static uint64_t t0, t1, calls;
+        if (channel == 0) t0 += r + 1; else if (channel == 1) t1 += r + 1;
+        if (channel == 0 && g_settings.frame_dt && ++calls % 3600 == 0)
+            LOG("[pace] ticks over %llu frames: channel 0 %llu, channel 1 %llu\n", (unsigned long long)calls,
+                (unsigned long long)t0, (unsigned long long)t1);
+    }
+    return r;
 }
 
 // (60 fps with frame_dt; LARECOMP_FRAME_MODE_DYN, default 1) A frame the accumulator says is behind (rt_za_frame_dt's
@@ -225,6 +248,24 @@ int32_t rt_za_frame_cfg(int32_t cfg) {
     bool on = e ? atoi(e) >= 60 : fps60_holds();
     static int dyn = -1;
     if (dyn < 0) dyn = ENV("LARECOMP_FRAME_MODE_DYN") ? atoi(ENV("LARECOMP_FRAME_MODE_DYN")) : 1;
+    // Only with the per-channel hook (rt_za_frame_step: game code built with tools/za_patches.py FRAME_STEP, which
+    // was 2.0.2's alone up to v0.1.20): without it every channel takes the game's two ticks on a frame in its 30 fps
+    // mode, channel 0 included, while the player's code still goes by the 60 fps mode - stuck after a few rolls on
+    // 1.0.0 at ~45 fps (#188). There the 60 fps mode stays on (below 60 the world is slower, as with Constant game
+    // speed off) until the game code is built again with the hook. LARECOMP_FRAME_MODE_DYN=1 forces it, =0 off.
+    extern bool g_za_step_hook;
+    static uint64_t frames;
+    frames++;
+    bool hook_known = g_za_step_hook || frames > 2;  // (the hook runs after this, in the same function: frame 2 knows)
+    if (hook_known && !g_za_step_hook && dyn == 1 && !ENV("LARECOMP_FRAME_MODE_DYN")) {
+        LOG("[pace] no per-channel step in this game code: the game's 30 fps mode is not used per frame (#188)\n");
+        dyn = 0;
+    }
+    {   // LARECOMP_ZA_SLOW_MS=<ms> (test): the game thread sleeps that long every frame - a machine at 40-55 fps
+        static long slow = -1;
+        if (slow < 0) slow = ENV("LARECOMP_ZA_SLOW_MS") ? atol(ENV("LARECOMP_ZA_SLOW_MS")) : 0;
+        if (slow > 0 && frames > 1800) plat_sleep_until_ns(plat_now_ns() + (uint64_t)slow * 1000000);
+    }
     g_za_mode_dyn = dyn && on && g_settings.frame_dt && cfg > 0;
     g_za_mode_dyn_interval = g_za_mode_dyn && dyn == 2;
     static int logged = -1;

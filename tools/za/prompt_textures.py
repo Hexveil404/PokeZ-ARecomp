@@ -42,6 +42,8 @@ ap.add_argument('--font', default=None, help='bold TrueType font for the labels'
 ap.add_argument('--mods', default='mods', help="mods folder (runtime/services/fs.c): their UI archives' icons too")
 ap.add_argument('--party-icons', metavar='DIR', help="the Pokémon box icons into DIR as PNG (then make nothing else)")
 ap.add_argument('--maxlod', metavar='DIR', help='DIR/romfs: every model at its full detail (lod_mod.py; then make nothing else)')
+ap.add_argument('--drawdist', metavar='DIR', help='DIR/romfs: the scene parts with draw distances x --factor (draw_dist.py)')
+ap.add_argument('--factor', type=float, default=2, help='with --drawdist: the distances times this')
 ap.add_argument('--xbox-attack-layout', action='store_true', help='prepare the optional battle layout during setup')
 ap.add_argument('--xbox-attack-layout-only', action='store_true', help='prepare only the battle layout (release smoke test)')
 ap.add_argument('--xbox-attack-layout-version', action='store_true', help='check the frozen helper includes battle layout support')
@@ -265,6 +267,20 @@ def deswizzle_np(src, wb, hb, bpb, bh_log2):  # deswizzle() with numpy: the same
 # F1 > Full-detail models (runtime/ui/launcher.mm launcher_maxlod_kick): tools/za/lod_mod.py on the player's own game
 # files, into DIR.new and then swapped in whole; DIR/.made holds data.trpfs's size, which runtime/services/fs.c checks
 # against the game it serves (another version's models are never layered over it).
+# F1 > Draw distance (runtime/ui/launcher.mm launcher_drawdist_kick): tools/za/draw_dist.py, the world's LOD and
+# culling distances times --factor, into DIR (.made: data.trpfs's size and the factor, checked by runtime/services/fs.c)
+if args.drawdist:
+    import shutil, draw_dist
+    trpfs, trpfd = open_game(args.romfs[0])
+    new = args.drawdist.rstrip('/\\') + '.new'
+    shutil.rmtree(new, ignore_errors=True)
+    files, dists, miss = draw_dist.make(trpfs, trpfd, unpack, new, args.factor, log=lambda *a: print(*a, flush=True))
+    if not files: sys.exit(1)
+    with open(os.path.join(new, '.made'), 'w') as f: f.write('%d %d\n' % (len(trpfs), round(args.factor * 100)))
+    shutil.rmtree(args.drawdist, ignore_errors=True)
+    os.replace(new, args.drawdist)
+    sys.exit(0)
+
 if args.maxlod:
     import shutil, lod_mod
     trpfs, trpfd = open_game(args.romfs[0])

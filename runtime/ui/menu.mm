@@ -20,6 +20,9 @@
 extern "C" void launcher_maxlod_kick(void);  // runtime/ui/launcher.mm: F1 > Full-detail models (#190)
 extern "C" int launcher_maxlod_state(void);
 extern "C" bool g_maxlod_on;  // runtime/services/fs.c
+extern "C" void launcher_drawdist_kick(void);  // F1 > Draw distance (#190)
+extern "C" int launcher_drawdist_state(void);
+extern "C" bool g_drawdist_on;
 #ifdef __APPLE__
 #include "imgui_impl_metal.h"
 #else
@@ -101,7 +104,7 @@ static void set_open(bool open);
 struct RestartSnap {
     int gpu_compat[GPU_COMPAT_N];
     char gpu_name[256];
-    int video_rec, opmode, shadow_res, language;
+    int video_rec, opmode, shadow_res, language, draw_dist;
     bool dx12, full_detail;
 };
 static RestartSnap g_rs;      // (taken when F1 opens in game, and on Apply)
@@ -114,12 +117,14 @@ static void rs_take(RestartSnap *r) {
     memcpy(r->gpu_name, g_settings.gpu_name, sizeof r->gpu_name);
     r->video_rec = g_settings.video_rec, r->opmode = g_settings.opmode, r->shadow_res = g_settings.shadow_res;
     r->language = g_settings.language, r->dx12 = g_settings.dx12, r->full_detail = g_settings.full_detail;
+    r->draw_dist = g_settings.draw_dist;
 }
 static void rs_put(const RestartSnap *r) {
     memcpy(g_settings.gpu_compat, r->gpu_compat, sizeof r->gpu_compat);
     memcpy(g_settings.gpu_name, r->gpu_name, sizeof r->gpu_name);
     g_settings.video_rec = r->video_rec, g_settings.opmode = r->opmode, g_settings.shadow_res = r->shadow_res;
     g_settings.language = r->language, g_settings.dx12 = r->dx12, g_settings.full_detail = r->full_detail;
+    g_settings.draw_dist = r->draw_dist;
 }
 static bool rs_pending(void) {
     if (!g_rs_taken) return false;
@@ -611,6 +616,29 @@ static void tab_display(bool in_game) {
                                        TR("Preparing the full-detail models...", "Preparando os modelos detalhados..."));
                 else if (st == 2 && in_game && !g_maxlod_on)
                     ImGui::TextDisabled("%s", TR("Ready: applies from the next start.", "Pronto: vale a partir da próxima abertura."));
+            }
+            {   // #190: cache/drawdist (runtime/ui/launcher.mm launcher_drawdist_kick), layered from the next start
+                static const int pcts[] = {100, 150, 200, 300};
+                int di = 0;
+                for (int i = 1; i < 4; i++) if (g_settings.draw_dist == pcts[i]) di = i;
+                const char *dd[] = {TR("Game's", "Do jogo"), "1.5x", "2x", "3x"};
+                int was = g_settings.draw_dist;
+                if (opt_choice(TR("Draw distance", "Distância de visão"), &di, dd, 4, 0,
+                               TR("How far away objects, people and Pokémon are drawn and keep their detail: the game's "
+                                  "own distances (people's simpler versions from 8 m, objects hidden past 65 or 130 m) "
+                                  "times this. Less popping in as you walk; costs GPU time in busy places. Made from your "
+                                  "own game files (a few seconds, in the background); applies from the next start.",
+                                  "A que distância objetos, pessoas e Pokémon são desenhados e mantêm o detalhe: as "
+                                  "distâncias do próprio jogo (versões simples das pessoas a partir de 8 m, objetos "
+                                  "escondidos depois de 65 ou 130 m) vezes este valor. Menos coisas surgindo enquanto "
+                                  "anda; custa GPU em lugares cheios. Feito a partir dos seus arquivos do jogo (alguns "
+                                  "segundos, em segundo plano); vale a partir da próxima abertura.")))
+                    g_settings.draw_dist = pcts[di];
+                if (g_settings.draw_dist != was) launcher_drawdist_kick();
+                int st = launcher_drawdist_state();
+                if (g_settings.draw_dist != 100 && st == 1)
+                    ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s",
+                                       TR("Preparing the draw distance...", "Preparando a distância de visão..."));
             }
             if (in_game && g_settings.fps60 && g_fps60_fell_back)
                 ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s",

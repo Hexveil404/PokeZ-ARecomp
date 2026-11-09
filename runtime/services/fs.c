@@ -256,7 +256,7 @@ static void rom_dir_path(const uint8_t *dmeta, uint32_t dsize, uint32_t dir, cha
 // Pokémon Z-A keeps its files in packs (arc/data.trpfs) listed by arc/data.trpfd, and reads a file from the RomFS
 // only when the list doesn't have it: so the game's data.trpfd is served without the layered files' entries
 // (trpfd_unlist). A mod's own data.trpfd is never used (it's made for the mod's game version).
-static char layer_root[18][1100];  // seed + optional Xbox presentation + 15 user mods + full-detail models
+static char layer_root[19][1100];  // seed + optional Xbox presentation + 15 user mods + full-detail models + draw distance
 static int nlayers = -1;
 static bool trinity;  // the RomFS has arc/data.trpfd
 static uint8_t *xbox_arc;
@@ -311,6 +311,31 @@ static bool xbox_layer_prepare(void) {
 // made by zaprompts --maxlod from the player's own files: runtime/ui/launcher.mm launcher_maxlod_kick). The last layer:
 // a player's mod with the same model wins. Only for the game it was made from: cache/maxlod/.made holds that game's
 // data.trpfs size (each version's differs), checked against the RomFS served now.
+// F1 > Draw distance (#190): cache/drawdist/romfs, the scene parts holding the world's trinity_ModelLodSetting /
+// trinity_ModelCullingSetting tables with their distances scaled (tools/za/draw_dist.py via zaprompts --drawdist).
+// .made: the data.trpfs size and the factor in percent - both must match this game and the setting.
+bool g_drawdist_on;
+static void drawdist_layer(void) {
+    if (g_settings.draw_dist == 100) return;
+    unsigned long long made = 0;
+    int pct = 0;
+    FILE *f = fopen("cache/drawdist/.made", "rb");
+    if (!f) { LOG("[fs] draw distance %d%%: not made yet (cache/drawdist.log)\n", g_settings.draw_dist); return; }
+    if (fscanf(f, "%llu %d", &made, &pct) != 2) made = 0;
+    fclose(f);
+    RomFile *pack = NULL;
+    for (int i = 0; i < rom_nfiles && !pack; i++)
+        if (!strcmp(rom_files[i].path, "arc/data.trpfs")) pack = &rom_files[i];
+    if (!pack || pack->size != made || pct != g_settings.draw_dist) {
+        LOG("[fs] draw distance %d%%: made for another game version or distance (%llu, %d%%): off until made again\n",
+            g_settings.draw_dist, made, pct);
+        return;
+    }
+    strlcpy(layer_root[nlayers++], "cache/drawdist/romfs", sizeof *layer_root);
+    g_drawdist_on = true;
+    LOG("[fs] draw distance: %d%% (cache/drawdist)\n", pct);
+}
+
 bool g_maxlod_on;  // (this session serves cache/maxlod: F1 says so)
 static void maxlod_layer(void) {
     if (!g_settings.full_detail) return;
@@ -358,7 +383,7 @@ static void layer_init(void) {
     const char *seed = rando_seed_dir();
     if (seed) snprintf(layer_root[nlayers++], sizeof *layer_root, "%s/romfs", seed);
     DIR *d = opendir("mods");
-    if (!d) { maxlod_layer(); return; }  // (no mods folder: the full-detail models still)
+    if (!d) { maxlod_layer(); drawdist_layer(); return; }  // (no mods folder: ours still)
     char names[15][256];
     int n = 0;
     settings_load();  // (the start screen's Mods page: mods_off, mods_order)
@@ -378,6 +403,7 @@ static void layer_init(void) {
         rt_mods_on++;
     }
     maxlod_layer();
+    drawdist_layer();
 }
 
 static bool layer_file(const char *path, char *out, size_t cap) {

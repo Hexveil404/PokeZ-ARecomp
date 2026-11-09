@@ -147,6 +147,9 @@ typedef struct {
     bool full_detail; // Pokémon Z-A: every model at its full detail at any distance (cache/maxlod, made from the
                       // player's game files by zaprompts --maxlod: runtime/ui/launcher.mm launcher_maxlod_kick;
                       // layered by runtime/services/fs.c). Off by default (GPU time); from the next start. #190
+    int draw_dist;    // Pokémon Z-A: the world's LOD / culling distances in percent (100: the game's; 150, 200, 300):
+                      // cache/drawdist, made from the player's files by zaprompts --drawdist (runtime/ui/launcher.mm
+                      // launcher_drawdist_kick), layered by runtime/services/fs.c. From the next start. #190
     int ui_lang;      // UI_LANG_*: the start screen's language (runtime/ui/launcher.mm); auto = the system's
     // mods/ folders (runtime/services/fs.c layers them): '|' between names. order: first wins where two replace the
     // same file (folders not listed come after, by name); off: not loaded. Edited on the start screen's Mods page.

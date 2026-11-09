@@ -844,6 +844,42 @@ extern "C" void launcher_maxlod_kick(void) {
     rt_launcher_log("[launcher] full-detail models: %s\n", g_maxlod_proc ? "being made (cache/maxlod.log)" : "zaprompts didn't start");
 }
 
+// F1 > Draw distance (#190): cache/drawdist made by zaprompts --drawdist (tools/za/draw_dist.py: the world's LOD /
+// culling tables, ~15 s) when the setting isn't the game's and none was made for this data and distance
+// (cache/drawdist.src). Log: cache/drawdist.log.
+static PlatProc g_drawdist_proc;
+extern "C" int launcher_drawdist_state(void) {  // 0 nothing to do, 1 being made, 2 ready for the setting
+    if (g_drawdist_proc) {
+        if (plat_proc_wait(g_drawdist_proc, false) < 0) return 1;
+        g_drawdist_proc = 0;
+    }
+    unsigned long long made = 0;
+    int pct = 0;
+    if (FILE *f = fopen("cache/drawdist/.made", "rb")) { if (fscanf(f, "%llu %d", &made, &pct) != 2) pct = 0; fclose(f); }
+    return pct && pct == g_settings.draw_dist ? 2 : 0;
+}
+extern "C" void launcher_drawdist_kick(void) {
+    char tool[1100], fac[32];
+    if (g_settings.draw_dist == 100 || g_root.empty() || g_drawdist_proc) return;
+    std::string romfs = file_exists(g_root + "/romfs.bin") ? g_root + "/romfs.bin" : g_root + "/romfs";
+    std::string data = romfs + (is_dir(romfs) ? "/arc/data.trpfs" : "");
+    char src[96] = "", had[96] = "";
+    struct stat sb;
+    if (stat(data.c_str(), &sb)) return;
+    snprintf(src, sizeof src, "%lld %lld %d", (long long)sb.st_size, (long long)sb.st_mtime, g_settings.draw_dist);
+    if (FILE *f = fopen("cache/drawdist.src", "rb")) { size_t n = fread(had, 1, sizeof had - 1, f); had[n] = 0; fclose(f); }
+    if (!strcmp(src, had) && launcher_drawdist_state() == 2) return;
+    if (!rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool))
+        return;
+    mkdir("cache", 0755);
+    if (FILE *f = fopen("cache/drawdist.src", "wb")) fputs(src, f), fclose(f);
+    snprintf(fac, sizeof fac, "%g", g_settings.draw_dist / 100.0);
+    const char *argv[] = {tool, "--romfs", romfs.c_str(), "--drawdist", "cache/drawdist", "--factor", fac, NULL};
+    g_drawdist_proc = plat_spawn(argv, "cache/drawdist.log", false);
+    rt_launcher_log("[launcher] draw distance %d%%: %s\n", g_settings.draw_dist,
+                    g_drawdist_proc ? "being made (cache/drawdist.log)" : "zaprompts didn't start");
+}
+
 // runtime/main.c, a set-up copy booting straight into the game: the icons made in the background if they never were,
 // or were made for other bindings
 extern "C" void launcher_prompts_kick(const char *root) {
@@ -852,6 +888,7 @@ extern "C" void launcher_prompts_kick(const char *root) {
     xbox_layout_before_play();
     if (prompts_wanted()) make_prompts(false);
     launcher_maxlod_kick();
+    launcher_drawdist_kick();
 }
 // runtime/ui/controls_ui.mm, a binding changed (larecomp.ini saved): the icons made again for it, from the next start
 extern "C" void launcher_prompts_refresh(void) {
@@ -2330,6 +2367,7 @@ extern "C" void launcher_run(const char *root) {
     settings_load();
     lang_update();
     launcher_maxlod_kick();  // (F1 > Full-detail models on and none made for this game yet: made now, in the background)
+    launcher_drawdist_kick();  // (F1 > Draw distance: the same)
     static bool update_checked;  // (once per launch, not again after a "Title screen" reboot)
     if (!update_checked && !getenv("LARECOMP_NO_UPDATE_CHECK")) {
         update_checked = true;

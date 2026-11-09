@@ -2172,17 +2172,31 @@ static void party_icons_kick(void) {  // made when missing (3 tries: cache/party
     asked = true;
     // (the game's data: the RomFS image the setup makes, else a romfs/ folder extracted by the player)
     std::string romfs = file_exists(g_root + "/romfs.bin") ? g_root + "/romfs.bin" : g_root + "/romfs";
-    if (file_exists(PARTY_ICONS "/.made") || !file_exists(romfs + (is_dir(romfs) ? "/arc/data.trpfs" : "")) ||
+    std::string data = romfs + (is_dir(romfs) ? "/arc/data.trpfs" : "");
+    // The game data the icons were drawn from (cache/party_icons.src: its size and time): icons made once from 1.0.0
+    // were kept after the update to 2.0.x, which has none for the DLC's Pokémon (Tinkaton, Ceruledge... a ball on
+    // their cards, #213). Other data: made again (the tries count again too).
+    char src[64] = "";
+    struct stat sb;
+    if (!stat(data.c_str(), &sb)) snprintf(src, sizeof src, "%lld %lld", (long long)sb.st_size, (long long)sb.st_mtime);
+    char had[64] = "";
+    if (FILE *f = fopen(PARTY_ICONS ".src", "rb")) { size_t n = fread(had, 1, sizeof had - 1, f); had[n] = 0; fclose(f); }
+    bool same_data = !strcmp(src, had);
+    if (!same_data) remove(PARTY_ICONS ".tried");
+    if ((same_data && file_exists(PARTY_ICONS "/.made")) || !file_exists(data) ||
         !rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool))
         return;
     int tries = 0;
     if (FILE *f = fopen(PARTY_ICONS ".tried", "rb")) tries = fscanf(f, "%d", &tries) == 1 ? tries : 0, fclose(f);
     if (tries >= 3) return;
     mkdir("cache", 0755);
+    remove(PARTY_ICONS "/.made");  // (made again: the card shows the new one once it is there)
+    if (FILE *f = fopen(PARTY_ICONS ".src", "wb")) fputs(src, f), fclose(f);
     if (FILE *f = fopen(PARTY_ICONS ".tried", "wb")) fprintf(f, "%d", tries + 1), fclose(f);
     const char *argv[] = {tool, "--romfs", romfs.c_str(), "--party-icons", PARTY_ICONS, NULL};
     g_party_icons_proc = plat_spawn(argv, PARTY_ICONS ".log", false);
-    rt_launcher_log("[launcher] team icons: %s\n", g_party_icons_proc ? "being made (" PARTY_ICONS ".log)" : "zaprompts didn't start");
+    rt_launcher_log("[launcher] team icons: %s%s\n", g_party_icons_proc ? "being made (" PARTY_ICONS ".log)" : "zaprompts didn't start",
+                    !same_data ? " (for this game data: none yet, or it changed since they were made)" : "");
 }
 
 #ifdef __APPLE__

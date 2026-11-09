@@ -1568,6 +1568,16 @@ void vk_exec_init(void) {
     vkGetPhysicalDeviceProperties2(g_vk.phys, &pr2);
     maxwell_quad_ops = (sg.supportedOperations & VK_SUBGROUP_FEATURE_QUAD_BIT) && (sg.supportedStages & VK_SHADER_STAGE_FRAGMENT_BIT);
     maxwell_quad_deriv_default = g_vk.props.vendorID == 0x1002;  // (translate.c quad_deriv: helpers in quad swaps)
+    {  // (translate.c gather_bias: AMD's and Intel's Windows drivers gather a midpoint coordinate from the other 2x2)
+        extern int maxwell_gather_bias_default;
+#ifdef _WIN32
+        if (g_vk.props.vendorID == 0x1002 || g_vk.props.vendorID == 0x8086)
+            maxwell_gather_bias_default = (int)g_vk.props.limits.subTexelPrecisionBits;
+#endif
+        const char *gb = getenv("LARECOMP_GATHER_BIAS");
+        int bits = gb ? atoi(gb) : maxwell_gather_bias_default;
+        LOG("[vk] gather bias: %s (%d sub-texel bits; LARECOMP_GATHER_BIAS)\n", bits > 0 ? "on" : "off", bits > 0 ? bits : (int)g_vk.props.limits.subTexelPrecisionBits);
+    }
     extern bool maxwell_quad_control_ok, maxwell_quad_control_default;
     maxwell_quad_control_ok = g_vk.quad_control;  // (translate.c quad_control_on: full quads where the game derives itself)
     maxwell_quad_control_default = g_vk.quad_control && g_vk.props.vendorID == 0x1002;

@@ -32,6 +32,7 @@ uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; s
 bool maxwell_gmem_lazy;
 bool maxwell_flat_default = true;
 bool maxwell_quad_ops;  // (vk_exec_init: the device has quad subgroup operations in fragment shaders)
+int maxwell_gather_bias_default;  // (vk_exec_init: the sub-texel bits on AMD / Intel Windows; gather_bias)
 bool maxwell_quad_deriv_default;  // (vk_exec_init: AMD; quad_deriv)
 bool maxwell_quad_control_ok, maxwell_quad_control_default;  // (vk_exec_init: the device has quad control; AMD: on)
 bool maxwell_lockstep_default = true;  // (vk_exec_init: helpers guaranteed - NVIDIA, or quad control on; quad_lockstep)
@@ -1018,12 +1019,29 @@ static void emit_atom(Ctx *c, uint64_t w, bool red) {
 // over the whole image with FSR's 67% render resolution (and Dynamic resolution): the whole picture's shadows squeezed
 // into a 67% rectangle, older frames' shadows outside it (other lighting in the rectangle, a ghost of the player's
 // shadow beside it)
+//
+// Then a bias of a fraction of a texel (Ryujinx's TexturePass gather bias, the same rule): a gather whose coordinate
+// sits exactly between two texels may take either 2x2 group by the spec, and AMD's and Intel's Windows drivers take the
+// other one than the Switch (and NVIDIA): shadow edges and gathered depth then step by a texel as the camera moves.
+// The bias is 1 / (size * 2^(subTexelPrecisionBits + 1)), the least that moves a midpoint to the Switch's side.
+// LARECOMP_GATHER_BIAS=0 off, =<bits> that precision; default the device's bits on AMD / Intel Windows, else off.
+static int gather_bias(void) {
+    static int b = -1;
+    if (b < 0) { const char *e = getenv("LARECOMP_GATHER_BIAS"); b = e ? atoi(e) : maxwell_gather_bias_default; }
+    return b > 0 && b < 24 ? b : 0;
+}
+
 static void gather_uv(Ctx *c, int slot, char *xy, size_t n) {
-    if (c->stage == STAGE_VERTEX) return;
     char w[700];
-    snprintf(w, sizeof w, "uvs(%s, rscale[%d])", xy, slot + 1);
-    snprintf(xy, n, "%s", w);
-    c->uses_rscale = true;
+    if (c->stage != STAGE_VERTEX) {
+        snprintf(w, sizeof w, "uvs(%s, rscale[%d])", xy, slot + 1);
+        snprintf(xy, n, "%s", w);
+        c->uses_rscale = true;
+    }
+    if (gather_bias()) {
+        snprintf(w, sizeof w, "(%s + 1.0 / (vec2(tsize%d(0).xy) * %.1f))", xy, slot, (double)(1u << (gather_bias() + 1)));
+        snprintf(xy, n, "%s", w);
+    }
 }
 
 // TLD4S (2D gather, one component or a depth compare; per Ryujinx's EmitTexs Tld4s): x in Ra, y in Rb - or y in Ra+1

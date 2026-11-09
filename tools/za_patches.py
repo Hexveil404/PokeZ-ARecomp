@@ -40,18 +40,38 @@ def _za_frame_dt(gen, a):
 # runtime/hle/framepace.c rt_za_frame_step hands on max(w20, the accumulator's step) instead, leaving the frame
 # clock's mode logic alone (LARECOMP_FRAME_STEP=0: w20). The channel's index (w22, the loop's counter) goes along:
 # channel 0 keeps the game's own step (two ticks there leave the player stuck after a roll). (c->x[22] is current
-# here: regpromote.py leaves patched functions' registers in the Cpu struct.) 2.0.2 only: the one build checked (1.0.0
-# / 2.0.0 likely have it at the same offset, unverified - the assert would stop their builds); there the 60 fps mode
-# keeps the game's own step.
-FRAME_STEP = {'b1f12fd919eae86a': ZA_BUILDS['b1f12fd919eae86a'] + 0xa0}  # 0x7001b29778
+# here: regpromote.py leaves patched functions' registers in the Cpu struct.) 2.0.2 and 2.0.0: the function is the
+# same in both (0x200 bytes compared, only BL / ADRP+ADD targets differ), `mov w2, w20` at the same offset. 1.0.0 at
+# that offset too, unchecked (no 1.0.0 files here): the word is checked at build time and anything else keeps the plain
+# move, as FRAME_DT does. Without this hook the per-frame mode can't hold channel 0 back, and a roll left the player
+# stuck on 1.0.0 (#188, ~45 fps): runtime/hle/framepace.c keeps that mode off where the hook never runs.
+FRAME_STEP = {b: a + 0xa0 for b, a in ZA_BUILDS.items()}  # 2.0.2 0x7001b29778, 2.0.0 0x7001b29d98, 1.0.0 0x70019e3848
 
 
 def _za_frame_step(gen, a):
     w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
-    assert w == 0x2a1403e2, hex(w)  # mov w2, w20
+    if w != 0x2a1403e2:  # mov w2, w20 (not this shape: another layout - the plain move, no per-channel step)
+        return 'c->x[2] = (uint32_t)c->x[20];'
     return ('{ extern uint32_t rt_za_frame_step(uint32_t, uint32_t); '
             'c->x[2] = rt_za_frame_step((uint32_t)c->x[20], (uint32_t)c->x[22]); }'
             f'  /* {a:#x}: mov w2, w20 (the channels\' step -> the decoupled one, any frame mode) */')
+
+
+# The archive reader's OodleLZ_Decompress call (`bl` in f_7001a9bd38 on 2.0.0 / f_7001a9b718 on 2.0.2, matched by
+# 0xa0 bytes with BL / ADRP targets masked: one hit) goes through runtime/services/fs.c rt_za_oodle_call, which decodes
+# again when it returns 0 (#173 #206: right bytes, failed decode, only on Windows 11 build 26300). 1.0.0: not located
+# (no 1.0.0 files here). The `bl`'s target is checked at build time; anything else keeps the plain call.
+OODLE_CALL = {'8a1c86c437394b69': (0x7001a9bddc, 0x7001a9d000), 'b1f12fd919eae86a': (0x7001a9b7bc, 0x7001a9c9e0)}
+
+
+def _za_oodle_call(gen, a, target):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    off = (w & 0x3ffffff) - (1 << 26 if w & 0x2000000 else 0)
+    if w >> 26 != 0x25 or a + off * 4 != target:  # (not this call: the plain one)
+        return f'c->x[30] = {a + 4:#x}ull; f_{target:x}(c);'
+    return ('{ extern void rt_za_oodle_call(Cpu *, uint64_t); '
+            f'c->x[30] = {a + 4:#x}ull; rt_za_oodle_call(c, {target:#x}ull); }}'
+            f'  /* {a:#x}: bl {target:#x} (OodleLZ_Decompress, decoded again if it fails) */')
 
 
 # Smooth distant animation: the per-frame animation update (f_7001dcdf40) reads one byte of each entity's context,
@@ -78,6 +98,9 @@ def za_patches(build):
         out[FRAME_DT[build]] = _za_frame_dt
     if build in FRAME_STEP:
         out[FRAME_STEP[build]] = _za_frame_step
+    if build in OODLE_CALL:
+        a, target = OODLE_CALL[build]
+        out[a] = lambda gen, a, target=target: _za_oodle_call(gen, a, target)
     if build in SMOOTH_ANIM:
         out[SMOOTH_ANIM[build]] = _za_smooth_anim
     return out

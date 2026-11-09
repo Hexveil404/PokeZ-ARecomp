@@ -70,6 +70,28 @@ static int slot_cat(int slot) {
 // the list with plain ImGui widgets, and the list takes the page's whole height: nobody could reach them - #44.)
 static void stick_mouse_rows() {
     bool changed = false;
+    opt_section(TR("Left stick", "Analógico esquerdo"));
+    {
+        float dz = (float)g_settings.lstick_deadzone, outer = (float)g_settings.lstick_outer;
+        if (opt_slider(TR("Dead zone", "Zona morta"), &dz, 0, 30, 1, 10, "%g%%",
+                       TR("How far the stick must move before it counts (0 = off: the stick goes to the game as it is). "
+                          "Raise it if Link switches between walking and running, or drifts, with the stick at rest or "
+                          "pushed gently.",
+                          "O quanto o analógico precisa se mover para contar (0 = desligado: o analógico vai ao jogo como "
+                          "está). Aumente se o personagem alterna entre andar e correr, ou se move sozinho, com o "
+                          "analógico parado ou empurrado de leve."))) {
+            g_settings.lstick_deadzone = (int)dz;
+            changed = true;
+        }
+        if (opt_slider(TR("Full speed from", "Velocidade máxima a partir de"), &outer, 70, 100, 1, 90, "%g%%",
+                       TR("The stick's travel from which it counts as pushed all the way. Lower it if Link doesn't run "
+                          "with the stick pushed diagonally (many controllers stop short of full travel there).",
+                          "O quanto do curso do analógico conta como empurrado até o fim. Diminua se o personagem não "
+                          "corre com o analógico na diagonal (muitos controles não chegam ao fim do curso ali)."))) {
+            g_settings.lstick_outer = (int)outer;
+            changed = true;
+        }
+    }
     opt_section(TR("Right stick", "Analógico direito"));
     {
         static const int deg[] = {0, 10, 15, 20, 25};

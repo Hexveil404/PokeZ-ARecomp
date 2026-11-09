@@ -46,6 +46,8 @@ int bind_prompts_auto(void);                   // what "Auto" button icons are n
 int input_family_of_type(int sdl_gamepad_type); // runtime/hle/input.c: 0 Nintendo, 1 Xbox (or labelled like one), 2 PS
 int input_menu_family(uint32_t sdl_joystick_id); // runtime/hle/input.c: our menus' layout for that pad (0: any)
 void bind_reset(int dev);
+void bind_pad_face_preset(bool xbox_letters);  // A/B/X/Y: Nintendo positions (A east) or Xbox letters (A south), #178
+bool bind_pad_face_is(bool xbox_letters);
 bool bind_is_default(int dev);
 bool bind_is_default_slot(int dev, int slot);
 

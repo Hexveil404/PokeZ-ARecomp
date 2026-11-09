@@ -75,7 +75,7 @@ static void stick_mouse_rows() {
         float dz = (float)g_settings.lstick_deadzone, outer = (float)g_settings.lstick_outer;
         if (opt_slider(TR("Dead zone", "Zona morta"), &dz, 0, 30, 1, 10, "%g%%",
                        TR("How far the stick must move before it counts (0 = off: the stick goes to the game as it is). "
-                          "Raise it if Link switches between walking and running, or drifts, with the stick at rest or "
+                          "Raise it if your character switches between walking and running, or drifts, with the stick at rest or "
                           "pushed gently.",
                           "O quanto o analógico precisa se mover para contar (0 = desligado: o analógico vai ao jogo como "
                           "está). Aumente se o personagem alterna entre andar e correr, ou se move sozinho, com o "
@@ -84,7 +84,7 @@ static void stick_mouse_rows() {
             changed = true;
         }
         if (opt_slider(TR("Full speed from", "Velocidade máxima a partir de"), &outer, 70, 100, 1, 90, "%g%%",
-                       TR("The stick's travel from which it counts as pushed all the way. Lower it if Link doesn't run "
+                       TR("The stick's travel from which it counts as pushed all the way. Lower it if your character doesn't run "
                           "with the stick pushed diagonally (many controllers stop short of full travel there).",
                           "O quanto do curso do analógico conta como empurrado até o fim. Diminua se o personagem não "
                           "corre com o analógico na diagonal (muitos controles não chegam ao fim do curso ali)."))) {
@@ -283,6 +283,26 @@ static void configure_inputs(float scale) {
                              : TR("Puts every key back to its default.", "Volta cada tecla ao padrão."))) {
         bind_capture_cancel();
         bind_reset(dev);
+    }
+    if (g_dev_pad) {  // (face-button presets, #178: a pad printed like the Switch's on XInput, or an Xbox pad by its letters)
+        if (bind_pad_face_is(false)) opt_disable_next();
+        if (opt_action(TR("Face buttons: Nintendo positions", "Botões A/B/X/Y: posições do Nintendo"), "",
+                       TR("A on the right button, B on the bottom one, X on top, Y on the left: as on the Switch. For "
+                          "controllers printed like a Nintendo pad (8BitDo and others), whatever they connect as.",
+                          "A no botão da direita, B no de baixo, X no de cima, Y no da esquerda: como no Switch. Para "
+                          "controles com as letras do Nintendo (8BitDo e outros), seja como for que se conectem."))) {
+            bind_capture_cancel();
+            bind_pad_face_preset(false);
+        }
+        if (bind_pad_face_is(true)) opt_disable_next();
+        if (opt_action(TR("Face buttons: Xbox letters", "Botões A/B/X/Y: letras do Xbox"), "",
+                       TR("Each button does what its letter on an Xbox controller says: A on the bottom button, B on the "
+                          "right, X on the left, Y on top.",
+                          "Cada botão faz o que diz a letra dele num controle de Xbox: A no botão de baixo, B no da "
+                          "direita, X no da esquerda, Y no de cima."))) {
+            bind_capture_cancel();
+            bind_pad_face_preset(true);
+        }
     }
     // (the cursor or the mouse on a row with a description: it shows on the right instead of the bindings)
     bool desc_right = (ImGui::IsItemHovered() || nav_on_item()) && g_focus != FOCUS_RIGHT;

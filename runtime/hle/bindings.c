@@ -136,6 +136,41 @@ void bind_reset(int dev) {
     result(5, dev, -1, -1);
 }
 
+// Face-button presets (F1 > Controls, a controller): Nintendo positions (A east, B south, X north, Y west: the
+// defaults, right for pads printed like the Switch's - an 8BitDo on XInput) or Xbox letters (A south, B east, X west, Y
+// north: the letters printed on an Xbox pad). Only the four face buttons change, #178.
+void bind_pad_face_preset(bool xbox_letters) {
+    static const int16_t nin[4] = {SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_NORTH, SDL_GAMEPAD_BUTTON_WEST};
+    static const int16_t xb[4] = {SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_WEST, SDL_GAMEPAD_BUTTON_NORTH};
+    const int16_t *f = xbox_letters ? xb : nin;
+    int face_of[PADB_HOST_COUNT];  // (a face button on another slot moves to where the preset's took it from: no doubles)
+    for (int h = 0; h < PADB_HOST_COUNT; h++) face_of[h] = -1;
+    for (int i = 0; i < 4; i++) face_of[f[i]] = i;
+    int16_t old[4] = {g_bind_pad[BIND_A], g_bind_pad[BIND_B], g_bind_pad[BIND_X], g_bind_pad[BIND_Y]};
+    for (int s = BIND_Y + 1; s < BIND_PAD_COUNT; s++)
+        if (g_bind_pad[s] >= 0 && g_bind_pad[s] < PADB_HOST_COUNT && face_of[g_bind_pad[s]] >= 0) {
+            int16_t free_btn = -1;  // (the old face binding no face slot keeps)
+            for (int k = 0; k < 4 && free_btn < 0; k++) {
+                bool kept = false;
+                for (int j = 0; j < 4; j++) kept |= f[j] == old[k];
+                bool taken = false;
+                for (int t = BIND_Y + 1; t < BIND_PAD_COUNT; t++) taken |= t != s && g_bind_pad[t] == old[k];
+                if (!kept && !taken) free_btn = old[k];
+            }
+            g_bind_pad[s] = free_btn;
+        }
+    for (int i = 0; i < 4; i++) g_bind_pad[BIND_A + i] = f[i];
+    LOG("[input] controller face buttons: %s\n", xbox_letters ? "Xbox letters (A south)" : "Nintendo positions (A east)");
+    result(5, BIND_DEV_PAD, -1, -1);
+}
+
+bool bind_pad_face_is(bool xbox_letters) {
+    return xbox_letters ? g_bind_pad[BIND_A] == SDL_GAMEPAD_BUTTON_SOUTH && g_bind_pad[BIND_B] == SDL_GAMEPAD_BUTTON_EAST &&
+                              g_bind_pad[BIND_X] == SDL_GAMEPAD_BUTTON_WEST && g_bind_pad[BIND_Y] == SDL_GAMEPAD_BUTTON_NORTH
+                        : g_bind_pad[BIND_A] == SDL_GAMEPAD_BUTTON_EAST && g_bind_pad[BIND_B] == SDL_GAMEPAD_BUTTON_SOUTH &&
+                              g_bind_pad[BIND_X] == SDL_GAMEPAD_BUTTON_NORTH && g_bind_pad[BIND_Y] == SDL_GAMEPAD_BUTTON_WEST;
+}
+
 bool bind_is_default(int dev) {
     return dev == BIND_DEV_PAD ? !memcmp(g_bind_pad, k_def_pad, sizeof g_bind_pad) : !memcmp(g_bind_key, k_def_key, sizeof g_bind_key);
 }

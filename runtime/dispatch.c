@@ -161,13 +161,25 @@ RtJmp *rt_setjmp_site(Cpu *c, uint64_t ret) {
 // LARECOMP_TEST_OBJECT_LATE=<ms>: the object seems not ready at the first step for that long (with no waits: the crash).
 // The same two steps on 2.0.2 (main B1F12FD919EAE86A): #157's "accessing 0" at lr 7000bb9d9c is f_7000bb9d64+0x38, the
 // twin of 2.0.0's f_7000bbb174+0x38. Found by matching the functions (immediates masked: 20 of 20 / 19 of 20 words)
-// and the object's adrp+add in both the store and the call - the code around them is the same, so are the offsets
+// and the object's adrp+add in both the store and the call - the code around them is the same, so are the offsets.
+// #220 (2.0.0, i9-13900KF + RTX 4090): the call came first and the store never came in 30 s - the main thread was the
+// one waiting, and the store evidently needs it to go on, so the wait itself held the store back; after it, the same
+// "no function at 0" (and, killed during the wait, "PLAY does nothing"). So the call waits only a little
+// (LARECOMP_BOOT_DELEGATE_WAIT_MS, default 2000: a store that is merely late, as #101 #111), then runs its step
+// without the delegate - everything else it starts goes on - and the delegate's own call (f_7000bbb174 / f_7000bb9d64,
+// the step's last call: + 0x98, the same in both builds) waits for the store and is made by the store's thread right
+// after it stores. LARECOMP_BOOT_DELEGATE_DEFER=0: the old 30 s wait. LARECOMP_TEST_STORE_LATE=<ms> (test): the store
+// waits that long before storing, so the call comes first.
 typedef struct { uint8_t id[8]; uint64_t obj, set, use; } BootDelegate;
 static const BootDelegate boot_delegates[] = {
     {{0x8A, 0x1C, 0x86, 0xC4, 0x37, 0x39, 0x4B, 0x69}, 0x7006109cc0ull, 0x7000ac2a2cull, 0x7000bbb0dcull},  // 2.0.0
     {{0xB1, 0xF1, 0x2F, 0xD9, 0x19, 0xEA, 0xE8, 0x6A}, 0x700610ecc0ull, 0x7000ac321cull, 0x7000bb9cccull},  // 2.0.2
 };
 static const BootDelegate *g_bd;  // (this game's entry: boot_delegate_build)
+// (a step call that went on without its delegate: running it, or its delegate's call waiting for the store)
+enum { BD_NONE, BD_RUNNING, BD_DEFERRED };
+static int g_bd_state;
+static pthread_mutex_t g_bd_lock = PTHREAD_MUTEX_INITIALIZER;
 #define BOOT_DELEGATE_OBJ (g_bd->obj)
 #define BOOT_DELEGATE_SET (g_bd->set)
 #define BOOT_DELEGATE_USE (g_bd->use)
@@ -185,9 +197,9 @@ static bool boot_wait_on(void) {
     const char *e = getenv("LARECOMP_BOOT_DELEGATE_WAIT");
     return !(e && !atoi(e));
 }
-static void boot_wait(const char *what, volatile uint32_t *r32, volatile uint64_t *r64) {
+static void boot_wait(const char *what, volatile uint32_t *r32, volatile uint64_t *r64, uint64_t max_ns) {
     uint64_t t0 = plat_now_ns();
-    while (!(r32 ? *r32 != 0 : *r64 != 0) && plat_now_ns() - t0 < 30000000000ull) plat_sleep_until_ns(plat_now_ns() + 1000000);
+    while (!(r32 ? *r32 != 0 : *r64 != 0) && plat_now_ns() - t0 < max_ns) plat_sleep_until_ns(plat_now_ns() + 1000000);
     LOG("[boot] %s %s after %.0f ms\n", what, (r32 ? *r32 != 0 : *r64 != 0) ? "came" : "still missing", (double)(plat_now_ns() - t0) / 1e6);
 }
 static void *boot_object_back(void *arg) {
@@ -205,13 +217,50 @@ static void boot_delegate_set(Cpu *c) {
         pthread_detach(t);
     }
     LOG("[boot] step store: object ready %u, delegate %llx\n", *BOOT_OBJ_READY, (unsigned long long)*BOOT_OBJ_FN);
-    if (!*BOOT_OBJ_READY && boot_wait_on()) boot_wait("the object", BOOT_OBJ_READY, NULL);
+    if (!*BOOT_OBJ_READY && boot_wait_on()) boot_wait("the object", BOOT_OBJ_READY, NULL, 30000000000ull);
+    const char *sl = getenv("LARECOMP_TEST_STORE_LATE");
+    if (sl) plat_sleep_until_ns(plat_now_ns() + (uint64_t)atoll(sl) * 1000000);
     dispatch_lookup(BOOT_DELEGATE_SET)(c);
+    // (a call that went on without the delegate: its delegate's call is made here, now that it is stored)
+    pthread_mutex_lock(&g_bd_lock);
+    bool run = g_bd_state == BD_DEFERRED && *BOOT_OBJ_FN;
+    if (run) g_bd_state = BD_NONE;
+    pthread_mutex_unlock(&g_bd_lock);
+    if (run) {
+        uint64_t ret = c->x[0];  // (the store's own result, 1)
+        LOG("[boot] the delegate stored after its step: called now, on the storing thread\n");
+        c->x[0] = BOOT_DELEGATE_OBJ;
+        dispatch_lookup(BOOT_DELEGATE_USE + 0x98)(c);
+        c->x[0] = ret;
+    }
 }
 static void boot_delegate_use(Cpu *c) {
     LOG("[boot] step call: object ready %u, delegate %llx, done %u\n", *BOOT_OBJ_READY, (unsigned long long)*BOOT_OBJ_FN, *BOOT_OBJ_DONE);
-    if (!*BOOT_OBJ_DONE && !*BOOT_OBJ_FN && boot_wait_on()) boot_wait("the delegate", NULL, BOOT_OBJ_FN);
+    const char *df = getenv("LARECOMP_BOOT_DELEGATE_DEFER"), *wm = getenv("LARECOMP_BOOT_DELEGATE_WAIT_MS");
+    bool defer = !(df && !atoi(df)) && dispatch_lookup(BOOT_DELEGATE_USE + 0x98);
+    uint64_t wait_ns = defer ? (uint64_t)(wm ? atoll(wm) : 2000) * 1000000 : 30000000000ull;
+    if (!*BOOT_OBJ_DONE && !*BOOT_OBJ_FN && boot_wait_on()) boot_wait("the delegate", NULL, BOOT_OBJ_FN, wait_ns);
+    // (LARECOMP_TEST_DELEGATE_LATE=1, test: the delegate reads as not stored here - the step without it, then its call)
+    bool pretend = getenv("LARECOMP_TEST_DELEGATE_LATE") != NULL;
+    pthread_mutex_lock(&g_bd_lock);
+    bool later = defer && !*BOOT_OBJ_DONE && (!*BOOT_OBJ_FN || pretend);
+    if (later) g_bd_state = BD_RUNNING;
+    pthread_mutex_unlock(&g_bd_lock);
+    if (!later) { dispatch_lookup(BOOT_DELEGATE_USE)(c); return; }
+    // the step without its delegate's call: that call returns at once while the object reads "done"
+    LOG("[boot] the delegate isn't stored yet: the step goes on, its call waits for the store (#220)\n");
+    *BOOT_OBJ_DONE = 1;
     dispatch_lookup(BOOT_DELEGATE_USE)(c);
+    *BOOT_OBJ_DONE = 0;
+    pthread_mutex_lock(&g_bd_lock);
+    bool now = *BOOT_OBJ_FN != 0;  // (stored while the step ran: called here)
+    g_bd_state = now ? BD_NONE : BD_DEFERRED;
+    pthread_mutex_unlock(&g_bd_lock);
+    if (now) {
+        LOG("[boot] the delegate was stored during the step: called now\n");
+        c->x[0] = BOOT_DELEGATE_OBJ;
+        dispatch_lookup(BOOT_DELEGATE_USE + 0x98)(c);
+    }
 }
 
 __attribute__((noinline)) static GuestFn dispatch_slow(Cpu *c) {

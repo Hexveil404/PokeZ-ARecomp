@@ -771,8 +771,15 @@ static void create_device(void) {
 #else
     bool fsr4_f8_ext = false;
 #endif
+#ifdef VK_KHR_compute_shader_derivatives
+    bool fsr4_cd_ext = has_ext(ep, ne, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+#else
+    bool fsr4_cd_ext = false;
+#endif
+    bool fsr4_cd_quads = false, fsr4_cd_linear = false;
     if (fsr4_req && fsr4_cm_ext) ext[n_ext++] = VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME;
     if (fsr4_req && fsr4_f8_ext) ext[n_ext++] = VK_EXT_SHADER_FLOAT8_EXTENSION_NAME;
+    if (fsr4_req && fsr4_cd_ext) ext[n_ext++] = VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME;
     if (x_dr) ext[n_ext++] = VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME;
     if (x_s2) ext[n_ext++] = VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME;
     if (x_ds) ext[n_ext++] = VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME;
@@ -888,8 +895,13 @@ static void create_device(void) {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
         VkPhysicalDeviceShaderFloat8FeaturesEXT have_f8 = {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT, .pNext = &have_cm};
-        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have_f8};
+        VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR have_cd = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR, .pNext = &have_f8};
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                     .pNext = fsr4_cd_ext ? (void *)&have_cd : (void *)&have_f8};
         vkGetPhysicalDeviceFeatures2(g_vk.phys, &q);
+        fsr4_cd_quads = have_cd.computeDerivativeGroupQuads;
+        fsr4_cd_linear = have_cd.computeDerivativeGroupLinear;
         g_vk.fsr4 = have_cm.cooperativeMatrix && have_f8.shaderFloat8 && have_f8.shaderFloat8CooperativeMatrix &&
                     have.features.shaderInt16 && have.features.shaderStorageImageExtendedFormats &&
                     have.features.shaderStorageImageWriteWithoutFormat && have11.variablePointers &&
@@ -1089,7 +1101,13 @@ static void create_device(void) {
     VkPhysicalDeviceShaderFloat8FeaturesEXT en_f8 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT,
         .shaderFloat8 = VK_TRUE, .shaderFloat8CooperativeMatrix = VK_TRUE, .pNext = &en_cm};
-    if (g_vk.fsr4) en_cm.pNext = f.pNext, f.pNext = &en_f8;
+    VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR en_cd = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR,
+        .computeDerivativeGroupQuads = fsr4_cd_quads, .computeDerivativeGroupLinear = fsr4_cd_linear};
+    if (g_vk.fsr4) {
+        en_cm.pNext = f.pNext, f.pNext = &en_f8;
+        if (fsr4_cd_ext) en_cd.pNext = f.pNext, f.pNext = &en_cd;
+    }
 #endif
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;

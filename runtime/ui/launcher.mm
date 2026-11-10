@@ -894,6 +894,17 @@ extern "C" void launcher_drawdist_kick(void) {
                     g_drawdist_proc ? "being made (cache/drawdist.log)" : "zaprompts didn't start");
 }
 
+// ZA SDK scene editor (runtime/ui/scene_editor.mm): the helper, the game's data, the Mods page listed again
+extern "C" bool launcher_zaprompts(char *out, size_t n) {
+    return rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, out, n);
+}
+extern "C" const char *launcher_game_data(void) {
+    static std::string d;
+    d = g_root.empty() ? "" : file_exists(g_root + "/romfs.bin") ? g_root + "/romfs.bin" : g_root + "/romfs";
+    if (!d.empty() && !file_exists(d)) d.clear();
+    return d.c_str();
+}
+
 // runtime/main.c, a set-up copy booting straight into the game: the icons made in the background if they never were,
 // or were made for other bindings
 extern "C" void launcher_prompts_kick(const char *root) {
@@ -1349,6 +1360,7 @@ static std::string g_mod_pick, g_mod_msg;  // a pick waiting to install; the las
 static std::string g_mod_installed;        // its folder name, for the UI thread to put first (g_mod_lock)
 static bool g_mod_failed;
 static std::atomic<bool> g_mod_busy{false}, g_mods_changed{true};
+extern "C" void launcher_mods_changed(void) { g_mods_changed = true; }  // (scene_editor.mm: a mod saved)
 
 static void mods_reload(void) {
     std::vector<std::string> names;
@@ -2058,7 +2070,8 @@ static void prelaunch_tab(float sc) {
 }
 
 // ---- the pages
-enum Tab { TAB_PLAY, TAB_MODS, TAB_SAVES, TAB_SETTINGS, TAB_ABOUT, N_TABS };
+extern "C" void scene_editor_draw(ImVec2 a, ImVec2 b, float s, bool pt);  // runtime/ui/scene_editor.mm
+enum Tab { TAB_PLAY, TAB_MODS, TAB_SAVES, TAB_EDITOR, TAB_SETTINGS, TAB_ABOUT, N_TABS };  // (Editor: ZA SDK, scene_editor.mm)
 static int g_tab = TAB_PLAY;
 static bool g_changing_folder;  // Play page: "Change game folder" pressed on a set-up copy
 static bool g_focus_play;       // put the controller's cursor on PLAY (opening, back from a page)
@@ -2476,6 +2489,7 @@ extern "C" void launcher_run(const char *root) {
         if (pg && !strncmp(pg + 1, "mods", 4)) g_tab = TAB_MODS;
         if (pg && !strncmp(pg + 1, "saves", 5)) g_tab = TAB_SAVES;
         if (pg && !strncmp(pg + 1, "about", 5)) g_tab = TAB_ABOUT;
+        if (pg && !strncmp(pg + 1, "editor", 6)) g_tab = TAB_EDITOR;  // (the ZA SDK scene editor)
         if (pg && (!strncmp(pg + 1, "settings", 8) || !strcmp(pg + 1, "askdelete"))) g_tab = TAB_SETTINGS, menu_tabs_focus(true);
         if (pg && !strncmp(pg + 1, "settings", 8) && pg[9] == ':' && isdigit((unsigned char)pg[10])) g_tab_request_ext = atoi(pg + 10);
         if (pg && !strncmp(pg + 1, "setup", 5)) g_changing_folder = true;
@@ -2656,7 +2670,7 @@ extern "C" void launcher_run(const char *root) {
             float lx = 64 + text(dl, F_H2, 20, 64, 32 - text_size(F_H2, 20, "ZA RECOMP").y / 2, C_TEXT, "ZA RECOMP").x;
             text(dl, F_SMALL, 13, lx + 8, 32 - text_size(F_SMALL, 13, "v").y / 2 + 1, C_MUTED, LARECOMP_VERSION);
             const char *tab_names[N_TABS] = {TR("Play", "Jogar"), TR("Mods", "Mods"), TR("Saves", "Saves"),
-                                             TR("Settings", "Configurações"), TR("About", "Sobre")};
+                                             TR("Editor", "Editor"), TR("Settings", "Configurações"), TR("About", "Sobre")};
             float tx = lx + 70;
             int prev_tab = g_tab;
             for (int i = 0; i < N_TABS; i++) {
@@ -3147,6 +3161,9 @@ extern "C" void launcher_run(const char *root) {
             }
 
             // ================= About
+            if (g_tab == TAB_EDITOR) {  // ZA SDK scene editor (runtime/ui/scene_editor.mm)
+                scene_editor_draw(P(24, 78), P(W_ - 24, H_ - 44), g_s, g_pt);
+            }
             if (g_tab == TAB_ABOUT) {
                 float x = 72, w = fminf(760, W_ - 144), y = 100;
                 y += text(dl, F_H1, 40, x, y, C_TEXT, "ZA Recomp").y + 4;

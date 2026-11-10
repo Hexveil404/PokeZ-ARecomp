@@ -60,6 +60,8 @@ para *The Legend of Zelda: Link's Awakening*.
 
 **Gráficos** (todos opcionais, desligados por padrão)
 - Upscaling com AMD FSR 1, anti-aliasing com SMAA ou AMD FSR 2 (temporal), nitidez
+- AMD FSR 4.1.2 temporal opcional no Linux com um provedor FidelityFX fornecido pelo usuário (RDNA4; veja
+  [docs/linux.md](docs/linux.md#fsr-412-temporal-upscaling-optional-linux))
 - Saída HDR (HDR10 / scRGB)
 - Oclusão de ambiente (GTAO), luz indireta (GI em espaço de tela) e reflexos na água
 - Sombras mais nítidas (mapa de sombras em resolução maior) e filtragem de texturas de alta qualidade

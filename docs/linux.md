@@ -32,6 +32,19 @@ Steam with Steam Input on, the game sees Steam's virtual Xbox controller (Xbox p
 If the AppImage won't start with a FUSE error, install your distribution's `fuse3` package, or run it with
 `APPIMAGE_EXTRACT_AND_RUN=1`. On a Steam Deck, put `APPIMAGE_EXTRACT_AND_RUN=1 %command%` in the game's launch options.
 
+### FSR 4.1.2 temporal upscaling (optional, Linux)
+
+F1 > Video > Temporal anti-aliasing > **AMD FSR 4.1.2** runs AMD's FSR 4.1.2 through a user-supplied Linux provider,
+`libamd_fidelityfx_upscaler_vk.so`, with its `fsr4-assets/` folder. Put both next to `lasrecomp` (or set
+`LARECOMP_FSR4_PATH` to the `.so` or its folder). The provider is not part of this repository: it is built from the
+owner's FidelityFX SDK 2.4.0 copy and the signed AMD binaries/assets are not redistributed here.
+
+The GPU must expose `VK_KHR_cooperative_matrix` and `VK_EXT_shader_float8` (RDNA4; the RX 9070 XT works). The device
+features are enabled on the first start when FSR 4 is selected. If the provider is missing or the GPU lacks the
+features, the game falls back to FSR 2 (FSR 3.1 on Windows) and logs why. `LARECOMP_FSR4=0` disables the request; `=1` requests it
+without changing the saved setting. FSR 4 currently receives neutral depth (the provider cannot use PokeZ's D32S8
+depth directly), so depth-based disocclusion is left to the model's color/motion-vector path.
+
 ## Building from source
 Ubuntu / Debian packages (other distributions: the same libraries under their names). SDL3 must be 3.4 or newer
 (LAS Recomp loads and saves PNGs through it); where the distribution ships an older one (Debian 13 has 3.2), build SDL3

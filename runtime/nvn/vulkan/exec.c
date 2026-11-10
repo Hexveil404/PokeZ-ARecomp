@@ -3743,6 +3743,7 @@ static int taa_kind(void) {
     switch (g_settings.taa) {
     case TAA_FSR2: return TAA_FSR2;
     case TAA_FSR3: return vk_fsr3_available() ? TAA_FSR3 : TAA_FSR2;
+    case TAA_FSR4: return vk_fsr4_available() ? TAA_FSR4 : vk_fsr3_available() ? TAA_FSR3 : TAA_FSR2;
     case TAA_DLAA: return vk_dlaa_available() ? TAA_DLAA : TAA_GAME;
     default: return TAA_GAME;
     }
@@ -3761,6 +3762,11 @@ float vk_taa_render_share(void) {
     int pct = env > 0 ? env : g_settings.taa_render;
     pct = pct < 50 ? 50 : pct > 100 ? 100 : pct;
     int kind = taa_kind();
+    static bool logged;
+    if (!logged) {  // (one line: which of the temporal paths the setting chose)
+        logged = true;
+        LOG("[taa] setting %d, running %d, render %d%%\n", g_settings.taa, kind, pct);
+    }
     if (pct == 100 || kind == TAA_GAME || kind == TAA_DLAA || fsr2_up_broken ||  // (DLAA: anti-aliasing only)
         g_settings.res_mode == RES_DYNAMIC || fsr2_ok_frame == ~0ull || fsr2_ok_frame + 30 < vk_frame_counter())
         return 1;
@@ -10447,6 +10453,7 @@ static bool fsr2_copy(Prog *pr) {
     if (kind != last_kind) fr.reset = true, last_kind = kind;
     VkCommandBuffer sec = fsr2_cmd();
     bool ok = kind == TAA_DLAA ? vk_dlaa_record(g_vk.dev, sec, &fr)
+              : kind == TAA_FSR4 ? vk_fsr4_record(g_vk.phys, g_vk.dev, sec, &fr)
               : kind == TAA_FSR3 ? vk_fsr3_record(g_vk.phys, g_vk.dev, sec, &fr) : vk_fsr2_record(g_vk.phys, g_vk.dev, sec, &fr);
     VK_CHECK(vkEndCommandBuffer(sec));
     if (!ok) return false;
@@ -10472,7 +10479,8 @@ static bool fsr2_copy(Prog *pr) {
     static int nlog;
     static uint32_t last_w;  // (and each change of the render size)
     if (nlog++ < 3 || w != last_w)
-        LOG("[%s] frame %llu: %ux%u -> %ux%u, jitter %.3f %.3f%s\n", kind == TAA_DLAA ? "dlaa" : kind == TAA_FSR3 ? "fsr3" : "fsr2",
+        LOG("[%s] frame %llu: %ux%u -> %ux%u, jitter %.3f %.3f%s\n", kind == TAA_DLAA ? "dlaa" :
+            kind == TAA_FSR4 ? "fsr4" : kind == TAA_FSR3 ? "fsr3" : "fsr2",
             (unsigned long long)f, w, h, ow, oh, fsr2_jx, fsr2_jy, fr.reset ? ", reset" : "");
     last_w = w;
     fsr2_ok_frame = f;

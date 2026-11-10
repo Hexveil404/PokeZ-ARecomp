@@ -60,6 +60,8 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 
 **Graphics** (all optional, off by default)
 - Upscaling with AMD FSR 1, anti-aliasing with SMAA or AMD FSR 2 (temporal), sharpening
+- Optional AMD FSR 4.1.2 temporal upscaling on Linux with a user-supplied FidelityFX provider (RDNA4; see
+  [docs/linux.md](docs/linux.md#fsr-412-temporal-upscaling-optional-linux))
 - HDR output (HDR10 / scRGB)
 - Ambient occlusion (GTAO), indirect light (screen-space GI) and water reflections
 - Sharper shadows (higher shadow map resolution) and high-quality texture filtering

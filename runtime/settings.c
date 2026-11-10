@@ -148,7 +148,7 @@ const char *settings_language_name(void) {
 
 int g_default_upscaler = UPSCALE_SHARP;
 static const char *const sharpen_names[SHARPEN_N] = {"auto", "off", "low", "medium", "high"};  // (the ini)
-static const char *const taa_names[] = {"game", "fsr2", "dlaa", "fsr3"};  // (the ini, TAA_*)
+static const char *const taa_names[] = {"game", "fsr2", "dlaa", "fsr3", "fsr4"};  // (the ini, TAA_*)
 #define TAA_N (int)(sizeof taa_names / sizeof *taa_names)
 int g_default_res_mode = RES_MATCH;
 bool g_gpu_integrated;

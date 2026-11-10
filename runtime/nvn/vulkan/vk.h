@@ -140,6 +140,7 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import, dmabuf;
+    bool fsr4;  // the device has what the FSR 4.1.2 provider needs (cooperative matrix + shader float8; device.c)
     bool quad_control, max_reconv;  // (VK_KHR_shader_quad_control / _maximal_reconvergence: translate.c quad_control_on)
     // Mesa's Dozen: Vulkan on Direct3D 12 (the driver's VK_DRIVER_ID_MESA_DOZEN). Its Direct3D rules where they differ
     // from what other drivers take (exec.c begin_pass)

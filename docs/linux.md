@@ -152,6 +152,12 @@ Switches: `LARECOMP_VK_CS_SUBGROUP=0` leaves compute to the driver's 64-lane wav
 `vkQueueSubmit2`). `perf record -t <render thread>` sees user space only (perf_event_paranoid=2); the `[vk] t=` log line's
 `submit` ms shows the kernel time inside the submit ioctl.
 
+The Switch 2 Edition (`.nup`) has a larger asset set that reaches below the top 256 MB of that window. On a discrete AMD
+GPU with the edition's upgrade add-on present (`extracted/aoc/0100f43008c45001.bin`), the runtime imports a 1 GB window
+instead: the shorter window left those textures reading as zero, which made the world and all of the game's text black
+while the HUD art still drew. The whole 3.2 GB window costs too much on amdgpu (about 11 fps in Lumiose against 30 at
+1 GB on an RX 9070 XT). `LARECOMP_VK_GMEM_WINDOW=<MB>` overrides either default (`0`: all).
+
 ## ZA Recomp on Linux (native, x86-64)
 Experimental. ZA Recomp builds and runs natively on Linux x86-64 (no Wine / Proton) and can be packaged as an
 AppImage. Most of what makes that possible was already here, from LAS Recomp: the Linux platform layer

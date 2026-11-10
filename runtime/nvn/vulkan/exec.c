@@ -4785,13 +4785,15 @@ static bool gmem_switch2_edition(void) {
 }
 static void gmem_window_init(void) {
     const char *w = ENV("LARECOMP_VK_GMEM_WINDOW");
-    bool small = g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+    bool small = g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, s2 = false;
 #ifdef __linux__
     small = small || g_vk.props.vendorID == 0x1002;
-    // (a discrete AMD GPU: the Switch 2 Edition's window all the way; an APU's full import is too slow for it)
-    if (small && g_vk.props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && gmem_switch2_edition()) small = false;
+    // A discrete AMD GPU: the Switch 2 Edition's assets reach below the top 256 MB, so import 1 GB (the whole 3.2 GB
+    // window costs too much on amdgpu: ~11 fps against 30 at 1 GB on the RX 9070 XT). An APU keeps 256 MB.
+    if (small && g_vk.props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && gmem_switch2_edition())
+        small = false, s2 = true;
 #endif
-    gmem_window = w ? strtoull(w, NULL, 10) << 20 : small ? 256ull << 20 : 0;
+    gmem_window = w ? strtoull(w, NULL, 10) << 20 : s2 ? 1024ull << 20 : small ? 256ull << 20 : 0;
 }
 static void gmem_window_get(uint64_t *lo, uint64_t *len) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;  // (the translator and the render thread - run_queued_now - both ask)

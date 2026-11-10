@@ -351,11 +351,11 @@ void menu_apply_window_requests(void *win) {
     g_pixel_density = SDL_GetWindowPixelDensity(w);
     static bool text_input;
     bool want_text = capturing();
-    if (want_text != text_input) {
-        if (want_text) SDL_StartTextInput(w);
-        else SDL_StopTextInput(w);
-        text_input = want_text;
-    }
+    // A focus loss (an overlay, a click on another window) stops SDL's text input by itself. Re-arm it when the
+    // window has the focus again: the open/closed transition alone left the field unable to take typed text.
+    if (want_text && !SDL_TextInputActive(w)) SDL_StartTextInput(w);
+    else if (!want_text && text_input) SDL_StopTextInput(w);
+    text_input = want_text;
     static bool dt_was, dt_maxed;  // DevTools' IDE layout wants room: maximized while open, as it was after
     if (dt_open() != dt_was) {
         dt_was = dt_open();
@@ -1327,10 +1327,12 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
     ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s", TR("Enter your name", "Digite seu nome"));
     ImGui::PopFont();
     static bool was_open, was_pad;
-    bool pad = g_last_pad.load(), appearing = !was_open || pad != was_pad;  // (switching device: focus the new one)
+    // LARECOMP_KBD_KEYBOARD=1: type with the physical keyboard even while a pad is connected.
+    bool pad = !getenv("LARECOMP_KBD_KEYBOARD") && g_last_pad.load(),
+         appearing = !was_open || pad != was_pad;  // (switching device: focus the new one)
     was_open = true, was_pad = pad;
     if (!pad) {  // keyboard: type straight into the field
-        if (appearing) ImGui::SetKeyboardFocusHere();
+        if (appearing || !ImGui::IsAnyItemActive()) ImGui::SetKeyboardFocusHere();
         ImGui::SetNextItemWidth(-1);
         ImGui::PushFont(g_font_big);
         ImGui::InputText("##name", g_kbd_text, (size_t)(g_kbd_max * 4 + 1 < (int)sizeof g_kbd_text ? g_kbd_max * 4 + 1 : sizeof g_kbd_text),

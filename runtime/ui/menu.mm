@@ -1346,7 +1346,10 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
     ImGui::PopFont();
     static bool was_open, was_pad;
     // LARECOMP_KBD_KEYBOARD=1: type with the physical keyboard even while a pad is connected.
-    bool pad = !getenv("LARECOMP_KBD_KEYBOARD") && g_last_pad.load(),
+    // A connected controller gets the on-screen keyboard even when the last event was a key (#242: Steam Input sends
+    // a pad's presses as keys, and the field then ignored the pad); the on-screen keyboard takes typed text too
+    // (osk.mm), so a player typing on the keyboard loses nothing. LARECOMP_KBD_KEYBOARD=1: the plain field always.
+    bool pad = !getenv("LARECOMP_KBD_KEYBOARD") && (g_last_pad.load() || SDL_HasGamepad()),
          appearing = !was_open || pad != was_pad;  // (switching device: focus the new one)
     was_open = true, was_pad = pad;
     if (!pad) {  // keyboard: type straight into the field

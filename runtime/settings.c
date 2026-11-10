@@ -24,6 +24,7 @@ static const char *const k_screen_filter_keys[N_SCREEN_FILTERS] = {"off", "gameb
 
 unsigned g_gpu_vendor;
 bool g_gpu_dozen;
+bool g_settings_fresh;  // (settings_load found no settings file: a first start)
 bool gpu_feature_on(int feature, const char *env) {
     const char *e = env ? getenv(env) : NULL;
     if (e && *e) return atoi(e) != 0;
@@ -280,7 +281,7 @@ void settings_load(void) {
     if (loaded) return;
     loaded = true;
     FILE *f = fopen(SETTINGS_FILE, "r");
-    if (!f) { settings_env_overrides(); return; }
+    if (!f) { g_settings_fresh = true; settings_env_overrides(); return; }
     char line[1200];
     bool tip_key = false, aspect_key = false, video_key = false;
     while (fgets(line, sizeof line, f)) {

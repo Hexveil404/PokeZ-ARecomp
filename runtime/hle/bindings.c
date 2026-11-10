@@ -164,6 +164,23 @@ void bind_pad_face_preset(bool xbox_letters) {
     result(5, BIND_DEV_PAD, -1, -1);
 }
 
+// A first start (no settings file yet) with an Xbox, PlayStation or Steam Deck pad: A/B/X/Y go by the pad's own
+// letters (the Xbox-letters preset above), as those players expect - with the defaults (Nintendo positions) A and B
+// were swapped against what's printed on the pad (#241). Only then: a player with a settings file keeps the layout
+// they have played with, and the F1 presets switch it either way. Through the bindings, not at read time, so the
+// button icons (made from the bindings) name the right buttons. A Nintendo-labelled pad keeps the positions. Called
+// on the start screen when a pad is there or arrives (runtime/ui/launcher.mm).
+static bool first_start_done;  // (tools/test_first_start_pad.c clears it between its cases)
+void bind_pad_first_start(void) {
+    extern bool g_settings_fresh;
+    if (first_start_done || !g_settings_fresh || !SDL_HasGamepad()) return;
+    first_start_done = true;
+    if (!bind_is_default(BIND_DEV_PAD) || bind_label_family() == 0) return;
+    LOG("[input] first start with an Xbox / PlayStation pad: A/B/X/Y by its letters (F1 > Controls to change)\n");
+    bind_pad_face_preset(true);
+    settings_save();
+}
+
 bool bind_pad_face_is(bool xbox_letters) {
     return xbox_letters ? g_bind_pad[BIND_A] == SDL_GAMEPAD_BUTTON_SOUTH && g_bind_pad[BIND_B] == SDL_GAMEPAD_BUTTON_EAST &&
                               g_bind_pad[BIND_X] == SDL_GAMEPAD_BUTTON_WEST && g_bind_pad[BIND_Y] == SDL_GAMEPAD_BUTTON_NORTH

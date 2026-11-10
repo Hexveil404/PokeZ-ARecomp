@@ -95,16 +95,27 @@ int osk_keys(char *text, size_t cap, int max_chars, bool appearing, float scale,
     // back (B / Circle) deletes: owning it keeps ImGui's nav cancel (which drops the cursor off the keys) from seeing it
     ImGuiID own = ImGui::GetID("##oskkeys");
     ImGui::SetKeyOwner(ImGuiKey_GamepadFaceRight, own);
-    if (max_chars <= 0 || max_chars > (int)cap - 1) max_chars = (int)cap - 1;
+    if (max_chars <= 0 || max_chars > (int)cap - 1) max_chars = (int)cap - 1;  // (characters)
     int len = (int)strlen(text), r = 0;
-    auto add = [&](char ch) { if (len < max_chars) text[len++] = ch, text[len] = 0; };
+    auto chars = [&]() { int k = 0; for (int i = 0; i < len; i++) k += ((unsigned char)text[i] & 0xc0) != 0x80; return k; };
+    auto add = [&](char ch) { if (chars() < max_chars && len + 1 < (int)cap) text[len++] = ch, text[len] = 0; };
     auto del = [&]() {  // (a whole character: the text may hold UTF-8 typed before a controller took over)
         while (len > 0 && ((unsigned char)text[len - 1] & 0xc0) == 0x80) text[--len] = 0;
         if (len > 0) text[--len] = 0;
     };
 
-    // typed on a keyboard while it's up: straight into the text
-    for (ImWchar c : io.InputQueueCharacters) if (c >= 0x20 && c < 0x7f) add((char)c);
+    // typed on a keyboard while it's up: straight into the text, accents too (UTF-8; max_chars counts characters -
+    // the name entry cuts to the game's own limit afterwards, menu.mm kbd_cut). The name entry shows this keyboard
+    // whenever a controller is connected (#242), so a player typing on the keyboard must lose nothing here.
+    for (ImWchar c : io.InputQueueCharacters) {
+        if (c < 0x20 || c == 0x7f) continue;
+        char u[4];
+        int n = c < 0x80 ? (u[0] = (char)c, 1)
+              : c < 0x800 ? (u[0] = (char)(0xc0 | c >> 6), u[1] = (char)(0x80 | (c & 0x3f)), 2)
+                          : (u[0] = (char)(0xe0 | c >> 12), u[1] = (char)(0x80 | (c >> 6 & 0x3f)),
+                             u[2] = (char)(0x80 | (c & 0x3f)), 3);
+        if (chars() < max_chars && len + n < (int)cap) memcpy(text + len, u, n), len += n, text[len] = 0;
+    }
     io.InputQueueCharacters.resize(0);
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) del();
     if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) r = 1;

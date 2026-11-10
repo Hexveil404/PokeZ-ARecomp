@@ -48,6 +48,7 @@ int input_menu_family(uint32_t sdl_joystick_id); // runtime/hle/input.c: our men
 void bind_reset(int dev);
 void bind_pad_face_preset(bool xbox_letters);  // A/B/X/Y: Nintendo positions (A east) or Xbox letters (A south), #178
 bool bind_pad_face_is(bool xbox_letters);
+void bind_pad_first_start(void);  // a first start with an Xbox / PlayStation pad: the Xbox-letters preset, once (#241)
 bool bind_is_default(int dev);
 bool bind_is_default_slot(int dev, int slot);
 

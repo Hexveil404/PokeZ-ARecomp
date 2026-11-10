@@ -2046,6 +2046,7 @@ static void launcher_pad_open_all(void) {
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
     for (int i = 0; ids && i < n; i++) SDL_OpenGamepad(ids[i]);
     SDL_free(ids);
+    bind_pad_first_start();  // (a pad already there at a first start: #241)
 }
 // true when the event was a controller event (handled here)
 static bool launcher_pad_event(const SDL_Event &e) {
@@ -2054,6 +2055,7 @@ static bool launcher_pad_event(const SDL_Event &e) {
     case SDL_EVENT_GAMEPAD_ADDED:
         SDL_OpenGamepad(e.gdevice.which);
         io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+        bind_pad_first_start();  // (#241)
         return true;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: {
         ImGuiKey k = ui_pad_key(e.gbutton.which, e.gbutton.button, e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);

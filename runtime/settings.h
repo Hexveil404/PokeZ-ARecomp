@@ -177,6 +177,7 @@ extern Settings g_settings;
 
 void settings_load(void);
 void settings_save(void);
+extern bool g_settings_fresh;  // no settings file at load: a first start (runtime/hle/bindings.c bind_pad_first_start)
 // At device init: the defaults that depend on the GPU. integrated (Vulkan: an integrated GPU; never on macOS): plain
 // bilinear upscaling instead of the sharp upscaler, whose pass at the window's size costs as much as the game's frame
 // there (UHD 770: FSR 1 + SMAA 8 ms of GPU per frame at 1080p, 20 ms at 4K), and Dynamic resolution instead of Match

@@ -318,6 +318,12 @@ card's **DirectX 12** driver, which helps where the Vulkan driver crashes or mis
   **Settings > Video > Compatibility** and turn the options off one at a time. They apply from the next start.
 - **The game crashes on Vulkan** (often on AMD cards): try **F1 > Display > Graphics API: DirectX 12**
   ([DirectX 12](#directx-12)).
+- **AMD Radeon RX 9000 (RDNA4) with Mesa 27.0-devel**: older mesa-git builds crashed inside `libvulkan_radeon` at
+  the game's first draw because RADV 27 only initialized its PS epilog shader cache when a dynamic-state extension
+  feature bit was set; Vulkan 1.3 has extended dynamic state 1 in core, so no bit was set. The renderer now enables
+  the promoted `VK_EXT_extended_dynamic_state` feature on RADV 1.3 devices, which makes it initialize the cache.
+  Mesa 26.2.6 (stable) and current mesa-git both work; no stable-driver downgrade is needed. See
+  [docs/linux.md](docs/linux.md#amd-rdna4-and-mesa-270-devel).
 - **Low frame rate**: lower the internal resolution or turn on Dynamic resolution, and turn off the optional graphics
   features.
 - **Report a bug**: [open an issue](https://github.com/Hexveil404/PokeZ-ARecomp/issues) with your GPU, driver version,

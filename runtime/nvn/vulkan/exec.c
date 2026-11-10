@@ -4775,11 +4775,21 @@ static uint64_t gmem_lo, gmem_window;
 // default: on an integrated GPU (the Steam Deck: the full import cost 87 % of the render thread), 256 MB, and on any AMD GPU
 // on Linux (amdgpu revalidates a userptr import at every submit there too: an RX 7800 XT at ~7 fps with all of it);
 // LARECOMP_VK_GMEM_WINDOW=0 imports it all
+static bool gmem_switch2_edition(void) {
+    // A .nup's Switch 2 Edition upgrade add-on: the importer writes its RomFS image as aoc/0100f43008c45001.bin.
+    // The larger edition's assets reach below the top 256 MB of the physical window, which leaves those textures
+    // reading as zero (the world and all of its text black, the HUD art fine): import the whole window instead.
+    FILE *f = fopen("extracted/aoc/0100f43008c45001.bin", "rb");
+    if (f) fclose(f);
+    return f != NULL;
+}
 static void gmem_window_init(void) {
     const char *w = ENV("LARECOMP_VK_GMEM_WINDOW");
     bool small = g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
 #ifdef __linux__
     small = small || g_vk.props.vendorID == 0x1002;
+    // (a discrete AMD GPU: the Switch 2 Edition's window all the way; an APU's full import is too slow for it)
+    if (small && g_vk.props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && gmem_switch2_edition()) small = false;
 #endif
     gmem_window = w ? strtoull(w, NULL, 10) << 20 : small ? 256ull << 20 : 0;
 }

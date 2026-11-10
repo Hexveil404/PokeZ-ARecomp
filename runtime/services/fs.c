@@ -911,7 +911,14 @@ static void recent_read_note(uint64_t off, uint64_t size, const uint8_t *dst, ss
 // failed while two of the game's worker threads crashed together - something else wrote into the decoder's state at
 // that moment, and the same bytes decode fine here every time. A retry gets a clean run instead of the svcBreak that
 // ended the session. The arguments (x0-x7 and the 6 on the stack: sp + 0 .. 0x2f) are restored for each try.
+// #233 (v0.1.21, Windows 11 26200, RTX 2080 S): both retries of the same block (71548 bytes from 33445, as #223)
+// failed too - so what went wrong stays wrong between tries: the compressed bytes themselves, or the decoder memory.
+// Each retry now runs with decoder memory of its own (the 12th argument, sp + 0x18: a fresh host block - guest
+// addresses are host addresses), and when the compressed bytes changed during the failed decode (hashed before it)
+// and they came in one of the last RomFS reads, they are read from the disk again first.
 // LARECOMP_OODLE_RETRY=<n> tries after the first (default 2, 0 off). Log: "[oodle] decode failed ... retry n: ok".
+// the compressed bytes at [src, src + n) inside one of the last reads: read again from the RomFS (1), else 0
+static int recent_read_restore(uint64_t src, uint64_t n, char *what, size_t what_size);
 void rt_za_oodle_call(Cpu *c, uint64_t target) {
     static int tries = -1;
     if (tries < 0) { const char *e = getenv("LARECOMP_OODLE_RETRY"); tries = e ? atoi(e) : 2; }
@@ -919,16 +926,37 @@ void rt_za_oodle_call(Cpu *c, uint64_t target) {
     uint64_t x[8], st[6], lr = c->x[30];
     memcpy(x, c->x, sizeof x);
     for (int i = 0; i < 6; i++) st[i] = LD64(c->sp + 8 * (uint64_t)i);
+    bool hashed = tries > 0 && x[0] && x[1] && x[1] <= (64u << 20);
+    uint64_t h0 = hashed ? fnv_words((const uint8_t *)(uintptr_t)x[0], x[1]) : 0;
     fn(c);
     {   // LARECOMP_TEST_OODLE_FAIL=<n> (test): every n-th decode reads as failed once - the retry path, on real data
         static long every = -1, calls;
         if (every < 0) { const char *e = getenv("LARECOMP_TEST_OODLE_FAIL"); every = e ? atol(e) : 0; }
         if (every > 0 && ++calls % every == 0) LOG("[oodle] test: decode %ld made to fail\n", calls), c->x[0] = 0;
     }
+    uint8_t *own = NULL, *own_raw = NULL;  // (the retries' decoder memory: 64-byte aligned, as the game's)
+    uint64_t mem_size = st[4];
+    if (c->x[0] == 0 && x[3] != 0 && tries > 0 && st[3] && mem_size && mem_size <= (64u << 20)) {
+        own_raw = malloc((size_t)mem_size + 64);
+        if (own_raw) own = (uint8_t *)(((uintptr_t)own_raw + 63) & ~(uintptr_t)63), memset(own, 0, (size_t)mem_size);
+    }
     for (int t = 1; t <= tries && c->x[0] == 0 && x[3] != 0; t++) {
-        LOG("[oodle] decode failed (%llu bytes from %llu): retry %d\n", (unsigned long long)x[3], (unsigned long long)x[1], t);
+        char what[160] = "not hashed";
+        if (hashed) {
+            uint64_t h1 = fnv_words((const uint8_t *)(uintptr_t)x[0], x[1]);
+            if (h1 == h0) snprintf(what, sizeof what, "compressed bytes unchanged");
+            else {
+                char rd[120] = "";
+                int r = recent_read_restore(x[0], x[1], rd, sizeof rd);
+                snprintf(what, sizeof what, "compressed bytes CHANGED during the decode, %s", rd);
+                if (r) h0 = fnv_words((const uint8_t *)(uintptr_t)x[0], x[1]);
+            }
+        }
+        LOG("[oodle] decode failed (%llu bytes from %llu at %llx; %s; decoder memory %llx +%llx): retry %d%s\n",
+            (unsigned long long)x[3], (unsigned long long)x[1], (unsigned long long)x[0], what,
+            (unsigned long long)st[3], (unsigned long long)mem_size, t, own ? " with decoder memory of its own" : "");
         memcpy(c->x, x, sizeof x);
-        for (int i = 0; i < 6; i++) ST64(c->sp + 8 * (uint64_t)i, st[i]);
+        for (int i = 0; i < 6; i++) ST64(c->sp + 8 * (uint64_t)i, i == 3 && own ? (uint64_t)(uintptr_t)own : st[i]);
         c->x[30] = lr;
         fn(c);
         if (c->x[0] != 0) {
@@ -936,6 +964,26 @@ void rt_za_oodle_call(Cpu *c, uint64_t target) {
             rt_game_data_bad = false;  // (the data was fine after all: a crash later isn't about it)
         }
     }
+    if (own) ST64(c->sp + 0x18, st[3]);  // (the caller's own argument back)
+    free(own_raw);
+}
+
+static int recent_read_restore(uint64_t src, uint64_t n, char *what, size_t what_size) {
+    pthread_mutex_lock(&recent_lock);
+    unsigned k = recent_n < RECENT_READS ? recent_n : RECENT_READS;
+    typeof(recent_reads[0]) r[RECENT_READS];
+    for (unsigned i = 0; i < k; i++) r[i] = recent_reads[(recent_n - k + i) % RECENT_READS];
+    pthread_mutex_unlock(&recent_lock);
+    for (int i = (int)k - 1; i >= 0; i--) {  // (the newest read holding them)
+        if (r[i].got <= 0 || src < r[i].addr || src + n > r[i].addr + (uint64_t)r[i].got) continue;
+        uint64_t off = r[i].off + (src - r[i].addr);
+        ssize_t got = romfs_read((uint8_t *)(uintptr_t)src, n, off);
+        snprintf(what, what_size, "read again from the RomFS at %llx (%lld of %llu bytes)", (unsigned long long)off,
+                 (long long)got, (unsigned long long)n);
+        return got == (ssize_t)n;
+    }
+    snprintf(what, what_size, "not in the last %u RomFS reads", k);
+    return 0;
 }
 
 void fs_log_recent_reads(void) {  // (services/am.c: the game's decompressor said its data is damaged)

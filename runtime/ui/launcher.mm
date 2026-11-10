@@ -939,6 +939,11 @@ static bool build_game_code(void) {
     if (!ok) {
         rt_launcher_log("[launcher] game code: %s\n", why);
         if (g_cancel_build) set_job("Compilation cancelled. Completed files are kept.");
+        else if (gamebuild_cfg_stopped())
+            set_job("The game code didn't build", true,
+                    "The tool that builds the game code was stopped by Windows security settings (Control Flow Guard). "
+                    "If you changed Control flow guard in Exploit protection, set it back to the default and try again. "
+                    "If it keeps happening, report it on GitHub.");
         else set_failure(FAIL_BUILD, gamebuild_killed() ? why : "");
     }
     return ok;

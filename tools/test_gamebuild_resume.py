@@ -39,6 +39,7 @@ extern "C" bool rt_dev_mode() { return false; }
 extern "C" uint64_t plat_now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 extern "C" void plat_sleep_until_ns(uint64_t t) { auto now=plat_now_ns(); if(t>now)std::this_thread::sleep_for(std::chrono::nanoseconds(t-now)); }
 extern "C" intptr_t plat_spawn(const char *const *a,const char *l,bool append) { return start_cb(a,l,append); }
+extern "C" intptr_t plat_spawn_no_cfg(const char *const *a,const char *l,bool append,unsigned long *e) { if(e)*e=0; return start_cb(a,l,append); }
 extern "C" int plat_proc_wait(intptr_t p,bool block) { return wait_cb(p,block); }
 extern "C" void plat_proc_kill(intptr_t p) { kill_cb(p); }
 // (ZA Recomp's gamebuild.c also logs to launcher.log, asks for free memory after a failed compile and for the CPU level)

@@ -91,6 +91,11 @@ static inline __attribute__((always_inline)) int simd_fz_host(uint64_t fpcr) {
 #else
 #define SIMD_FZ_FAST(fpcr) 0
 #endif
+// An FPCR write (MSR FPCR: tools/lifter.py) brings the host bits in line with the new FPCR at once (a fiber resumed on
+// another thread takes that thread's FPCR: runtime/hle/fiber.c identity - nothing to bring in line there). Only an op under FPCR.FZ / RMode looked at them before: an FZ op left FTZ + DAZ set, and the
+// ops after a later write of FPCR = 0 took the native path with them still on - denormal results came out as zero
+// (CI's FP/SIMD test, 12 of 11996 cases; Pokémon Z-A writes FPCR in 4 places).
+static inline __attribute__((always_inline)) void simd_fpcr_sync(uint64_t fpcr) { (void)SIMD_FZ_FAST(fpcr); }
 
 enum { FOP_ADD, FOP_SUB, FOP_MUL, FOP_MULX, FOP_NMUL, FOP_DIV, FOP_ABD, FOP_SQRT, FOP_MADD, FOP_RECPS, FOP_RSQRTS,
        FOP_MAX, FOP_MIN, FOP_MAXNM, FOP_MINNM };

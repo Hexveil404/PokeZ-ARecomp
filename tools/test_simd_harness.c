@@ -80,6 +80,7 @@ int main(int argc, char **argv) {
         c.sp = in.sp;
         c.nzcv = in.nzcv;
         c.fpcr = in.fpcr;
+        simd_fpcr_sync(c.fpcr);  // (as the game's MSR FPCR does: the host's FTZ / DAZ follow it - runtime/simd.h)
         memcpy(c.v, in.v, sizeof c.v);
         c.excl_addr = ~0ull;
         tests[in.k](&c);

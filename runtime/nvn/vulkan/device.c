@@ -2156,7 +2156,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         extern void widescreen_frame_end(uint64_t frame);
         widescreen_frame_end(frame);
         extern void widescreen_set_factor(float f);
-        extern bool widescreen_allowed(void);
+        extern bool widescreen_allowed_for(double w, double h);
         // render scale + placement in the window: runtime/nvn/output_scale.c (Video tab "Internal resolution");
         // GPU time since the last frame (exec.c's GPU timer; -1 without one: dynamic resolution goes by frame times):
         // the game's submissions and the window image's (LARECOMP_DYNRES_COUNT_PRESENT=0: the game's only, as before)
@@ -2184,7 +2184,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             sp_have = true;
         }
         OutScale os;
-        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, game_ms, win_ms, &os);
+        output_scale(dw, dh, widescreen_allowed_for(dw, dh), SDL_GetTicksNS() / 1e9, game_ms, win_ms, &os);
         {   // F1 > FSR 2 render resolution: the scene drawn smaller, FSR 2 upscaling it (exec.c vk_taa_render_share)
             extern float vk_taa_render_share(void);
             extern void renderer_set_present_full(bool on);

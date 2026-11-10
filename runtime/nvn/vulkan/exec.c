@@ -8493,6 +8493,13 @@ static void draw_(CmdRec *r, bool indexed) {
             bool black = c[0] < 0.01f && c[1] < 0.01f && c[2] < 0.01f, white = c[0] > 0.99f && c[1] > 0.99f && c[2] > 0.99f;
             fade_fill = black || white;
         }
+        // (Pokémon Z-A: its screen fade is a layout pane the size of the screen, 1920x1080, filled from a 16x16 white
+        // texture - boxed, it left the sides unfaded through a load's fade-in in the ultrawide view,
+        // runtime/hle/widescreen.c. A pane that big with an image of its own, a menu backdrop, stays in the box.)
+        if (!g_game_is_la && fullscreen_quad && pr->fi->ntex == 1 && tex_wh[1][0][0] <= 64 && tex_wh[1][0][1] <= 64 &&
+            st.ubuf[0][0].addr && st.ubuf[0][0].size == 560 &&
+            !widescreen_ui_pane_partial((const float *)(uintptr_t)st.ubuf[0][0].addr, st.ubuf[0][0].size))
+            fade_fill = true;
         bool composite = reads_scene || fade_fill || (fullscreen_fill && wide_frame == renderer_exec_frame());
         if (!composite) wide_frame = ~0ull;
         if (!composite) {

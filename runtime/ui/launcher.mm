@@ -2973,8 +2973,8 @@ extern "C" void launcher_run(const char *root) {
                     if (g_settings.video_rec == VREC_ASK && g_video_rec.known && settings_video_matches_recommended())
                         g_settings.video_rec = VREC_DONE, settings_save();
                     bool offer_video = g_settings.video_rec == VREC_ASK && g_video_rec.known;
-                    // (no aspect ratio question: "Unlocked" widens Link's Awakening's view only - Pokémon Z-A always draws 16:9
-                    // and showed bars on an ultrawide screen either way, #160; LARECOMP_TIP_TEST=aspect still shows it)
+                    // (no aspect ratio question: "Unlocked", the default, fills an ultrawide screen and F1 > Aspect ratio
+                    // changes it; LARECOMP_TIP_TEST=aspect still shows it)
                     if (pressed) {  // first PLAY ever: this PC's video settings, how to reach our menu
                         if (offer_video) ImGui::OpenPopup("##videorec");
                         else if (!g_settings.menu_tip_seen) ImGui::OpenPopup("##menutip");

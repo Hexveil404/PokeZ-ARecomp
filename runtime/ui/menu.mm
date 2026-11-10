@@ -543,7 +543,7 @@ static void tab_display(bool in_game) {
     }
 #endif
     const char *aspects[] = {TR("Unlocked", "Livre"), TR("Original 16:9", "16:9 original")};
-    if (la)  // (Link's Awakening's widescreen hooks only: Pokémon Z-A always draws 16:9, the row did nothing there, #160)
+    // (Pokémon Z-A: wider than 16:9 only, with its view hook - runtime/hle/widescreen.c; a taller window keeps bars)
     opt_choice(TR("Aspect ratio", "Proporção"), &g_settings.aspect, aspects, 2, ASPECT_UNLOCKED,
                TR("Unlocked: the view fills the window, so wider (or taller) windows show more of the world - up to "
                   "ultrawide. Original 16:9: the game's own framing, with bars.",

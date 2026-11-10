@@ -740,7 +740,7 @@ static void create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[32];
+    const char *ext[40];
     uint32_t n_ext = 0;
     // Vulkan 1.2: the 1.3 features the driver has as extensions. LARECOMP_VK_COMPAT=1 takes none of them (the compat.c
     // ways), =<names> only leaves out those: rendering, sync, eds, eds2 (e.g. =sync)
@@ -760,6 +760,19 @@ static void create_device(void) {
                 (!v13 || radv);
     bool x_ds2 = !v13 && !VK_OFF("eds2") && has_ext(ep, ne, VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
 #undef VK_OFF
+    bool fsr4_req = vk_fsr4_wanted();
+#ifdef VK_KHR_cooperative_matrix
+    bool fsr4_cm_ext = has_ext(ep, ne, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+#else
+    bool fsr4_cm_ext = false;
+#endif
+#ifdef VK_EXT_shader_float8
+    bool fsr4_f8_ext = has_ext(ep, ne, VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
+#else
+    bool fsr4_f8_ext = false;
+#endif
+    if (fsr4_req && fsr4_cm_ext) ext[n_ext++] = VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME;
+    if (fsr4_req && fsr4_f8_ext) ext[n_ext++] = VK_EXT_SHADER_FLOAT8_EXTENSION_NAME;
     if (x_dr) ext[n_ext++] = VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME;
     if (x_s2) ext[n_ext++] = VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME;
     if (x_ds) ext[n_ext++] = VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME;
@@ -837,7 +850,7 @@ static void create_device(void) {
     // Whether the window really shows the frames presented (present_watch). LARECOMP_NO_PRESENT_WATCH=1: not checked
     bool x_pw = !ENV("LARECOMP_NO_PRESENT_WATCH") && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
                 has_ext(ep, ne, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
-    vk_dlaa_device_exts(ep, ne, ext, &n_ext, 28);  // (DLAA: what NGX needs; room left for the ones added below)
+    vk_dlaa_device_exts(ep, ne, ext, &n_ext, 36);  // (DLAA: what NGX needs; room left for the ones added below)
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
@@ -845,9 +858,11 @@ static void create_device(void) {
     VkPhysicalDevicePresentWaitFeaturesKHR have_pw = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
                                                       .pNext = x_rb2 ? &have_rb2 : NULL};
     VkPhysicalDevicePresentIdFeaturesKHR have_pid = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR, .pNext = &have_pw};
+    VkPhysicalDeviceVulkan11Features have11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
     VkPhysicalDeviceVulkan12Features have12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                                .pNext = x_pw ? (void *)&have_pid : x_rb2 ? (void *)&have_rb2 : NULL};
-    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have12};
+    have11.pNext = &have12;
+    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have11};
 #if defined(__linux__) && defined(VK_EXT_map_memory_placed)
     VkPhysicalDeviceMapMemoryPlacedFeaturesEXT have_placed = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT};
     if (placed_ext) have_placed.pNext = have12.pNext, have12.pNext = &have_placed;
@@ -866,6 +881,25 @@ static void create_device(void) {
     if (eds3_ext) have_eds3.pNext = have.pNext, have.pNext = &have_eds3;
 #endif
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
+    g_vk.fsr4 = false;
+    if (fsr4_req && fsr4_cm_ext && fsr4_f8_ext) {
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_EXT_shader_float8)
+        VkPhysicalDeviceCooperativeMatrixFeaturesKHR have_cm = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
+        VkPhysicalDeviceShaderFloat8FeaturesEXT have_f8 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT, .pNext = &have_cm};
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have_f8};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &q);
+        g_vk.fsr4 = have_cm.cooperativeMatrix && have_f8.shaderFloat8 && have_f8.shaderFloat8CooperativeMatrix &&
+                    have.features.shaderInt16 && have.features.shaderStorageImageExtendedFormats &&
+                    have.features.shaderStorageImageWriteWithoutFormat && have11.variablePointers &&
+                    have11.variablePointersStorageBuffer && have11.storageBuffer16BitAccess && have12.shaderFloat16 &&
+                    have12.shaderInt8 && have12.storageBuffer8BitAccess && have12.uniformAndStorageBuffer8BitAccess &&
+                    have12.vulkanMemoryModel && have12.vulkanMemoryModelDeviceScope;
+        if (!g_vk.fsr4)
+            LOG("[vk] FSR 4.1.2: this GPU or driver lacks cooperative matrix / shader float8 / the 8- and 16-bit features\n");
+#endif
+    }
     x_rb2 = x_rb2 && have.features.robustBufferAccess && have_rb2.robustBufferAccess2 && have_rb2.robustImageAccess2;
     if (x_rb2) ext[n_ext++] = VK_EXT_ROBUSTNESS_2_EXTENSION_NAME;
     x_pw = x_pw && have_pid.presentId && have_pw.presentWait;
@@ -1009,7 +1043,11 @@ static void create_device(void) {
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                             .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
                                             .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
-                                            .scalarBlockLayout = VK_TRUE, .bufferDeviceAddress = g_vk.bda, .shaderOutputLayer = have12.shaderOutputLayer,
+                                            .scalarBlockLayout = VK_TRUE, .bufferDeviceAddress = g_vk.bda,
+                                            .shaderFloat16 = g_vk.fsr4 && have12.shaderFloat16,
+                                            .vulkanMemoryModel = g_vk.fsr4 && have12.vulkanMemoryModel,
+                                            .vulkanMemoryModelDeviceScope = g_vk.fsr4 && have12.vulkanMemoryModelDeviceScope,
+                                            .shaderOutputLayer = have12.shaderOutputLayer,
                                             .samplerFilterMinmax = have12.samplerFilterMinmax,
                                             .shaderOutputViewportIndex = have12.shaderOutputViewportIndex, .pNext = v13 ? (void *)&f13 : tail};
     if (!v13) {  // (an older driver may lack some: say which, and ask only for what it has)
@@ -1019,7 +1057,10 @@ static void create_device(void) {
 #undef VK_WANT12
     }
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-                                            .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
+                                            .storageBuffer16BitAccess = VK_TRUE,
+                                            .variablePointers = g_vk.fsr4 && have11.variablePointers,
+                                            .variablePointersStorageBuffer = g_vk.fsr4 && have11.variablePointersStorageBuffer,
+                                            .pNext = &f12};
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
                                            .pNext = &f11};
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = fault ? (void *)&ff : (void *)&f11};
@@ -1041,6 +1082,15 @@ static void create_device(void) {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT, .graphicsPipelineLibrary = VK_TRUE};
     if (g_vk.gpl_probe) en_gpl.pNext = f.pNext, f.pNext = &en_gpl;
 #endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_EXT_shader_float8)
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR en_cm = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR,
+        .cooperativeMatrix = VK_TRUE, .cooperativeMatrixRobustBufferAccess = VK_FALSE};
+    VkPhysicalDeviceShaderFloat8FeaturesEXT en_f8 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT,
+        .shaderFloat8 = VK_TRUE, .shaderFloat8CooperativeMatrix = VK_TRUE, .pNext = &en_cm};
+    if (g_vk.fsr4) en_cm.pNext = f.pNext, f.pNext = &en_f8;
+#endif
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
     b->drawIndirectFirstInstance = h->drawIndirectFirstInstance;  // (the game's GPU-culled draws start past instance 0: GPU-AV)
@@ -1061,6 +1111,10 @@ static void create_device(void) {
     g_vk.ssbo_chunks = h->fragmentStoresAndAtomics && h->vertexPipelineStoresAndAtomics && h->robustBufferAccess;
     b->shaderClipDistance = h->shaderClipDistance;
     b->geometryShader = h->geometryShader;  // (fragment shaders reading gl_Layer: the Geometry capability)
+    b->shaderInt16 = g_vk.fsr4 && h->shaderInt16;
+    b->shaderStorageImageExtendedFormats = g_vk.fsr4 && h->shaderStorageImageExtendedFormats;
+    b->shaderStorageImageWriteWithoutFormat = g_vk.fsr4 && h->shaderStorageImageWriteWithoutFormat;
+    if (g_vk.fsr4) LOG("[vk] FSR 4.1.2: cooperative matrix and shader float8 enabled on this device\n");
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,

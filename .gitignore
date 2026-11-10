@@ -1,6 +1,14 @@
 # your own game files and what's made from them (building from source puts them here)
 input/
 extracted/
+# game packages themselves: never commit or attach Nintendo files
+*.nup
+*.nsp
+*.xci
+*.nsz
+*.xcz
+*.nca
+*.tik
 generated/
 generated-*/
 generated[0-9]*/

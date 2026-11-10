@@ -88,7 +88,7 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 | **GPU** | Vulkan 1.2 or newer (1.3 recommended) with an up-to-date driver. With the DirectX 12 option: a DirectX 12 card (feature level 11_0, shader model 6.0) |
 | **RAM** | 8 GB (16 GB recommended) |
 | **Disk** | About 12 GB free |
-| **Game** | Pokémon Legends: Z-A **1.0.0, 2.0.0 or 2.0.2**, optionally with the *Mega Dimension* DLC |
+| **Game** | Pokémon Legends: Z-A **1.0.0, 2.0.0 or 2.0.2**, optionally with the *Mega Dimension* DLC; a `.nup` whose update is one of these also works |
 
 Linux runs natively (x86-64, no Wine or Proton) as an **experimental** build: see [Linux (experimental)](#linux-experimental).
 On a Mac, use [MonZaMac](https://github.com/lucabravi/MonZaMac) by
@@ -100,8 +100,8 @@ On a Mac, use [MonZaMac](https://github.com/lucabravi/MonZaMac) by
    and extract it to a folder of your choice (for example `C:\Games\ZA Recomp`).
 2. Prepare your own copy of the game in a folder, in one of two ways:
    - **Extracted game**: the `exefs` and `romfs` folders, as an emulator or your Switch extracts them. No keys needed.
-   - **Dump**: the base game (`.xci` or `.nsp`), optionally the update and the *Mega Dimension* DLC (`.nsp`), together with the
-     `prod.keys` from your own Switch.
+   - **Dump**: the base game (`.xci`, `.nsp` or `.nup`), optionally the update and the *Mega Dimension* DLC (`.nsp`).
+     `.xci` / `.nsp` packages need the `prod.keys` from your own Switch; a `.nup` needs no keys.
 3. Run `lasrecomp.exe`. On the start screen, choose that folder (or drag it onto the window) and click
    **Set up the game**.
 4. The game's files are read and its code is compiled for your PC. This takes 10 to 30 minutes depending on your CPU
@@ -113,13 +113,24 @@ for the original text and button icons; without them a substitute font is used.
 
 ### Mega Dimension DLC
 
-The DLC is supported through the **dump** route (the extracted `exefs` / `romfs` folders don't include it):
+The DLC is supported through the **dump** route (the extracted `exefs` / `romfs` folders don't include it); a `.nup` can be used too:
 
-1. Put these files together in one folder: the base game (`.xci` or `.nsp`), the **update** (`.nsp`, version 2.0.0 or
-   newer - the DLC's content comes with it), the **DLC** (`.nsp`) and the `prod.keys` from your Switch (plus
-   `title.keys` if the start screen asks for it).
+1. Put these files together in one folder: the base game (`.xci`, `.nsp` or `.nup`), the **update** (optional for a
+   `.nup`; the `.xci` / `.nsp` update `.nsp`, version 2.0.0 or newer - the DLC's content comes with it), the **DLC**
+   (`.nsp`) and, for `.xci` / `.nsp`, the `prod.keys` from your Switch (plus `title.keys` if the start screen asks for it).
 2. Choose that folder on the start screen and click **Set up the game**.
 3. The start screen shows **+ DLC** next to the game version when it was found.
+
+### Nintendo Switch 2 Edition and `.nup`
+
+A `.nup` (the clean-room package used by newer Switch 2 dumps) can be selected directly: put the `.nup` in a folder and
+choose that folder on the start screen. **No `prod.keys` are needed for a `.nup`.** The start screen reads its base and
+update trees; use the **2.0.2** update for Lumiose Online. The Switch 2 Edition upgrade add-on
+(`0100F43008C45001`) is installed so the game sees its entitlement (its RomFS is a placeholder), and the port's 60 fps /
+resolution / camera options provide the visual side of the edition. The *Mega Dimension* DLC is separate: put its
+DLC 2 `.nsp` (`0100F43008C45002`) and your `prod.keys` / `title.keys` in the same folder; the start screen shows
+**+ DLC**. The game data is kept as a `romfs/` folder, so the button icons and the Xbox battle layout are made from it
+just like from an extracted game.
 
 Already set up without the DLC? Click **Change game folder**, choose the folder again with the DLC added and set it up
 again. Your saves and settings are kept.

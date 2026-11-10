@@ -14,7 +14,7 @@ Needs: a distribution with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 
 On Linux 6.7 or newer the renderer also gets page write tracking (userfaultfd + PAGEMAP_SCAN, as Windows' write watch):
 its vertex cache, and textures re-checked only where the game wrote. Older kernels run without it (the log says
 `[plat] no page write tracking: ...`); `LARECOMP_WRITE_TRACKING=0` turns it off.
-The start screen asks for the folder with your own game files and sets them up.
+The start screen asks for the folder with your own game files and sets them up (extracted `exefs` + `romfs`, `.xci` / `.nsp` with `prod.keys`, or a `.nup` without keys).
 
 Everything the app writes lives in `~/.local/share/lasrecomp` (`$XDG_DATA_HOME/lasrecomp`): game files (`extracted/`),
 saves, seeds, settings (`larecomp.ini`), shader caches, imported fonts. Started without a terminal the log is

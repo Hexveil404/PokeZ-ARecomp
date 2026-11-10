@@ -942,7 +942,13 @@ static void tab_display(bool in_game) {
     if (!la) {  // (runtime/nvn/vulkan/exec.c fsr2_copy: applies at once)
         int t = g_settings.taa;
         const char *taa[] = {TR("Game's", "Do jogo"), "AMD FSR 2", "NVIDIA DLAA", "AMD FSR 3.1", "AMD FSR 4.1.2"};  // (TAA_*)
-        if (opt_choice(TR("Temporal anti-aliasing", "Anti-aliasing temporal"), &t, taa, 5, 0,
+#ifdef __linux__
+        const int n_taa = 5;  // (FSR 4.1.2: Linux only, a user-supplied provider - fsr4.cpp)
+#else
+        const int n_taa = 4;
+        if (t == TAA_FSR4) t = TAA_FSR3;  // (an ini from Linux: exec.c taa_kind runs FSR 3.1 for it here)
+#endif
+        if (opt_choice(TR("Temporal anti-aliasing", "Anti-aliasing temporal"), &t, taa, n_taa, 0,
                        TR("AMD FSR or NVIDIA DLAA in place of the game's own edge smoothing: they combine several frames, "
                           "so fences, railings, leaves and thin lines stay smooth and stop flickering as you move. Uses a "
                           "little GPU time. FSR 3.1 leaves less of a trail behind moving things than FSR 2 (FSR 2 if its DLL is "

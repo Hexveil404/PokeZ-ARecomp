@@ -72,6 +72,7 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 - Keyboard and mouse, with a mouse-driven camera
 - Every button and key can be rebound; button icons match your controller (Xbox, PlayStation, Nintendo, Steam Deck,
   keyboard)
+- In the name entry, A types, B deletes, Start / Menu confirms (or select OK); on-screen keyboard for any connected pad
 - Battle moves by position, right stick snap to axis
 
 **Start screen**

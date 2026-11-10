@@ -1327,7 +1327,9 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
     ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s", TR("Enter your name", "Digite seu nome"));
     ImGui::PopFont();
     static bool was_open, was_pad;
-    bool pad = g_last_pad.load(), appearing = !was_open || pad != was_pad;  // (switching device: focus the new one)
+    // A connected pad gets the on-screen keyboard even if Steam Input also sends keyboard events (the last event would
+    // otherwise flip the dialog to keyboard mode and leave the pad's buttons doing nothing).
+    bool pad = g_last_pad.load() || SDL_HasGamepad(), appearing = !was_open || pad != was_pad;
     was_open = true, was_pad = pad;
     if (!pad) {  // keyboard: type straight into the field
         if (appearing) ImGui::SetKeyboardFocusHere();

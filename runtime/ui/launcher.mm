@@ -86,8 +86,9 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 #endif
 
 static const uint8_t BUILD_ID[8] = {0xae, 0x16, 0xf7, 0x1e, 0x00, 0x2a, 0xf8, 0xcb};  // Link's Awakening v1.0.0 main
-// Pokémon Legends Z-A's main builds (tools/patches.py ZA_BUILDS): set up from the player's .xci / .nsp and keys by the
-// bundled tools/zaimport (no extracted folder), no romfs/ copy - the game reads romfs.bin (+ aoc/ for the DLC)
+// Pokémon Legends Z-A's main builds (tools/patches.py ZA_BUILDS): set up from the player's .xci / .nsp and keys, or
+// a .nup without keys, by the bundled tools/zaimport. A .xci/.nsp becomes romfs.bin, a .nup becomes a romfs/ folder
+// (the game reads either), plus aoc/ for the DLC and the Switch 2 Edition add-on
 static const struct { uint8_t id[8]; const char *version; } ZA_BUILDS[] = {
     {{0x72, 0x22, 0xe1, 0x3e, 0xcf, 0x6a, 0xdb, 0x32}, "1.0.0"},
     {{0x8a, 0x1c, 0x86, 0xc4, 0x37, 0x39, 0x4b, 0x69}, "2.0.0"},
@@ -396,8 +397,8 @@ static std::string check_game_files(const std::string &root) {
 }
 
 // ------------------------------------------------------------------ setup (background thread)
-// The player brings their own game files: a folder holding exefs/ and romfs/ (or Pokémon Z-A's .xci / .nsp packages,
-// read by zaimport into exefs/ and romfs.bin). They're copied into the data root (APFS clones / hard links where the
+// The player brings their own game files: a folder holding exefs/ and romfs/ (or Pokémon Z-A's .xci / .nsp / .nup
+// packages, read by zaimport into exefs/ and romfs.bin or romfs/). They're copied into the data root (APFS clones / hard links where the
 // file system allows); the game reads romfs/ in place (runtime/services/fs.c).
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static std::string g_src;           // the picked folder
@@ -434,7 +435,7 @@ static const char *fail_hint(int k, bool pt) {
     static const char *const en[] = {
         "",
         "Choose the folder with your Pok\xc3\xa9mon Legends Z-A game extracted (exefs and romfs folders), or with your "
-        "dump (.xci / .nsp) and your prod.keys.",
+        "dump (.xci / .nsp with your prod.keys, or .nup without keys).",
         "Pok\xc3\xa9mon Legends Z-A's base game isn't among those files. Choose the folder with your own dump.",
         "Make sure there's about 12 GB free and try again.",
         "ZA Recomp runs versions 1.0.0, 2.0.0 and 2.0.2 of the game (base game, or base game + the 2.0.0 or 2.0.2 "
@@ -442,19 +443,21 @@ static const char *fail_hint(int k, bool pt) {
         "Some files are missing. Choose the folder again; if it happens again, dump the game again.",
         "Make sure there's about 4 GB free and try again. If it keeps happening, report it on GitHub with logs/launcher.log.",
         "Put the prod.keys (and title.keys) dumped from your own Switch in the folder with the game files. Any file "
-        "name works (prod.keys.txt, keys.txt...): it is recognized by what is inside it.",
+        "name works (prod.keys.txt, keys.txt...): it is recognized by what is inside it. Only .nsp / .xci packages "
+        "need them; a .nup does not.",
         "The full reason is in logs/launcher.log, in the data folder."};
     static const char *const ptb[] = {
         "",
         "Escolha a pasta com o seu Pokémon Legends Z-A extraído (pastas exefs e romfs), ou com o seu dump (.xci / .nsp) "
-        "e o seu prod.keys.",
+        "com o seu prod.keys, ou .nup sem keys.",
         "O jogo base de Pokémon Legends Z-A não está entre esses arquivos. Escolha a pasta com o seu próprio dump.",
         "Veja se há uns 12 GB livres e tente de novo.",
         "O ZA Recomp roda as versões 1.0.0, 2.0.0 e 2.0.2 do jogo (jogo base, ou jogo base + atualização 2.0.0 ou 2.0.2).",
         "Faltam arquivos. Escolha a pasta de novo; se acontecer outra vez, faça o dump do jogo de novo.",
         "Veja se há uns 4 GB livres e tente de novo. Se continuar, avise no GitHub com o arquivo logs/launcher.log.",
         "Coloque o prod.keys (e o title.keys) do seu próprio Switch na pasta dos arquivos do jogo. Qualquer nome serve "
-        "(prod.keys.txt, keys.txt...): ele é reconhecido pelo conteúdo.",
+        "(prod.keys.txt, keys.txt...): ele é reconhecido pelo conteúdo. Só pacotes .nsp / .xci precisam delas; um .nup "
+        "não precisa.",
         "O motivo completo está em logs/launcher.log, na pasta de dados."};
     return k >= 1 && k <= 8 ? (pt ? ptb : en)[k] : "";
 }
@@ -498,6 +501,14 @@ static bool is_dir(const std::string &p) {
     return stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+// The game data's RomFS: the image a package setup makes (romfs.bin), or the folder an extracted / .nup
+// setup leaves (romfs/). zaprompts reads either.
+static std::string romfs_source(void) {
+    if (file_exists(g_root + "/romfs.bin")) return g_root + "/romfs.bin";
+    if (is_dir(g_root + "/romfs") && file_exists(g_root + "/romfs/arc/data.trpfs")) return g_root + "/romfs";
+    return "";
+}
+
 // exefs: the folder with main and main.npdm; romfs: the folder with region_common (Link's Awakening's data root) or
 // arc/data.trpfs (Pokémon Z-A's: its packs). Found in the picked folder or a few levels below it (some folder layouts
 // nest them).
@@ -513,7 +524,7 @@ static void find_game(const std::string &dir, int depth, std::string &exefs, std
         if (n[0] == '.') continue;
         std::string ext = n.size() > 4 ? n.substr(n.size() - 4) : "";
         for (auto &ch : ext) ch = (char)tolower((unsigned char)ch);
-        if (ext == ".xci" || ext == ".nsp" || ext == ".nca" || ext == ".nsz" || ext == ".xcz") unusable = true;
+        if (ext == ".xci" || ext == ".nsp" || ext == ".nup" || ext == ".nca" || ext == ".nsz" || ext == ".xcz") unusable = true;
         if (n != "region_common" && n != "arc" && is_dir(dir + "/" + n)) sub.push_back(dir + "/" + n);
     }
     closedir(d);
@@ -527,9 +538,10 @@ static bool build_id_ok(const std::string &main_path) {
 }
 
 // ------------------------------------------------------------------ Z-A: the player's packages -> game files
-// Game packages (.xci / .nsp) in the picked folder or a few levels below it
+// Game packages (.xci / .nsp / .nup) in the picked folder or a few levels below it
 // (compressed: .nsz / .xcz seen - NSZ's compressed packages, not readable here)
-static void find_packages(const std::string &dir, int depth, std::vector<std::string> &out, int &compressed) {
+static void find_packages(const std::string &dir, int depth, std::vector<std::string> &out, int &compressed,
+                          bool &need_keys) {
     if (depth > 3) return;
     DIR *d = opendir(dir.c_str());
     if (!d) return;
@@ -540,12 +552,13 @@ static void find_packages(const std::string &dir, int depth, std::vector<std::st
         std::string ext = n.size() > 4 ? n.substr(n.size() - 4) : "";
         for (auto &ch : ext) ch = (char)tolower((unsigned char)ch);
         if (is_dir(dir + "/" + n)) sub.push_back(dir + "/" + n);
-        else if (ext == ".xci" || ext == ".nsp") out.push_back(dir + "/" + n);
+        else if (ext == ".nup") out.push_back(dir + "/" + n);
+        else if (ext == ".xci" || ext == ".nsp") out.push_back(dir + "/" + n), need_keys = true;
         else if (ext == ".nsz" || ext == ".xcz") compressed++;
     }
     closedir(d);
     std::sort(sub.begin(), sub.end());
-    for (auto &s : sub) find_packages(s, depth + 1, out, compressed);
+    for (auto &s : sub) find_packages(s, depth + 1, out, compressed, need_keys);
 }
 
 // The player's keys files, told apart by what is in them, whatever they are named (prod.keys, prod.keys.txt - Windows'
@@ -652,8 +665,8 @@ static std::string find_title_keys(const std::string &src, const std::string &pr
 static std::atomic<unsigned long long> g_done, g_total;  // (progress: below)
 static bool g_import_mode;                               // Z-A packages: the bar is the import, then the build
 
-// zaimport (tools/zaimport, shipped as zaimport/zaimport.exe) writes <root>/exefs, romfs.bin, aoc/; its progress
-// lines ("progress <done> <total>") go to the bar, its last line is the reason when it fails
+// zaimport (tools/zaimport, shipped as zaimport/zaimport.exe) writes <root>/exefs and romfs.bin or romfs/, plus
+// aoc/; its progress lines ("progress <done> <total>") go to the bar, its last line is the reason when it fails
 static bool import_packages(const std::vector<std::string> &pkgs, const std::string &keys, const std::string &title_keys,
                             std::string &err) {
     char tool[1100];
@@ -665,7 +678,8 @@ static bool import_packages(const std::vector<std::string> &pkgs, const std::str
     std::string log = g_root + "/import.log";
     std::vector<const char *> argv = {tool};
     if (!title_keys.empty()) argv.push_back("--title-keys"), argv.push_back(title_keys.c_str());
-    argv.push_back(keys.c_str());
+    if (keys.empty()) argv.push_back("--no-keys");  // (.nup-only: no prod.keys needed)
+    else argv.push_back(keys.c_str());
     argv.push_back(g_root.c_str());
     for (auto &p : pkgs) argv.push_back(p.c_str());
     argv.push_back(NULL);
@@ -725,7 +739,7 @@ static std::string prompts_stamp(void) {
     mix(g_bind_key, sizeof g_bind_key);
     // An imported/replaced game must regenerate its private resources too, even
     // when bindings did not change. Runtime still verifies the actual source bytes.
-    for (const char *name : {"/romfs.bin", "/exefs/main"}) {
+    for (const char *name : {"/romfs.bin", "/romfs/arc/data.trpfs", "/exefs/main"}) {
         struct stat sb;
         uint64_t identity[2] = {0, 0};
         if (!stat((g_root + name).c_str(), &sb)) identity[0] = sb.st_size, identity[1] = sb.st_mtime;
@@ -775,7 +789,7 @@ static bool prompts_wanted(void) {
     int tries = 0;
     prompts_marked("textures/prompts.tried", &tries);
     return rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool) &&
-           file_exists(g_root + "/romfs.bin") && !prompts_marked("textures/prompts/.made") && tries < 3;
+           !romfs_source().empty() && !prompts_marked("textures/prompts/.made") && tries < 3;
 }
 // wait: until made (the setup), else started and left running (a boot, a rebind)
 static bool make_prompts(bool wait) {
@@ -785,6 +799,8 @@ static bool make_prompts(bool wait) {
         g_prompts_busy = false;
         return false;
     }
+    std::string romfs = romfs_source();
+    if (romfs.empty()) { g_prompts_busy = false; return false; }
     if (g_prompts_proc && plat_proc_wait(g_prompts_proc, false) < 0) plat_proc_kill(g_prompts_proc);  // (made for old bindings)
     g_prompts_proc = 0;
     mkdir("textures", 0755);
@@ -792,7 +808,6 @@ static bool make_prompts(bool wait) {
     int tries = 0;
     prompts_marked("textures/prompts.tried", &tries);
     if (FILE *f = fopen("textures/prompts.tried", "wb")) fprintf(f, "%s %d", stamp.c_str(), tries + 1), fclose(f);
-    std::string romfs = g_root + "/romfs.bin";
     const char *ini = getenv("LARECOMP_SETTINGS");  // (as runtime/settings.c: the bindings the icons name)
     if (!ini || !*ini) ini = "larecomp.ini";
     const char *argv[] = {tool, "--romfs", romfs.c_str(), "--settings", ini, "--mods", "mods", "--out", "textures/prompts",
@@ -815,10 +830,10 @@ static void xbox_layout_before_play(void) {
     if (!g_settings.xbox_attack_layout || !xbox_layout_wanted()) return;
     char tool[1100];
     if (!rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool) ||
-        !file_exists(g_root + "/romfs.bin"))
+        romfs_source().empty())
         return;
     mkdir("textures", 0755);
-    std::string stamp = prompts_stamp(), romfs = g_root + "/romfs.bin";
+    std::string stamp = prompts_stamp(), romfs = romfs_source();
     const char *argv[] = {tool, "--romfs", romfs.c_str(), "--mods", "mods", "--install", stamp.c_str(),
                           "--xbox-attack-layout-only", NULL};
     PlatProc p = plat_spawn(argv, "textures/xbox-layout.log", false);
@@ -964,20 +979,24 @@ static void *extract_thread(void *) {
     find_game(src, 0, exefs, romfs, unusable);
     if ((exefs.empty() || romfs.empty()) && unusable) {  // packages: Pokémon Legends Z-A's (zaimport reads them)
         int compressed = 0;
-        find_packages(src, 0, pkgs, compressed);
+        bool need_keys = false;
+        find_packages(src, 0, pkgs, compressed, need_keys);
         if (pkgs.empty() && compressed) {
             set_failure(FAIL_UNUSABLE, TR("Your dump is compressed (.nsz / .xcz): decompress it to .nsp / .xci with "
                                           "NSZ first.", "O seu dump está comprimido (.nsz / .xcz): descomprima para .nsp / "
                                           ".xci com o NSZ antes."));
             goto done;
         }
-        std::string bad, keys = find_keys(src, &bad), err;
-        if (keys.empty()) {
-            set_failure(FAIL_KEYS, bad.empty() ? "" : "\"" + bad + TR("\" isn't a prod.keys: it has no header_key line.",
-                                                                       "\" não é um prod.keys: não tem a linha header_key."));
-            goto done;
+        std::string bad, keys, title_keys, err;
+        if (need_keys) {
+            keys = find_keys(src, &bad);
+            if (keys.empty()) {
+                set_failure(FAIL_KEYS, bad.empty() ? "" : "\"" + bad + TR("\" isn't a prod.keys: it has no header_key line.",
+                                                                           "\" não é um prod.keys: não tem a linha header_key."));
+                goto done;
+            }
+            title_keys = find_title_keys(src, keys);
         }
-        std::string title_keys = find_title_keys(src, keys);
         rt_launcher_log("[launcher] %zu package(s), keys %s, title keys %s\n", pkgs.size(), keys.c_str(),
                 title_keys.empty() ? "-" : title_keys.c_str());
         rt_remove_game_files(g_root.c_str());
@@ -2792,14 +2811,14 @@ extern "C" void launcher_run(const char *root) {
                         : TR("Choose the folder with your own copy of Pokémon Legends Z-A, either way:\n"
                              "· the game extracted (exefs and romfs folders, as an emulator or your Switch extracts them): "
                              "no keys needed;\n"
-                             "· or your dump: the base game (.xci or .nsp), optionally the update and the DLC (.nsp), and "
-                             "the prod.keys from your Switch.\n"
+                             "· or your dump: the base game (.xci / .nsp with your prod.keys, or .nup without keys), optionally the update "
+                             "and the DLC (.nsp).\n"
                              "You can also drop the folder on this window. The game isn't included with ZA Recomp.",
                              "Escolha a pasta com a sua própria cópia de Pokémon Legends Z-A, de um destes jeitos:\n"
                              "· o jogo extraído (pastas exefs e romfs, como um emulador ou o seu Switch extraem): sem "
                              "precisar de keys;\n"
-                             "· ou o seu dump: o jogo base (.xci ou .nsp), se quiser a atualização e a DLC (.nsp), e o "
-                             "prod.keys do seu Switch.\n"
+                             "· ou o seu dump: o jogo base (.xci / .nsp com o seu prod.keys, ou .nup sem keys), se quiser a atualização e a "
+                             "DLC (.nsp).\n"
                              "Também dá para arrastar a pasta para esta janela. O jogo não vem com o ZA Recomp.");
                     float ty = 196 + text(dl, F_BODY, 16, x, 196, C_SOFT, what, w).y + 22;
                     if (!rebuild) {

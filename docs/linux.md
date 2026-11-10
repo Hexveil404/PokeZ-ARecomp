@@ -14,7 +14,7 @@ Needs: a distribution with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 
 On Linux 6.7 or newer the renderer also gets page write tracking (userfaultfd + PAGEMAP_SCAN, as Windows' write watch):
 its vertex cache, and textures re-checked only where the game wrote. Older kernels run without it (the log says
 `[plat] no page write tracking: ...`); `LARECOMP_WRITE_TRACKING=0` turns it off.
-The start screen asks for the folder with your own game files and sets them up.
+The start screen asks for the folder with your own game files and sets them up (extracted `exefs` + `romfs`, `.xci` / `.nsp` with `prod.keys`, or a `.nup` without keys).
 
 Everything the app writes lives in `~/.local/share/lasrecomp` (`$XDG_DATA_HOME/lasrecomp`): game files (`extracted/`),
 saves, seeds, settings (`larecomp.ini`), shader caches, imported fonts. Started without a terminal the log is
@@ -164,6 +164,12 @@ Switches: `LARECOMP_VK_CS_SUBGROUP=0` leaves compute to the driver's 64-lane wav
 `LARECOMP_VK_GMEM_WINDOW=0` imports the whole 3.2 GB heap again (87 % of the render thread then goes into
 `vkQueueSubmit2`). `perf record -t <render thread>` sees user space only (perf_event_paranoid=2); the `[vk] t=` log line's
 `submit` ms shows the kernel time inside the submit ioctl.
+
+The Switch 2 Edition (`.nup`) has a larger asset set that reaches below the top 256 MB of that window. On a discrete AMD
+GPU with the edition's upgrade add-on present (`extracted/aoc/0100f43008c45001.bin`), the runtime imports a 1 GB window
+instead: the shorter window left those textures reading as zero, which made the world and all of the game's text black
+while the HUD art still drew. The whole 3.2 GB window costs too much on amdgpu (about 11 fps in Lumiose against 30 at
+1 GB on an RX 9070 XT). `LARECOMP_VK_GMEM_WINDOW=<MB>` overrides either default (`0`: all).
 
 ## ZA Recomp on Linux (native, x86-64)
 Experimental. ZA Recomp builds and runs natively on Linux x86-64 (no Wine / Proton) and can be packaged as an

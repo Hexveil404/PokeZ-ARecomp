@@ -90,7 +90,7 @@ para *The Legend of Zelda: Link's Awakening*.
 | **GPU** | Vulkan 1.2 ou mais novo (1.3 recomendado), com driver atualizado. Com a opção DirectX 12: uma placa DirectX 12 (feature level 11_0, shader model 6.0) |
 | **RAM** | 8 GB (16 GB recomendado) |
 | **Disco** | Cerca de 12 GB livres |
-| **Jogo** | Pokémon Legends: Z-A **1.0.0, 2.0.0 ou 2.0.2**, com ou sem a DLC *Mega Dimension* |
+| **Jogo** | Pokémon Legends: Z-A **1.0.0, 2.0.0 ou 2.0.2**, com ou sem a DLC *Mega Dimension*; um `.nup` cuja atualização seja uma dessas também funciona |
 
 O Linux roda nativamente (x86-64, sem Wine nem Proton) em uma versão **experimental**: veja [Linux (experimental)](#linux-experimental).
 No Mac, use o [MonZaMac](https://github.com/lucabravi/MonZaMac), do
@@ -102,8 +102,8 @@ No Mac, use o [MonZaMac](https://github.com/lucabravi/MonZaMac), do
    e extraia em uma pasta à sua escolha (por exemplo `C:\Jogos\ZA Recomp`).
 2. Deixe a sua própria cópia do jogo em uma pasta, de um destes jeitos:
    - **Jogo extraído**: as pastas `exefs` e `romfs`, como um emulador ou o seu Switch extraem. Não precisa de keys.
-   - **Dump**: o jogo base (`.xci` ou `.nsp`), se quiser a atualização e a DLC *Mega Dimension* (`.nsp`), junto com o `prod.keys` do seu
-     próprio Switch.
+   - **Dump**: o jogo base (`.xci`, `.nsp` ou `.nup`), se quiser a atualização e a DLC *Mega Dimension* (`.nsp`).
+     Pacotes `.xci` / `.nsp` precisam do `prod.keys` do seu próprio Switch; um `.nup` não precisa de keys.
 3. Abra o `lasrecomp.exe`. Na tela inicial, escolha essa pasta (ou arraste para a janela) e clique em
    **Preparar o jogo**.
 4. Os arquivos do jogo são lidos e o código é compilado para o seu PC. Isso leva de 10 a 30 minutos, dependendo da CPU,
@@ -115,13 +115,24 @@ Os seus arquivos nunca são alterados. Se quiser, importe as fontes do seu conso
 
 ### DLC Mega Dimension
 
-A DLC é suportada pelo caminho do **dump** (as pastas extraídas `exefs` / `romfs` não incluem ela):
+A DLC é suportada pelo caminho do **dump** (as pastas extraídas `exefs` / `romfs` não incluem ela); um `.nup` também pode ser usado:
 
-1. Coloque estes arquivos juntos em uma pasta: o jogo base (`.xci` ou `.nsp`), a **atualização** (`.nsp`, versão 2.0.0
-   ou mais nova - o conteúdo da DLC vem com ela), a **DLC** (`.nsp`) e o `prod.keys` do seu Switch (e o `title.keys`
-   se a tela inicial pedir).
+1. Coloque estes arquivos juntos em uma pasta: o jogo base (`.xci`, `.nsp` ou `.nup`), a **atualização** (opcional
+   para um `.nup`; para `.xci` / `.nsp`, a `.nsp` versão 2.0.0 ou mais nova - o conteúdo da DLC vem com ela), a **DLC**
+   (`.nsp`) e, para `.xci` / `.nsp`, o `prod.keys` do seu Switch (e o `title.keys` se a tela inicial pedir).
 2. Escolha essa pasta na tela inicial e clique em **Preparar o jogo**.
 3. A tela inicial mostra **+ DLC** ao lado da versão do jogo quando ela foi encontrada.
+
+### Nintendo Switch 2 Edition e `.nup`
+
+Um `.nup` (o pacote usado por dumps mais novos do Switch 2) pode ser escolhido diretamente: coloque o `.nup` em uma pasta
+e escolha essa pasta na tela inicial. **Um `.nup` não precisa de `prod.keys`.** A tela inicial lê as árvores de base e
+atualização; use a atualização **2.0.2** para o Lumiose Online. O add-on de upgrade da Switch 2 Edition
+(`0100F43008C45001`) é instalado para o jogo ver o direito (o RomFS dele é um placeholder), e as opções de 60 fps /
+resolução / câmera do port fazem a parte visual da edição. A DLC *Mega Dimension* é separada: coloque a `.nsp` da
+DLC 2 (`0100F43008C45002`) e o `prod.keys` / `title.keys` na mesma pasta; a tela inicial mostra **+ DLC**. Os dados do
+jogo ficam em uma pasta `romfs/`, então os ícones dos botões e o layout de batalha do Xbox são feitos dela como no jogo
+extraído.
 
 Já preparou o jogo sem a DLC? Clique em **Trocar pasta do jogo**, escolha a pasta de novo com a DLC junto e prepare de
 novo. Os seus saves e configurações são mantidos.
@@ -371,7 +382,7 @@ compilar o ZA DevTools no Windows: `bash tools/devtools/build.sh`.
   da GPU e do sistema.
 - **Bibliotecas**: [SDL 3](https://libsdl.org), [FFmpeg](https://ffmpeg.org), [Dear ImGui](https://github.com/ocornut/imgui),
   [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator),
-  [shaderc](https://github.com/google/shaderc), [SMAA](https://github.com/iryoku/smaa),
+  [shaderc](https://github.com/google/shaderc), [SMAA](https://github.com/iryoku/smaa), [ZstdSharp](https://github.com/oleg-st/ZstdSharp),
   [AMD FidelityFX FSR 1 e FSR 2](https://github.com/GPUOpen-Effects), [XeGTAO](https://github.com/GameTechDev/XeGTAO),
   [LibHac](https://github.com/Thealexbarney/LibHac), [Zig](https://ziglang.org) e as outras listadas em
   [docs/LASRecomp-README.md](docs/LASRecomp-README.md#license).

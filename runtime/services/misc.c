@@ -115,7 +115,13 @@ SERVICE("csrng", csrng) {
 // ------------------------------------------------------------------ aoc:u
 // Add-on content (DLC): the game root's aoc/<title id, 16 hex digits>.bin files, each the DLC's RomFS image (fs.c
 // OpenDataStorageByDataId serves them). Their title ids share the base (application id + 0x1000); the game sees
-// their indices (title id - base). None: no DLC.
+// their indices (title id - base). Sorted so the indices do not depend on the host directory order (the Switch 2
+// Edition add-on ...5001 is index 1, the Mega Dimension DLC ...5002 index 2). None: no DLC.
+static int cmp_u64(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return x < y ? -1 : x > y;
+}
+
 static int aoc_ids(uint64_t *ids, int max) {
     char dir[1100];
     snprintf(dir, sizeof dir, "%s", g_romfs_dir ? g_romfs_dir : "extracted/romfs");
@@ -129,6 +135,7 @@ static int aoc_ids(uint64_t *ids, int max) {
         if (strlen(e->d_name) == 20 && sscanf(e->d_name, "%16llx.%3s", &id, ext) == 2 && !strcmp(ext, "bin")) ids[n++] = id;
     }
     if (d) closedir(d);
+    if (n > 1) qsort(ids, (size_t)n, sizeof ids[0], cmp_u64);
     return n;
 }
 
@@ -138,7 +145,11 @@ SERVICE("aoc:u", aoc_u) {
     int n = aoc_ids(ids, 64);
     uint64_t base = n ? ids[0] & ~0xFFFull : 0x01006BB00C6F1000ull;
     static int logged;
-    if (!logged++) LOG("[aoc] %d add-on content(s) installed\n", n);
+    if (!logged++) {
+        LOG("[aoc] %d add-on content(s) installed", n);
+        for (int i = 0; i < n; i++) LOG(" %016llx", (unsigned long long)ids[i]);
+        LOG("\n");
+    }
     switch (req->cmd) {
     case 2: OUT(uint32_t, 0) = (uint32_t)n; resp_size(resp, 4); break;  // CountAddOnContent
     case 3: {  // ListAddOnContent(offset, count) -> their indices

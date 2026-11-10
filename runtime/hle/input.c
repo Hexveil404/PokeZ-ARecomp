@@ -1,8 +1,9 @@
 // Controller input: SDL keyboard/gamepad -> nn::hid Npad state.
 //
 // Both go through the player's bindings (runtime/hle/bindings.c, defaults there: keyboard WASD left stick, arrows
-// d-pad, K/J/L/I = A/B/X/Y, Q/E = L/R, 1/3 = ZL/ZR, Enter / Backspace = Plus / Minus, numpad 8/4/5/6 right stick;
-// controller by position, Switch A = east).
+// d-pad, Space/J/L/I = A/B/X/Y, Q/E = L/R, 1/3 = ZL/ZR, Enter / Backspace = Plus / Minus, numpad 8/4/5/6 right stick;
+// controller: Switch A = east for a Nintendo pad, but A = the pad's own A (south) for Xbox / PlayStation pads, whose
+// prompts the menus and the game show by label).
 #include <SDL3/SDL.h>
 #include <ctype.h>
 #include <math.h>
@@ -18,6 +19,8 @@
 #include "../rumble.h"
 #include "../led.h"
 #include "../ui/menu.h"
+
+int input_pad_family(void);  // (bindings.c/input.c: LARECOMP_PAD_TYPE, else the connected pad)
 
 enum {
     BTN_A = 0, BTN_B, BTN_X, BTN_Y, BTN_LSTICK, BTN_RSTICK, BTN_L, BTN_R, BTN_ZL, BTN_ZR, BTN_PLUS, BTN_MINUS,
@@ -194,10 +197,28 @@ static void recompute_keyboard(void) {
 }
 
 // Controller buttons (and the triggers as buttons) -> Switch buttons through g_bind_pad; the sticks stay the sticks.
+static _Atomic int pad_family;
 static bool pad_by_pos;  // (battle_abxy_position: ZL held at the last recompute_pad)
-static int pad_host(int i, bool by_pos) { return by_pos && i <= BIND_Y ? bind_pad_default(i) : g_bind_pad[i]; }
+static bool pad_face_by_label;  // (Xbox / PlayStation pad, default bindings: A/B/X/Y by the pad's labels)
+static int pad_host(int i, bool by_pos) {
+    if (i <= BIND_Y) {
+        if (by_pos) return bind_pad_default(i);  // (Nintendo positions: A east, B south, X north, Y west)
+        if (pad_face_by_label) {  // (SDL positions: A south, B east, X west, Y north)
+            static const int label[BIND_Y + 1] = {SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST,
+                                                   SDL_GAMEPAD_BUTTON_WEST, SDL_GAMEPAD_BUTTON_NORTH};
+            return label[i];
+        }
+    }
+    return g_bind_pad[i];
+}
 static void recompute_pad(void) {
     uint32_t host = test_pad;
+    pad_face_by_label = input_pad_family() != 0 && bind_is_default(BIND_DEV_PAD);
+    static bool label_logged;
+    if (pad_face_by_label && !label_logged) {
+        label_logged = true;
+        LOG("[input] ABXY by the pad's labels (A = south, B = east, X = west, Y = north)\n");
+    }
     if (pad && !host_test) {
         for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
             if (SDL_GetGamepadButton(pad, (SDL_GamepadButton)i)) host |= 1u << i;
@@ -406,7 +427,6 @@ int input_family_of_type(int type) {
     default: return 1;
     }
 }
-static _Atomic int pad_family;
 static void note_family(void) {
     int f = pad ? input_family_of_type(SDL_GetGamepadType(pad)) : 0;
     if (f != pad_family) LOG("[input] button prompts: %s controller\n", f == 1 ? "Xbox" : f == 2 ? "PlayStation" : "Nintendo");

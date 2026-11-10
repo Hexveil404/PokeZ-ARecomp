@@ -71,7 +71,8 @@ para *The Legend of Zelda: Link's Awakening*.
 - Qualquer controle do SDL3: Xbox, PlayStation (DualShock 4 / DualSense), Switch Pro, Steam Deck e outros
 - Teclado e mouse, com câmera pelo mouse
 - Todos os botões e teclas podem ser remapeados; os ícones dos botões seguem o seu controle (Xbox, PlayStation,
-  Nintendo, Steam Deck, teclado)
+  Nintendo, Steam Deck, teclado). Controles Xbox / PlayStation / Steam usam os próprios rótulos A/B/X/Y; controles
+  Nintendo mantêm as posições do Switch
 - Golpes por posição e encaixe do analógico direito no eixo
 
 **Tela inicial**

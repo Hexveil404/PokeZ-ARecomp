@@ -71,7 +71,7 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 - Any SDL3 controller: Xbox, PlayStation (DualShock 4 / DualSense), Switch Pro, Steam Deck and more
 - Keyboard and mouse, with a mouse-driven camera
 - Every button and key can be rebound; button icons match your controller (Xbox, PlayStation, Nintendo, Steam Deck,
-  keyboard)
+  keyboard). Xbox / PlayStation / Steam pads use their own A/B/X/Y labels; Nintendo pads keep the Switch positions
 - Battle moves by position, right stick snap to axis
 
 **Start screen**

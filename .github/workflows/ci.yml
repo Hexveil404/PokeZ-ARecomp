@@ -100,6 +100,10 @@ jobs:
         run: |
           clang -std=gnu11 -O2 -I"$HOME/sdl3/include" tools/test_rumble.c -L"$HOME/sdl3/lib" -Wl,-rpath,"$HOME/sdl3/lib" -lSDL3 -lm -o build/test-rumble
           build/test-rumble
+      - name: Controller in use (two virtual gamepads, #455)
+        run: |
+          clang -std=gnu11 -O2 -I"$HOME/sdl3/include" tools/test_active_pad.c -L"$HOME/sdl3/lib" -Wl,-rpath,"$HOME/sdl3/lib" -lSDL3 -lm -o build/test-active-pad
+          build/test-active-pad
       - name: Vulkan fence sequence regression
         run: python3 tools/test_fence_sequence.py
       - name: Guest heap import on low-memory machines
@@ -191,6 +195,10 @@ jobs:
           build/test-update-marker.exe
       - name: Draw distance generator (synthetic scene parts)
         run: python tools/test_draw_dist.py
+      - name: Controller in use (two virtual gamepads, #455)
+        run: |
+          clang -std=gnu11 -O2 $(pkg-config --cflags sdl3) tools/test_active_pad.c $(pkg-config --libs sdl3) -o build/test-active-pad.exe
+          build/test-active-pad.exe
       - name: Vulkan fence sequence regression
         run: python tools/test_fence_sequence.py
       - name: Guest heap import on low-memory machines

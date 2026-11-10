@@ -5,10 +5,11 @@
 //     nintendo_udsg-r_std_003 (Standard, Morisawa UD Shin Go), nintendo_udsg-r_org_zh-cn_003 (Chinese Simplified),
 //     nintendo_udsg-r_ext_zh-cn_003 (its Ext), nintendo_udjxh-db_zh-tw_003 (Chinese Traditional),
 //     nintendo_udsg-r_ko_003 (Korean), nintendo_ext_003 (NintendoExt button glyphs)
-//  3. a substitute of that same language where the OS has one - a gothic like UD Shin Go is much closer to the
-//     game's look than Arial. Without one (a Linux without a CJK font, say) the type serves Standard, which is
-//     what a game asking for a language whose font is missing gets on the console too - but then that language's
-//     characters are the substitute's, so Chinese / Korean text can show missing glyphs.
+//  3. a substitute of that same language where the OS has one (for Standard in a game played in Chinese or Korean:
+//     that language's system font first, then the Japanese gothics - issue #389). A gothic like UD Shin Go is much
+//     closer to the game's look than Arial. Without one (a Linux without a CJK font, say) the type serves Standard,
+//     which is what a game asking for a language whose font is missing gets on the console too - but then that
+//     language's characters are the substitute's, so Chinese / Korean text can show missing glyphs.
 //     Standard's Japanese gothics are skipped when the game plays in Russian: Japanese fonts carry Cyrillic as
 //     full-width characters (JIS X 0208), every letter a square apart (issue #32) - Arial / DejaVu Sans then.
 //  4. Standard only, on Linux and any other platform without a known system font (not macOS / Windows), ahead of
@@ -258,8 +259,40 @@ static void load_fonts(void) {
                                      "/usr/share/fonts/nanum/NanumGothic.ttf", NULL};
     static const char *const ext[] = {"fonts/nintendo_ext_003.bfttf", "fonts/nintendo_ext_003.ttf", NULL};
     static const char *const *const chains[N_FONT_TYPES] = {std, zh_cn, zh_cn_ext, zh_tw, ko, ext};
+    // Standard's substitutes for a game in Chinese / Korean, ahead of the Japanese gothics: that language's own
+    // system font. Standard is also what ChineseSimpleExt and NintendoExt fall back to, and the game draws some of
+    // its text with them (the mode select's labels), so in these languages a Japanese font there left characters
+    // blank - an older Windows 10's Yu Gothic lacks some Simplified Chinese ones (issue #389). The Japanese gothics
+    // stay after them for a system without one. (Not macOS for Traditional Chinese: its fonts' first face is
+    // Simplified, and Hiragino carries the traditional forms.)
+    static const char *const std_zh_cn[] = {"/System/Library/Fonts/Hiragino Sans GB.ttc",
+                                            "/System/Library/Fonts/Supplemental/Hiragino Sans GB.ttc",
+                                            "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf",
+                                            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+                                            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", NULL};
+    static const char *const std_zh_tw[] = {"C:/Windows/Fonts/msjh.ttc", "/usr/share/fonts/truetype/arphic/uming.ttc",
+                                            NULL};
+    static const char *const std_ko[] = {"/System/Library/Fonts/AppleSDGothicNeo.ttc", "C:/Windows/Fonts/malgun.ttf",
+                                         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+                                         "/usr/share/fonts/nanum/NanumGothic.ttf", NULL};
     extern const char *settings_language(void);
-    bool cyrillic = !strcmp(settings_language(), "ru");
+    const char *lang = settings_language();
+    bool cyrillic = !strcmp(lang, "ru");
+    const char *const *std_native = !strcmp(lang, "zh-Hans") ? std_zh_cn
+                                    : !strcmp(lang, "zh-Hant") ? std_zh_tw
+                                    : !strcmp(lang, "ko")      ? std_ko
+                                                               : NULL;
+    // a forced font: it is what the player asked for, in any language. Said so when it can't be used (it was
+    // passed over silently before).
+    if (env && !*env) env = NULL;
+    if (env) {
+        FILE *f = fopen(env, "rb");
+        if (!f) {
+            LOG("[pl] LARECOMP_FONT %s: can't open, using the normal fonts\n", env);
+            env = NULL;
+        } else
+            fclose(f);
+    }
     char bundled[1100];
     // Xbox / PlayStation / keyboard prompts (setting prompts, or auto by the controller): the button glyphs relabelled
     // (tools/za/xbox_font.py, keyboard_font.py) - Nintendo Ext from that set's file when there is one
@@ -271,10 +304,19 @@ static void load_fonts(void) {
         load_one(path, &fonts[F_EXT]);
     }
     for (int t = 0; t < N_FONT_TYPES; t++) {
-        if (env) load_one(env, &fonts[t]);  // (a forced font: it is what the player asked for, in any language)
+        if (env && !load_one(env, &fonts[t])) {
+            LOG("[pl] LARECOMP_FONT %s: not a font the game can use, using the normal fonts\n", env);
+            env = NULL;
+        }
         for (size_t i = 0; !fonts[t].addr && chains[t][i]; i++) {
             const char *f = chains[t][i];
             bool own = strncmp(f, "fonts/", 6) == 0;  // (the console's own files: as they are)
+            // Standard in Chinese / Korean, once the console's own files are passed: that language's system font
+            if (t == F_STD && std_native && !own && i && strncmp(chains[t][i - 1], "fonts/", 6) == 0) {
+                for (size_t k = 0; !fonts[t].addr && std_native[k]; k++)
+                    load_one_checked(std_native[k], &fonts[t], true);
+                if (fonts[t].addr) break;
+            }
             // Standard, before the OS's fonts where none is known: the bundled BIZ UDPGothic (a Japanese gothic
             // too: not for Russian)
             if (!OS_FONTS_KNOWN && t == F_STD && !own && !cyrillic && i && strncmp(chains[t][i - 1], "fonts/", 6) == 0 &&
@@ -290,6 +332,10 @@ static void load_fonts(void) {
     if (!fonts[F_STD].addr)  // (only a broken install: the app ships DejaVu Sans)
         FATAL("no font for the game's text: import the Switch fonts in Settings (Game font), or reinstall %s\n",
               g_game_is_la ? "LAS Recomp" : "ZA Recomp");
+    static const char *const type_names[N_FONT_TYPES] = {"Standard", "ChineseSimple", "ChineseSimpleExt",
+                                                         "ChineseTraditional", "Korean", "NintendoExt"};
+    for (int t = 1; t < N_FONT_TYPES; t++)  // (font_for: a type without its own font serves Standard's)
+        if (!fonts[t].addr) LOG("[pl] %s: Standard's font\n", type_names[t]);
 }
 
 // The prompts' style, chosen once at boot: "keyboard", "xbox", "playstation", "nintendo" (a controller SDL names no

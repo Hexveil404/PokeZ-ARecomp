@@ -1175,7 +1175,18 @@ ssize_t pwrite(int fd, const void *buf, size_t n, off_t off) { return prw(fd, (v
 // ---- child processes
 typedef struct { HANDLE process, job; } WinProcess;
 
-PlatProc plat_spawn(const char *const argv[], const char *log_path, bool append_log) {
+// Control Flow Guard off for one child (plat_spawn_no_cfg), as a process mitigation policy: it wins over the
+// system-wide Exploit protection setting, which the exe's header (tools/pe_no_cfg.py) does not (#337)
+#ifndef PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY
+#define PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY 0x00020007
+#endif
+#ifndef PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF
+#define PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF (0x00000002ull << 40)
+#endif
+
+// no_cfg: NULL = a plain start; else *no_cfg = 0 when the child runs with CFG off, or the error that prevented it
+// (then it is started without the policy)
+static PlatProc spawn_child(const char *const argv[], const char *log_path, bool append_log, unsigned long *no_cfg) {
     static __thread char cmd[32768];
     cmd[0] = 0;
     for (int i = 0; argv[i]; i++) append_arg(cmd, sizeof cmd, argv[i]);
@@ -1195,7 +1206,34 @@ PlatProc plat_spawn(const char *const argv[], const char *log_path, bool append_
     MultiByteToWideChar(CP_UTF8, 0, argv[0], -1, wprog, MAX_PATH);
     for (wchar_t *p = wprog; *p; p++) if (*p == L'/') *p = L'\\';
     const wchar_t *app = GetFullPathNameW(wprog, MAX_PATH, wfull, NULL) ? wfull : NULL;
-    BOOL ok = CreateProcessW(app, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, NULL, NULL, &si, &pi);
+    BOOL ok = FALSE;
+    if (no_cfg) {
+        *no_cfg = ERROR_NOT_SUPPORTED;
+        STARTUPINFOEXW six = {.StartupInfo = si};
+        six.StartupInfo.cb = sizeof six;
+        DWORD64 policy[2] = {PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF, 0};
+        SIZE_T size = 0;
+        InitializeProcThreadAttributeList(NULL, 1, 0, &size);
+        six.lpAttributeList = size ? (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(size) : NULL;
+        if (!six.lpAttributeList || !InitializeProcThreadAttributeList(six.lpAttributeList, 1, 0, &size)) {
+            *no_cfg = six.lpAttributeList ? GetLastError() : ERROR_NOT_ENOUGH_MEMORY;
+            free(six.lpAttributeList);
+            six.lpAttributeList = NULL;
+        } else if (!UpdateProcThreadAttribute(six.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, policy,
+                                              sizeof policy, NULL, NULL)) {
+            *no_cfg = GetLastError();
+        } else {
+            ok = CreateProcessW(app, wcmd, NULL, NULL, TRUE,
+                                CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
+                                &six.StartupInfo, &pi);
+            *no_cfg = ok ? 0 : GetLastError();  // (older Windows: ERROR_INVALID_PARAMETER; or a policy refuses it)
+        }
+        if (six.lpAttributeList) {
+            DeleteProcThreadAttributeList(six.lpAttributeList);
+            free(six.lpAttributeList);
+        }
+    }
+    if (!ok) ok = CreateProcessW(app, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, NULL, NULL, &si, &pi);
     if (!ok) rt_launcher_log("[plat] could not start %s (error %lu)\n", argv[0], GetLastError());
     CloseHandle(log);
     if (!ok) return 0;
@@ -1224,6 +1262,17 @@ PlatProc plat_spawn(const char *const argv[], const char *log_path, bool append_
     return (PlatProc)child;
 }
 
+PlatProc plat_spawn(const char *const argv[], const char *log_path, bool append_log) {
+    return spawn_child(argv, log_path, append_log, NULL);
+}
+
+PlatProc plat_spawn_no_cfg(const char *const argv[], const char *log_path, bool append_log, unsigned long *error) {
+    unsigned long e = 0;
+    PlatProc p = spawn_child(argv, log_path, append_log, &e);
+    if (error) *error = e;
+    return p;
+}
+
 void plat_proc_kill(PlatProc p) {
     WinProcess *child = (WinProcess *)p;
     if (child->job) TerminateJobObject(child->job, 255);
@@ -1247,6 +1296,7 @@ int plat_proc_wait(PlatProc p, bool block) {
     // a helper that dies before writing anything leaves only this: 0xC0000135 / 0xC0000142 can't load, 0xC0000005 crashed,
     // 0xC0000022 access denied, usually an antivirus; #99 had only "exit status 255" and an empty log)
     if (code > 255) rt_launcher_log("[plat] a helper process ended with status 0x%08lX\n", (unsigned long)code);
+    if (code == 0xC0000409) return PLAT_PROC_FAST_FAIL;  // (Control Flow Guard and other security checks, #337)
     return code > 255 ? 255 : (int)code;
 }
 

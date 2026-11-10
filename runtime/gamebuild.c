@@ -81,13 +81,31 @@ static void end_all(void) {
     pthread_mutex_unlock(&g_plock);
 }
 
-static PlatProc spawn(char **argv, const char *log) {
+static PlatProc spawn_proc(char **argv, const char *log, bool generator) {
     pthread_mutex_lock(&g_plock);
-    PlatProc p = g_quitting ? 0 : plat_spawn((const char *const *)argv, log, false);
+    PlatProc p = 0;
+    if (!g_quitting) {
+#ifdef _WIN32
+        // The generator runs with Control Flow Guard off even when Windows forces it on for every program (#337)
+        if (generator) {
+            unsigned long error = 0;
+            p = plat_spawn_no_cfg((const char *const *)argv, log, false, &error);
+            static bool told;
+            if (p && !told) {
+                told = true;
+                if (!error) LOG("[gamebuild] generator started with Control Flow Guard off\n");
+                else LOG("[gamebuild] generator started normally: Control Flow Guard could not be turned off for it (error %lu)\n", error);
+            }
+        } else
+#endif
+        p = plat_spawn((const char *const *)argv, log, false);
+    }
+    (void)generator;
     if (p && g_nprocs < MAX_PROCS) g_procs[g_nprocs++] = p;
     pthread_mutex_unlock(&g_plock);
     return p;
 }
+static PlatProc spawn(char **argv, const char *log) { return spawn_proc(argv, log, false); }
 
 // plat_proc_wait without blocking, then forgotten once it has ended
 static int finished(PlatProc p) {
@@ -230,7 +248,7 @@ static PlatProc gen_start(const Tools *t, const Gen *g, int i, const char *game_
     add(&a, base[i]);
     add(&a, g->out);
     if (i == 1) { add(&a, "--hle"); add(&a, t->hle); }
-    PlatProc p = spawn(a.v, g->log);
+    PlatProc p = spawn_proc(a.v, g->log, true);
     args_free(&a);
     return p;
 }
@@ -296,7 +314,7 @@ static void log_dump_tail(const char *path) {
 
 // A helper that failed (plat_proc_wait's r != 0): its log's last line for our log, and how it ended when that says
 // nothing or a signal ended it (the system killing it for memory writes nothing). A signal also gives the player why.
-static bool g_killed;
+static bool g_killed, g_cfg_stopped;
 static void helper_failed(const char *what, int r, const char *log, char *why, size_t why_size) {
     char last[300], how[120] = "";
     log_tail(log, last, sizeof last);
@@ -313,6 +331,11 @@ static void helper_failed(const char *what, int r, const char *log, char *why, s
         g_killed = true;
     } else
 #endif
+#ifdef _WIN32
+    if (r == PLAT_PROC_FAST_FAIL) {
+        snprintf(how, sizeof how, "exit status 0xC0000409 (a security check stopped it)");
+    } else
+#endif
     if (!last[0]) {
         snprintf(how, sizeof how, "exit status %d", r);
         // (nothing written at all: not disk space, which is what the start screen would say next - something stopped it as
@@ -325,6 +348,7 @@ static void helper_failed(const char *what, int r, const char *log, char *why, s
 }
 
 bool gamebuild_killed(void) { return g_killed; }
+bool gamebuild_cfg_stopped(void) { return g_cfg_stopped; }
 
 // ------------------------------------------------------------------ compiling
 typedef struct {
@@ -445,7 +469,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     uint64_t t0 = plat_now_ns();
     static bool registered;
     if (!registered) registered = true, atexit(end_all);
-    g_killed = false;
+    g_killed = false, g_cfg_stopped = false;
     if (!gamelib_full_id(game_dir, g_full_id, sizeof g_full_id)) {
         snprintf(why, why_size, "the game files' exefs/main is missing or unreadable");
         return false;
@@ -573,6 +597,9 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                         snprintf(why, why_size, "the game code couldn't be prepared");
                         helper_failed(what, r, g->log, why, why_size);
                         log_dump_tail(g->log);
+#ifdef _WIN32
+                        if (r == PLAT_PROC_FAST_FAIL) g_cfg_stopped = true;  // (#337)
+#endif
                         ok = false;
                     } else if (!build_cache_save_generation(cache, g->name, g->files, why, why_size)) {
                         ok = false;

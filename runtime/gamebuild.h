@@ -21,6 +21,8 @@ typedef struct {
 bool gamebuild_run(const char *game_dir, const GameBuildOpts *opts, char *why, size_t why_size);
 // After a failed gamebuild_run: a helper was killed by a signal (e.g. out of memory); why then says so, for the player.
 bool gamebuild_killed(void);
+// After a failed gamebuild_run: Windows security settings (Control Flow Guard) stopped the generator (#337).
+bool gamebuild_cfg_stopped(void);
 // The generator and the compiler are there (shipped builds; a source checkout with tools/venv and clang).
 bool gamebuild_available(void);
 // An x86-64 CPU without AVX2 / FMA / BMI2: the game code (x86-64-v3) is built for x86-64-v2 here instead, under its own

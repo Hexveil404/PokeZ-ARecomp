@@ -250,3 +250,15 @@ player's own packages (base game + update).
 - The start screen in a tiny bitmap font: run a dev build from the repo root (its resources are looked up from the
   starting folder; the AppImage keeps them next to the executable).
 - A black screenshot in a test run: a fade between scenes (the log shows about one draw per frame there).
+
+### AMD RDNA4 and Mesa 27.0-devel
+
+RADV 27 initializes its PS epilog cache (`device->ps_epilogs`) only when a dynamic-state extension feature bit is set.
+Extended dynamic state 1 is **core** in Vulkan 1.3, so a Vulkan 1.3 application can use it without enabling the
+promoted extension's feature bit. Mesa 27.0-devel's RADV then left the cache uninitialized and the first 3-vertex draw
+crashed in `radv_shader_part_cache_get()` (GFX1201, Radeon RX 9070).
+
+The renderer enables the promoted `VK_EXT_extended_dynamic_state` feature on RADV Vulkan 1.3 devices; the commands stay
+the core ones. Other 1.3 drivers keep their previous feature chain. Mesa 26.2.6 (stable) and current mesa-git both run
+the game. The driver-side fix is to initialize `ps_epilogs` unconditionally (or for `VK_API_VERSION_1_3`); a local Mesa
+build with that change runs the original, unpatched binary too.

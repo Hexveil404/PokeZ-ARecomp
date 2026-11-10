@@ -244,6 +244,12 @@ PY := $(firstword $(wildcard tools/venv/bin/python) $(wildcard tools/venv/Script
 
 # EXEFS: the game's exefs folder (another version's: with its own GEN and B)
 EXEFS ?= extracted/exefs
+# the game-code id these flags give (tools/za/dist.sh: the release notes' rebuild marker, runtime/ui/launcher.mm)
+gamelib-id:
+	@echo $(GAMELIB_ID)
+
+.PHONY: gamelib-id
+
 gen:
 	cd tools && ../$(PY) gen.py sdk ../$(EXEFS)/sdk 0x7008000000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt $(GENSIMD)
 	cd tools && ../$(PY) gen.py main ../$(EXEFS)/main 0x7000000000 ../$(GEN)/main $(GENSIMD)

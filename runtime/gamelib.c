@@ -59,6 +59,11 @@ static int candidates(const char *game_dir, char out[3][1100]) {
     return n;
 }
 
+// This build's game-code id (the Makefile's GAMELIB_ID): the start screen compares it with a newer release's (its notes'
+// "<!-- zarecomp-gamelib: <id> -->", runtime/ui/launcher.mm update_thread) to say whether updating rebuilds the game
+// code (tools/za/dist.sh writes the notes' line from make gamelib-id).
+const char *gamelib_build_id(void) { return GAMELIB_ID; }
+
 bool gamelib_present(const char *game_dir) {
     if (g_tables) return true;
     char want[GAMELIB_FULL_ID_SIZE];

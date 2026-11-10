@@ -143,6 +143,11 @@ static std::string tag_label(const std::string &t, bool with_word) {
 static std::string g_update_tag;  // a newer release's tag (g_update_lock)
 static std::string g_update_url;  // its Windows zip (browser_download_url: the download counts on GitHub as a click)
 static long long g_update_size;
+// Whether that release rebuilds the game code: its notes carry "<!-- zarecomp-gamelib: <id> -->" (tools/za/dist.sh
+// prints the line), compared with this build's GAMELIB_ID. 1: it rebuilds (10-30 min at the next start), 0: it
+// doesn't, -1: the notes don't say (releases before the marker). The update's question and the link say so.
+static int g_update_rebuild = -1;
+extern "C" const char *gamelib_build_id(void);  // runtime/gamelib.c
 static pthread_mutex_t g_update_lock = PTHREAD_MUTEX_INITIALIZER;
 #define UPDATE_ASSET "ZA-Recomp-windows.zip"
 
@@ -152,6 +157,8 @@ static void *update_thread(void *) {
         for (const char *p = t; *p;) {
             const char *c = strchr(p, ',');
             body += "\"tag_name\": \"" + std::string(p, c ? c - p : strlen(p)) + "\"\n";
+            if (const char *g = getenv("LARECOMP_UPDATE_GAMELIB"))  // (test) each release's notes give this game-code id
+                body += std::string("\"body\": \"notes <!-- zarecomp-gamelib: ") + g + " -->\"\n";
             p = c ? c + 1 : p + strlen(p);
         }
     } else {
@@ -177,14 +184,27 @@ static void *update_thread(void *) {
     }
     std::string best, url;
     long long best_rank = tag_rank(LARECOMP_VERSION), size = 0;
+    int rebuild = -1;
     for (size_t at = 0; (at = body.find("\"tag_name\"", at)) != std::string::npos;) {
         size_t q1 = body.find('"', body.find(':', at) + 1), q2 = q1 == std::string::npos ? q1 : body.find('"', q1 + 1);
         if (q2 == std::string::npos) break;
         std::string tag = body.substr(q1 + 1, q2 - q1 - 1);
         if (tag_rank(tag) > best_rank) {
-            best_rank = tag_rank(tag), best = tag, url.clear(), size = 0;
+            best_rank = tag_rank(tag), best = tag, url.clear(), size = 0, rebuild = -1;
             // its assets follow the tag in GitHub's release object, up to the next release's tag
             size_t end = body.find("\"tag_name\"", q2), u = q2;
+            {   // (its notes, in the same object: the game-code id it was built with)
+                static const char mark[] = "zarecomp-gamelib:";
+                size_t g = body.find(mark, q2);
+                if (g != std::string::npos && g < end) {
+                    size_t s = g + sizeof mark - 1;
+                    while (s < body.size() && body[s] == ' ') s++;
+                    size_t e = s;
+                    while (e < body.size() && isxdigit((unsigned char)body[e])) e++;
+                    std::string id = body.substr(s, e - s), mine = gamelib_build_id();
+                    if (!id.empty()) rebuild = id != mine.substr(0, mine.find('-'));
+                }
+            }
             while ((u = body.find("\"browser_download_url\"", u)) != std::string::npos && u < end) {
                 size_t a = body.find('"', body.find(':', u) + 1), b = a == std::string::npos ? a : body.find('"', a + 1);
                 if (b == std::string::npos) break;
@@ -202,12 +222,14 @@ static void *update_thread(void *) {
     }
     if (const char *z = getenv("LARECOMP_UPDATE_ZIP"))  // (test) install this zip: a local file or a link
         url = strncmp(z, "http", 4) ? std::string("file:") + z : std::string(z), size = getenv("LARECOMP_UPDATE_SIZE") ? atoll(getenv("LARECOMP_UPDATE_SIZE")) : 0;
-    if (!best.empty()) rt_launcher_log("[launcher] update available: %s (this build %s)%s\n", best.c_str(), LARECOMP_VERSION,
-                               url.empty() ? "" : ", installable from the start screen");
+    if (!best.empty()) rt_launcher_log("[launcher] update available: %s (this build %s)%s; game code: %s\n", best.c_str(),
+                               LARECOMP_VERSION, url.empty() ? "" : ", installable from the start screen",
+                               rebuild == 1 ? "rebuilt after updating" : rebuild == 0 ? "kept" : "not said in its notes");
     pthread_mutex_lock(&g_update_lock);
     g_update_tag = best;
     g_update_url = url;
     g_update_size = size;
+    g_update_rebuild = rebuild;
     pthread_mutex_unlock(&g_update_lock);
     return NULL;
 }
@@ -3239,7 +3261,9 @@ extern "C" void launcher_run(const char *root) {
                 }
                 if (!upd.empty()) {
                     std::string link = std::string(TR("New version ", "Nova versão ")) + tag_label(upd, false) +
-                                       TR(" available — see what's new", " disponível — ver novidades");
+                                       (g_update_rebuild == 1 ? TR(" available (the game is compiled again) — see what's new",
+                                                                   " disponível (o jogo é compilado de novo) — ver novidades")
+                                                              : TR(" available — see what's new", " disponível — ver novidades"));
                     ImVec2 ls = text_size(F_LABEL, 14, link.c_str());
                     float lx2 = W_ - 28 - ls.x, ly2 = H_ - 24 - ls.y / 2;
                     ImGui::SetCursorScreenPos(P(lx2, ly2));
@@ -3278,13 +3302,31 @@ extern "C" void launcher_run(const char *root) {
                             else
                                 ImGui::Text("%s", TR("ZA Recomp downloads it from GitHub, replaces its program files and opens again.",
                                                      "O ZA Recomp baixa a versão nova do GitHub, troca os arquivos do programa e abre de novo."));
-                            ImGui::TextDisabled("%s", TR("Saves, mods, settings and the compiled game are kept as they are.",
-                                                         "Saves, mods, configurações e o jogo já compilado ficam como estão."));
+                            if (g_update_rebuild == 1) {  // (the release's notes: another game-code id)
+                                ImGui::Spacing();
+                                ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "%s",
+                                                   TR("This version changes the game code: after updating, the game is compiled again\n"
+                                                      "before you can play (about 10 to 30 minutes, once). Update now, or later?",
+                                                      "Esta versão muda o código do jogo: depois de atualizar, o jogo é compilado de novo\n"
+                                                      "antes de você poder jogar (de 10 a 30 minutos, uma vez). Atualizar agora ou depois?"));
+                                ImGui::TextDisabled("%s", TR("Saves, mods and settings are kept as they are.",
+                                                             "Saves, mods e configurações ficam como estão."));
+                            } else if (g_update_rebuild == 0) {
+                                ImGui::TextDisabled("%s", TR("No new compile of the game: saves, mods, settings and the compiled game are kept as they are.",
+                                                             "Sem compilar o jogo de novo: saves, mods, configurações e o jogo já compilado ficam como estão."));
+                            } else {
+                                ImGui::TextDisabled("%s", TR("Saves, mods and settings are kept as they are. If this version changes the game code,\n"
+                                                             "the game is compiled again when it opens (10 to 30 minutes, once).",
+                                                             "Saves, mods e configurações ficam como estão. Se esta versão mudar o código do jogo,\n"
+                                                             "o jogo é compilado de novo ao abrir (de 10 a 30 minutos, uma vez)."));
+                            }
                             ImGui::Spacing();
-                            if (ImGui::Button(TR("Update", "Atualizar"), ImVec2(220 * g_s, 0))) g_update_go = true, ImGui::CloseCurrentPopup();
+                            if (ImGui::Button(g_update_rebuild == 1 ? TR("Update now", "Atualizar agora") : TR("Update", "Atualizar"),
+                                              ImVec2(220 * g_s, 0)))
+                                g_update_go = true, ImGui::CloseCurrentPopup();
                             ImGui::SameLine();
                             ImGui::SetItemDefaultFocus();
-                            if (ImGui::Button(TR("Cancel", "Cancelar"), ImVec2(220 * g_s, 0)) ||
+                            if (ImGui::Button(g_update_rebuild == 1 ? TR("Later", "Depois") : TR("Cancel", "Cancelar"), ImVec2(220 * g_s, 0)) ||
                                 ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
                                 ImGui::CloseCurrentPopup();
                             ImGui::EndPopup();

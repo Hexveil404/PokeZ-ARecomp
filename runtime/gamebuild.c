@@ -16,6 +16,12 @@
 #include "paths.h"
 #include "platform.h"
 #include "rt.h"
+#include "settings.h"
+#include "services/mod_layout.h"
+#include "modlib.h"
+
+#include <dirent.h>
+#include <strings.h>
 
 // From the Makefile: the flags the game code is compiled and linked with (as `make` builds it in a source checkout)
 #ifndef GAMELIB_CFLAGS
@@ -40,6 +46,78 @@
 // per build the caches move to the user's own local folder (%LOCALAPPDATA%\ZA Recomp\zig-cache: inside the Wine
 // prefix's C: drive; else the temp folder) and that file is compiled again. Logged with zig's message.
 static int zig_cache_moved;
+
+// ---- a mod's .pchtxt code patches (exefs/*.pchtxt: tools/pchtxt.py), applied to main before it is lifted (gen.py
+// --patch). The mods' whose code is on (settings_mod_code_on: opted in on the Mods page) whose @nsobid is this main's;
+// sorted by path, so the order - and the library id's hash of them - doesn't depend on the folder listing. A patch changes the game code: the library id
+// (gamelib_full_id) carries their hash, so turning one on or off builds the game code again (only the changed chunks).
+static int str_cmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+
+static bool main_build_hex(const char *game_dir, char out[17]) {
+    char path[1100];
+    unsigned char hdr[0x48];
+    snprintf(path, sizeof path, "%s/exefs/main", game_dir);
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    bool ok = fread(hdr, 1, sizeof hdr, f) == sizeof hdr && !memcmp(hdr, "NSO0", 4);
+    fclose(f);
+    for (int i = 0; ok && i < 8; i++) snprintf(out + 2 * i, 3, "%02x", hdr[0x40 + i]);
+    return ok;
+}
+
+// the patch file is for this build (its @nsobid- line, matched on the first 16 hex digits)
+static bool pchtxt_for(const char *path, const char *build) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    char buf[4096];
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    for (char *p = buf; (p = strchr(p, '@')); p++)
+        if (!strncasecmp(p, "@nsobid-", 8)) return strlen(p + 8) >= 16 && !strncasecmp(p + 8, build, 16);
+    return false;
+}
+
+int gamelib_patch_files(const char *game_dir, char (*out)[1100], int max) {
+    char build[17];
+    if (!main_build_hex(game_dir, build)) return 0;
+    DIR *d = opendir("mods");
+    if (!d) return 0;
+    settings_load();  // (the start screen's Mods page: mods_off)
+    int n = 0;
+    for (struct dirent *e; (e = readdir(d)) && n < max;) {
+        if (e->d_name[0] == '.' || e->d_name[0] == '_' || !settings_mod_code_on(e->d_name)) continue;  // (code: opted in)
+        char mod[1100], ex[1100];
+        snprintf(mod, sizeof mod, "mods/%s", e->d_name);
+        if (!mod_exefs_dir(mod, ex, sizeof ex)) continue;
+        DIR *x = opendir(ex);
+        for (struct dirent *f; x && (f = readdir(x)) && n < max;) {
+            size_t k = strlen(f->d_name);
+            if (k < 8 || strcasecmp(f->d_name + k - 7, ".pchtxt")) continue;
+            snprintf(out[n], sizeof *out, "%s/%s", ex, f->d_name);
+            if (pchtxt_for(out[n], build)) n++;
+        }
+        if (x) closedir(x);
+    }
+    closedir(d);
+    qsort(out, n, sizeof *out, str_cmp);
+    return n;
+}
+
+bool gamelib_patch_hash(const char *game_dir, char out[9]) {
+    char files[MAX_PATCH_FILES][1100];
+    int n = gamelib_patch_files(game_dir, files, MAX_PATCH_FILES);
+    if (!n) return false;
+    uint32_t h = 2166136261u;  // FNV-1a over the files' bytes, each after its path
+    for (int i = 0; i < n; i++) {
+        for (const char *p = files[i]; *p; p++) h = (h ^ (unsigned char)*p) * 16777619u;
+        FILE *f = fopen(files[i], "rb");
+        for (int c; f && (c = fgetc(f)) != EOF;) h = (h ^ (unsigned)c) * 16777619u;
+        if (f) fclose(f);
+    }
+    snprintf(out, 9, "%08x", h);
+    return true;
+}
 static bool zig_cache_elsewhere(const char *msg) {
     zig_cache_moved = 1;
     const char *base = getenv("LOCALAPPDATA");
@@ -152,7 +230,10 @@ static bool file_exists(const char *p) {
 static bool find_tools(Tools *t) {
     memset(t, 0, sizeof *t);
     const char *e = getenv("LARECOMP_GEN");
-    if (e && *e) snprintf(t->gen, sizeof t->gen, "%s", e);
+    // (LARECOMP_GEN=<a python> with LARECOMP_GEN_SCRIPT=<tools/gen.py>: a source checkout's generator in a release copy)
+    const char *es = getenv("LARECOMP_GEN_SCRIPT");
+    if (e && *e && es && *es) snprintf(t->gen, sizeof t->gen, "%s", e), snprintf(t->gen_script, sizeof t->gen_script, "%s", es);
+    else if (e && *e) snprintf(t->gen, sizeof t->gen, "%s", e);
     else if (!rt_resource("lasgen" SEP "lasgen" PLAT_EXE_SUFFIX, NULL, t->gen, sizeof t->gen) &&
              !(rt_resource(NULL, "tools/" PLAT_VENV_PYTHON, t->gen, sizeof t->gen) &&
                rt_resource(NULL, "tools/gen.py", t->gen_script, sizeof t->gen_script)))
@@ -230,6 +311,12 @@ static PlatProc gen_start(const Tools *t, const Gen *g, int i, const char *game_
     add(&a, base[i]);
     add(&a, g->out);
     if (i == 1) { add(&a, "--hle"); add(&a, t->hle); }
+    char patches[MAX_PATCH_FILES][1100];
+    for (int k = 0, n = i == 0 ? gamelib_patch_files(game_dir, patches, MAX_PATCH_FILES) : 0; k < n; k++) {
+        add(&a, "--patch");
+        add(&a, patches[k]);
+        LOG("[gamebuild] code patch: %s\n", patches[k]);
+    }
     PlatProc p = spawn(a.v, g->log);
     args_free(&a);
     return p;
@@ -329,6 +416,7 @@ bool gamebuild_killed(void) { return g_killed; }
 // ------------------------------------------------------------------ compiling
 typedef struct {
     char src[1100], obj[1100], tmp[1100], log[1100], stem[64], source_hash[65];
+    char def[96];  // an extra -D for this file ("": none; a code mod's entry: its base)
     unsigned long long bytes;
     int tries;  // (a failed compile starts again: below, "compiles")
 } Unit;
@@ -345,6 +433,7 @@ static void add_unit(Units *us, const char *src, const char *work, const char *s
     }
     Unit *u = &us->u[us->n++];
     u->tries = 0;
+    u->def[0] = 0;
     snprintf(u->src, sizeof u->src, "%s", src);
     snprintf(u->obj, sizeof u->obj, "%s" SEP "%s.o", work, stem);
     snprintf(u->tmp, sizeof u->tmp, "%s" SEP "%s.o.tmp", work, stem);
@@ -377,11 +466,15 @@ static bool cold_giant(const char *src) {
     char line[512], name[64] = "";
     long labels = 0;
     int defs = 0;
-    while (fgets(line, sizeof line, f)) {  // (the generator's own layout: "void f_<addr>(Cpu *c) {", "L_<addr>:;")
-        if (line[0] == 'L' && line[1] == '_') labels++;
-        else if (!strncmp(line, "void f_", 7) && strstr(line, "(Cpu *c) {")) {
+    // (the generator's own layout: "<FN_ATTR> void f_<addr>(Cpu *c) {" - tools/gen.py FN_ATTR, older ones without it -
+    // and "L_<addr>:;")
+    while (fgets(line, sizeof line, f)) {
+        if (line[0] == 'L' && line[1] == '_') { labels++; continue; }
+        const char *v = line;
+        if (!strncmp(v, "__attribute__", 13)) v = (v = strstr(v, ") void f_")) ? v + 2 : line;
+        if (!strncmp(v, "void f_", 7) && strstr(v, "(Cpu *c) {")) {
             if (++defs > 1) break;
-            sscanf(line + 5, "%63[^(]", name);
+            sscanf(v + 5, "%63[^(]", name);
         }
     }
     fclose(f);
@@ -429,6 +522,7 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     char id[GAMELIB_FULL_ID_SIZE + 32];
     snprintf(id, sizeof id, "-DGAMELIB_ID=\"%s\"", g_full_id);
     add(&a, id);
+    if (u->def[0]) add(&a, u->def);
     add(&a, "-c");
     add(&a, u->src);
     add(&a, "-o");
@@ -436,6 +530,52 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     const char *tf = getenv("LARECOMP_TEST_COMPILE_FAIL");  // (=<stem>: its first try fails, a test of the tries)
     if (tf && !strcmp(tf, u->stem) && !u->tries) add(&a, "--larecomp-test-fail");
     PlatProc p = spawn(a.v, u->log);
+    args_free(&a);
+    return p;
+}
+
+// The library from the units' objects (a response file in work: Windows' command line limit, ~1400 objects) into out.
+// 0: the response file couldn't be written or the linker didn't start.
+static PlatProc start_link(const Tools *t, const Units *units, const char *work, const char *out, const char *log) {
+    char rsp[1100];
+    snprintf(rsp, sizeof rsp, "%s" SEP "link.rsp", work);
+    FILE *f = fopen(rsp, "wb");
+    if (!f) return 0;
+    for (int k = 0; k < units->n; k++) {  // (forward slashes: the response file's backslashes are escapes)
+        fputc('"', f);
+        for (const char *c = units->u[k].obj; *c; c++) fputc(*c == '\\' ? '/' : *c, f);
+        fputs("\"\n", f);
+    }
+    fclose(f);
+    Args a = {0};
+    char at[1200];
+    snprintf(at, sizeof at, "@%s", rsp);
+#ifdef _WIN32
+    if (t->zig_rt[0]) {  // the linker itself, with the runtime built ahead of time (its flags and libraries: link.rsp)
+        char opt[1200];
+        add(&a, t->cc);
+        add(&a, "lld-link");
+        snprintf(opt, sizeof opt, "@%s" SEP "link.rsp", t->zig_rt);
+        add(&a, opt);
+        snprintf(opt, sizeof opt, "-LIBPATH:%s", t->zig_rt);
+        add(&a, opt);
+        snprintf(opt, sizeof opt, "-OUT:%s", out);
+        add(&a, opt);
+        add(&a, at);
+        add(&a, t->implib);
+    } else
+#endif
+    {
+        compiler(&a, t);
+        add_split(&a, GAMELIB_SHARED);
+        add(&a, "-o");
+        add(&a, out);
+        add(&a, at);
+#ifdef _WIN32
+        add(&a, t->implib);
+#endif
+    }
+    PlatProc p = spawn(a.v, log);
     args_free(&a);
     return p;
 }
@@ -482,9 +622,11 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         snprintf(rp, sizeof rp, "%s" SEP "gamelib_entry.receipt", work);
         update = stat(rp, &st) == 0;
     }
-    const char *gen_inputs[5] = {input_paths[0], input_paths[1], t.gen, t.hle};
+    const char *gen_inputs[5 + MAX_PATCH_FILES] = {input_paths[0], input_paths[1], t.gen, t.hle};
     int ngen = 4;
     if (t.gen_script[0]) gen_inputs[ngen++] = t.gen_script;
+    char patches[MAX_PATCH_FILES][1100];  // (a patch changes main's generated C: generated again)
+    for (int k = 0, n = gamelib_patch_files(game_dir, patches, MAX_PATCH_FILES); k < n; k++) gen_inputs[ngen++] = patches[k];
     if (!build_cache_prepare_generation(cache, GAMELIB_ID, gen_inputs, ngen, why, why_size)) {
         build_cache_failed(cache);
         build_cache_close(cache);
@@ -678,48 +820,9 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     // 2. link
     if (ok) {
         if (o->progress) o->progress(shown > 0.95 ? shown : 0.95, "Finishing...");
-        char rsp[1100], log[1100];
-        snprintf(rsp, sizeof rsp, "%s" SEP "link.rsp", work);
+        char log[1100];
         snprintf(log, sizeof log, "%s" SEP "link.log", work);
-        FILE *f = fopen(rsp, "wb");
-        if (f) {
-            for (int k = 0; k < units.n; k++) {  // (forward slashes: the response file's backslashes are escapes)
-                fputc('"', f);
-                for (const char *c = units.u[k].obj; *c; c++) fputc(*c == '\\' ? '/' : *c, f);
-                fputs("\"\n", f);
-            }
-            fclose(f);
-        }
-        Args a = {0};
-        char at[1200];
-        snprintf(at, sizeof at, "@%s", rsp);
-#ifdef _WIN32
-        if (t.zig_rt[0]) {  // the linker itself, with the runtime built ahead of time (its flags and libraries: link.rsp)
-            char opt[1200];
-            add(&a, t.cc);
-            add(&a, "lld-link");
-            snprintf(opt, sizeof opt, "@%s" SEP "link.rsp", t.zig_rt);
-            add(&a, opt);
-            snprintf(opt, sizeof opt, "-LIBPATH:%s", t.zig_rt);
-            add(&a, opt);
-            snprintf(opt, sizeof opt, "-OUT:%s", tmp);
-            add(&a, opt);
-            add(&a, at);
-            add(&a, t.implib);
-        } else
-#endif
-        {
-            compiler(&a, &t);
-            add_split(&a, GAMELIB_SHARED);
-            add(&a, "-o");
-            add(&a, tmp);
-            add(&a, at);
-#ifdef _WIN32
-            add(&a, t.implib);
-#endif
-        }
-        PlatProc p = f ? spawn(a.v, log) : 0;
-        args_free(&a);
+        PlatProc p = start_link(&t, &units, work, tmp, log);
         int r = p ? -1 : 255;
         while (p && (r = finished(p)) < 0) {
             if (o->cancelled && o->cancelled()) { stop(p); r = 130; break; }
@@ -747,5 +850,207 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     LOG("[gamebuild] reused %d objects, compiled %d objects\n", reused, compiled);
     LOG("[gamebuild] %s in %.0fs\n", ok ? "done" : cancelled ? "cancelled" : "failed", (double)(plat_now_ns() - t0) / 1e9);
     if (ok && o->progress) o->progress(1, "Finishing...");
+    return ok;
+}
+
+// ------------------------------------------------------------------ a code mod's library (runtime/modlib.h)
+// A mod's NSO lifted (gen.py, module name "mod", at its guest base) and compiled into a library of its own: its id is
+// GAMELIB_ID[-v2]-<the NSO's FNV-1a 64>-<base>, the file cache/mods/<the same without GAMELIB_ID>.<ext> next to its
+// .id. A mod is small (Lumiose: 1.3 MB of code): no build cache, a minute or so. The same compiler, flags and giant
+// handling as the game code.
+static int wait_proc(PlatProc p) {
+    int r;
+    while ((r = finished(p)) < 0) sleep_ms(20);
+    return r;
+}
+
+// A mod's library: cache/mods/<the NSO's FNV-1a>-<base>, with the id it must have (GAMELIB_ID's: a new generator or
+// game code headers build it again; MODLIB_ID's, the Makefile's: a new mod library entry or layout). false: the NSO
+// can't be read.
+#ifndef MODLIB_ID
+#define MODLIB_ID "dev"
+#endif
+static bool modlib_paths(const char *nso, uint64_t base, char *stem, size_t sn, char *id, char *out_dll, size_t n,
+                         char *idpath, size_t in) {
+    FILE *f = fopen(nso, "rb");
+    if (!f) return false;
+    uint64_t h = 1469598103934665603ull;
+    unsigned char buf[1 << 14];
+    for (size_t k; (k = fread(buf, 1, sizeof buf, f));)
+        for (size_t i = 0; i < k; i++) h = (h ^ buf[i]) * 1099511628211ull;
+    fclose(f);
+    snprintf(stem, sn, "%016llx-%llx", (unsigned long long)h, (unsigned long long)base);
+    snprintf(id, GAMELIB_FULL_ID_SIZE, "%s%s-m%s-%s", GAMELIB_ID, gamelib_old_cpu() ? "-v2" : "", MODLIB_ID, stem);
+    snprintf(out_dll, n, "cache" SEP "mods" SEP "%s" MODLIB_EXT, stem);
+    snprintf(idpath, in, "%s.id", out_dll);
+    return true;
+}
+
+static bool modlib_current(const char *id, const char *out_dll, const char *idpath) {
+    char have[GAMELIB_FULL_ID_SIZE] = "";
+    FILE *f = fopen(idpath, "rb");
+    if (!f) return false;
+    if (!fgets(have, sizeof have, f)) have[0] = 0;
+    fclose(f);
+    have[strcspn(have, "\r\n")] = 0;
+    return !strcmp(have, id) && file_exists(out_dll);
+}
+
+bool modbuild_ready(const char *nso, uint64_t base) {
+    char stem[64], id[GAMELIB_FULL_ID_SIZE], dll[1100], idpath[1200];
+    return modlib_paths(nso, base, stem, sizeof stem, id, dll, sizeof dll, idpath, sizeof idpath) &&
+           modlib_current(id, dll, idpath);
+}
+
+// (the generator's share of the bar: about half of a mod's build - Lumiose Online's 35 s - the rest compiles and links)
+#define MOD_GEN_SHARE 0.45
+bool modbuild_run(const char *game_dir, const char *nso, uint64_t base, char *out_dll, size_t n,
+                  const GameBuildOpts *o, char *why, size_t why_size) {
+    uint64_t t0 = plat_now_ns();
+    FILE *f;
+    char stem[64], id[GAMELIB_FULL_ID_SIZE], work[1100], idpath[1200];
+    if (!modlib_paths(nso, base, stem, sizeof stem, id, out_dll, n, idpath, sizeof idpath)) {
+        snprintf(why, why_size, "the mod's code (%s) can't be read", nso);
+        return false;
+    }
+    if (modlib_current(id, out_dll, idpath)) {
+        LOG("[modbuild] %s: up to date (%s)\n", nso, out_dll);
+        return true;
+    }
+    mkdir("cache", 0755);
+    mkdir("cache" SEP "mods", 0755);
+    bool (*cancelled)(void) = o ? o->cancelled : NULL;
+#define MOD_PROGRESS(f, s) do { if (o && o->progress) o->progress(f, s); } while (0)
+    MOD_PROGRESS(0, "Reading the mod's code...");
+    Tools t;
+    if (!find_tools(&t)) { snprintf(why, why_size, "the game code builder is missing from this copy of ZA Recomp"); return false; }
+    snprintf(work, sizeof work, "cache" SEP "mods" SEP "%s.work", stem);
+    plat_remove_tree(work);
+    mkdir(work, 0755);
+    LOG("[modbuild] %s at %llx -> %s\n", nso, (unsigned long long)base, out_dll);
+
+    // 1. the generator
+    char gen_out[1200], gen_log[1200], hex[32], main_nso[1100];
+    snprintf(gen_out, sizeof gen_out, "%s" SEP "gen", work);
+    snprintf(gen_log, sizeof gen_log, "%s" SEP "gen.log", work);
+    snprintf(hex, sizeof hex, "0x%llx", (unsigned long long)base);
+    snprintf(main_nso, sizeof main_nso, "%s" SEP "exefs" SEP "main", game_dir);
+    Args a = {0};
+    add(&a, t.gen);
+    if (t.gen_script[0]) add(&a, t.gen_script);
+    add(&a, "mod"); add(&a, nso); add(&a, hex); add(&a, gen_out); add(&a, "--main"); add(&a, main_nso);
+    PlatProc p = spawn(a.v, gen_log);
+    args_free(&a);
+    int r = p ? -1 : 255;
+    Gen g = {.name = "mod"};
+    snprintf(g.log, sizeof g.log, "%s", gen_log);
+    while (r < 0) {
+        if (cancelled && cancelled()) {
+            stop(p);
+            snprintf(why, why_size, "cancelled");
+            LOG("[modbuild] %s: cancelled\n", nso);
+            return false;
+        }
+        if ((r = finished(p)) >= 0) break;
+        read_gen_log(&g);
+        MOD_PROGRESS(g.n ? MOD_GEN_SHARE * (double)g.ci / (double)g.n : 0, "Reading the mod's code...");
+        sleep_ms(100);
+    }
+    if (r != 0) {
+        snprintf(why, why_size, "the mod's code couldn't be prepared");
+        helper_failed("generator (mod)", r, gen_log, why, why_size);
+        log_dump_tail(gen_log);
+        return false;
+    }
+
+    // 2. compiles: the generated files, then the entry
+    Units units = {0};
+    DIR *d = opendir(gen_out);
+    for (struct dirent *e; d && (e = readdir(d));) {
+        size_t k = strlen(e->d_name);
+        if (k < 3 || strcmp(e->d_name + k - 2, ".c")) continue;
+        char src[1300], st[64];
+        snprintf(src, sizeof src, "%s" SEP "%s", gen_out, e->d_name);
+        snprintf(st, sizeof st, "%.*s", (int)(k - 2), e->d_name);
+        add_unit(&units, src, work, st);
+    }
+    if (d) closedir(d);
+    char entry[1100];
+    snprintf(entry, sizeof entry, "%s", t.entry);  // (tools/modlib_entry.c sits next to gamelib_entry.c)
+    char *slash = strrchr(entry, '/'), *bs = strrchr(entry, '\\');
+    if (bs > slash) slash = bs;
+    snprintf(slash ? slash + 1 : entry, sizeof entry - (slash ? (size_t)(slash + 1 - entry) : 0), "modlib_entry.c");
+    add_unit(&units, entry, work, "modlib_entry");
+    snprintf(units.u[units.n - 1].def, sizeof units.u[0].def, "-DMODLIB_BASE=0x%llxull", (unsigned long long)base);
+    snprintf(g_full_id, sizeof g_full_id, "%s", id);  // (start_compile's -DGAMELIB_ID: the entry's id)
+    int jobs = o && o->jobs > 0 ? o->jobs : plat_cpu_count();  // (the start screen's: its memory-based cap)
+    jobs = jobs < 1 ? 4 : jobs > 64 ? 64 : jobs;
+    struct { PlatProc p; int unit; } run[64];
+    int next = 0, nrun = 0;
+    bool ok = units.n > 1;
+    if (!ok) snprintf(why, why_size, "the mod's code gave no functions");
+    int done = 0;
+    while (ok && (next < units.n || nrun)) {
+        if (cancelled && cancelled()) {
+            snprintf(why, why_size, "cancelled");
+            ok = false;
+            break;
+        }
+        MOD_PROGRESS(MOD_GEN_SHARE + (0.97 - MOD_GEN_SHARE) * done / units.n, "Compiling the mod's code...");
+        while (ok && nrun < jobs && next < units.n) {
+            p = start_compile(&t, &units.u[next]);
+            if (!p) { snprintf(why, why_size, "the compiler didn't start"); ok = false; break; }
+            run[nrun].p = p, run[nrun++].unit = next++;
+        }
+        for (int k = 0; k < nrun; k++) {
+            r = finished(run[k].p);
+            if (r < 0) continue;
+            Unit *u = &units.u[run[k].unit];
+            remove(u->obj);
+            done++;
+            if (r != 0) {
+                char what[1300];
+                snprintf(what, sizeof what, "compiling %s", u->src);
+                snprintf(why, why_size, "the mod's code didn't compile");
+                helper_failed(what, r, u->log, why, why_size);
+                log_dump_tail(u->log);
+                ok = false;
+            } else if (plat_rename(u->tmp, u->obj)) {
+                snprintf(why, why_size, "a compiled file of the mod couldn't be saved");
+                ok = false;
+            }
+            run[k--] = run[--nrun];
+        }
+        sleep_ms(20);
+    }
+    for (int k = 0; k < nrun; k++) stop(run[k].p);
+
+    // 3. link
+    if (ok) {
+        MOD_PROGRESS(0.97, "Finishing...");
+        char tmp[1200], log[1200];
+        snprintf(tmp, sizeof tmp, "%s.tmp", out_dll);
+        snprintf(log, sizeof log, "%s" SEP "link.log", work);
+        p = start_link(&t, &units, work, tmp, log);
+        r = p ? wait_proc(p) : 255;
+        remove(out_dll);
+        if (r != 0) {
+            snprintf(why, why_size, "the mod's code didn't link");
+            helper_failed("linking (mod)", r, log, why, why_size);
+            ok = false;
+        } else if (plat_rename(tmp, out_dll) || !(f = fopen(idpath, "wb"))) {
+            snprintf(why, why_size, "the mod's library couldn't be saved");
+            ok = false;
+        } else {
+            fprintf(f, "%s\n", id);
+            fclose(f);
+        }
+    }
+    if (ok) MOD_PROGRESS(1, "Finishing...");
+    if (ok) plat_remove_tree(work);  // (its C and objects: nothing reuses them; a failure's stay, with their logs)
+#undef MOD_PROGRESS
+    LOG("[modbuild] %s: %s, %d files, %.0fs\n", nso, ok ? "done" : !strcmp(why, "cancelled") ? "cancelled" : "failed",
+        units.n, (double)(plat_now_ns() - t0) / 1e9);
+    free(units.u);
     return ok;
 }

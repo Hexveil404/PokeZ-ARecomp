@@ -9,8 +9,10 @@
 
 // Unused platform/IPC entry points from the included kernel translation unit.
 // Abort if a test accidentally leaves the synchronization code under test.
-Module g_modules[4];
+Module g_modules[6];
 int g_nmodules;
+Module g_rtld;
+void hooks_capture(void) { abort(); }  // (code mods: their views at svcUnmapProcessMemory)
 uint32_t vi_vsync_handle(void) { abort(); }
 void rt_fatal_trace(void) { abort(); }
 void rt_fatal_msg(const char *fmt, ...) { (void)fmt; abort(); }

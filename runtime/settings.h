@@ -155,6 +155,9 @@ typedef struct {
     // same file (folders not listed come after, by name); off: not loaded. Edited on the start screen's Mods page.
     char mods_order[1024];
     char mods_off[1024];
+    // the mods whose code runs (exefs: subsdk programs, .pchtxt patches - runtime/codemods.c, runtime/gamebuild.c):
+    // off unless listed, each turned on after a warning on the Mods page (LARECOMP_CODE_MODS=1: all of them)
+    char mods_code_on[1024];
 } Settings;
 
 
@@ -168,6 +171,7 @@ bool settings_ui_portuguese(void);
 #define UI_TR(en, pt) (settings_ui_portuguese() ? (pt) : (en))
 // name is one of list's '|'-separated entries
 bool settings_list_has(const char *list, const char *name);
+bool settings_mod_code_on(const char *name);  // mods/<name>'s code runs (Mods page; LARECOMP_CODE_MODS=1: all)
 
 extern Settings g_settings;
 

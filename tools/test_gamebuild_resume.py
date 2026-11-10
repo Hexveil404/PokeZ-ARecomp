@@ -46,6 +46,13 @@ extern "C" void plat_proc_kill(intptr_t p) { kill_cb(p); }
 extern "C" void rt_launcher_log(const char *fmt, ...) { va_list a; va_start(a, fmt); vfprintf(stderr, fmt, a); va_end(a); }
 extern "C" void plat_mem_free(uint64_t *phys, uint64_t *commit) { *phys = *commit = 0; }
 extern "C" bool gamelib_old_cpu(void) { return false; }
+// (and reads the Mods page's code switches: no mod's code is on here)
+extern "C" void settings_load(void) {}
+extern "C" bool settings_mod_code_on(const char *) { return false; }
+// (and the code mods' builds: modbuild_run)
+extern "C" int plat_cpu_count(void) { return (int)std::thread::hardware_concurrency(); }
+extern "C" bool plat_remove_tree(const char *d) { std::error_code e; std::filesystem::remove_all(std::filesystem::u8path(d), e); return !e; }
+extern "C" int plat_rename(const char *a, const char *b) { std::error_code e; std::filesystem::rename(std::filesystem::u8path(a), std::filesystem::u8path(b), e); return e ? -1 : 0; }
 '''
 GENERATOR = r'''
 import pathlib,sys,time
@@ -85,7 +92,7 @@ with tempfile.TemporaryDirectory() as temporary:
         subprocess.run(cc+[str(stub),'-shared','-Wl,--out-implib,'+str(resources/'build/lasrecomp.dll.a'),
                            '-o',str(tmp/'stub.dll')],check=True)
     objects=[]
-    for source in ('runtime/gamebuild.c',):
+    for source in ('runtime/gamebuild.c', 'runtime/services/mod_layout.c'):
         obj=tmp/(Path(source).stem+'.o'); objects.append(str(obj))
         subprocess.run(cc+['-std=gnu11','-fPIC','-Iruntime','-DGAMELIB_ID="cache-fixture"',
                            '-DGAMELIB_CFLAGS="-O0 -fPIC"','-DGAMELIB_SHARED="-shared"',

@@ -71,6 +71,8 @@ bool rt_game_data_bad;
 int rt_mods_on;
 void settings_load(void) {}
 bool settings_list_has(const char *list, const char *name) { return false; }
+bool settings_mod_code_on(const char *name) { return false; }  // (and where its romfs / exefs is: the real code)
+#include "../runtime/services/mod_layout.c"
 const char *pl_prompt_set(void) { return NULL; }
 #ifdef _WIN32  /* (as runtime/platform/windows.c: shared for delete, so an open save can be renamed over - the autosave fix) */
 #include <windows.h>

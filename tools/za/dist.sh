@@ -65,7 +65,7 @@ cp third_party/ooz/COPYING "$D/zaprompts/COPYING-GPLv3.txt"
 cp third_party/ooz/README.ZARecomp.md "$D/zaprompts/README-ooz.md"
 cp -R build/zig-slim "$D/zig"
 cp build/zaimport/zaimport.exe "$D/zaimport/"
-cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
+cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h runtime/modlib.h tools/gamelib_entry.c tools/modlib_entry.c runtime/hle/hle_symbols.txt \
     "$D/gamelib-src/"
 cp docs/icon/icon_1024.png "$D/icon.png"
 cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$D/"

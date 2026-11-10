@@ -13,6 +13,7 @@
 #include "rando.h"
 #include "platform.h"
 #include "gamebuild.h"  // (gamelib_old_cpu)
+#include "modlib.h"
 #include <stdio.h>
 #if defined(__x86_64__) || defined(__i386__)
 #include <cpuid.h>
@@ -93,7 +94,20 @@ static void module_init(Cpu *c, Module *m) {
 }
 
 static void rtld_init_sdk(Cpu *c) { module_init(c, &g_modules[1]); }
-static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
+// the code mods' start, then main's: on the console rtld's callInitializers (nn::init::Start's last callback, after
+// nninitStartup) runs the subsdk modules' initializers before main's. Here in the SDK's callback first they ran before
+// the heap and the applet: the Native Mouse mod's nn::hid::InitializeMouse took ARUID 0 there, and the game's
+// InitializeNpad then aborted on the other one (2202-1045). What the mods write into the game's code during their
+// start becomes hooks right after (runtime/hle/codehooks.c), before main's own start.
+static void rtld_init_main(Cpu *c) {
+    if (g_nmodules > 2) {
+        extern void hooks_capture(void), loader_ro_modules(void);
+        loader_ro_modules();  // (rtld's module list, which they walk: loader.c; after the SDK's start, which clears it)
+        for (int i = 2; i < g_nmodules; i++) module_init(c, &g_modules[i]);
+        hooks_capture();
+    }
+    module_init(c, &g_modules[0]);
+}
 static void rtld_fini(Cpu *c) { (void)c; LOG("nnMain returned\n"); }
 
 // Claim the guest address range before anything else can map there. The host allocator places
@@ -216,8 +230,12 @@ static void boot(const char *root) {
     loader_load(exefs);
     rando_boot();  // the chosen seed's data patches go into the freshly loaded module
     { extern void settings_load(void); settings_load(); }
+    extern void codemods_load(const char *game_dir), codemods_tables(void);
+    codemods_load(root);  // (code mods: their NSOs after main and sdk - runtime/codemods.c)
+    if (g_nmodules > 2) loader_map_rtld(exefs);  // (exlaunch mods find the game as the 2nd module: loader.c)
     kernel_init();
     dispatch_init();
+    codemods_tables();
 
     uint32_t stack_size = 0x100000;
     int prio = 44;
@@ -296,14 +314,26 @@ int main(int argc, char **argv) {
     bool no_launcher = nl && *nl && strcmp(nl, "0");
     bool skip_launcher = no_launcher || getenv("LARECOMP_INPUT");  // tests boot straight in
     if (getenv("LARECOMP_FORCE_LAUNCHER")) skip_launcher = false;  // (test: the start screen, then the scripted input)
-    static char arg_root[1024];
+    static char arg_root[1024], build_mod[1024];
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--play")) skip_launcher = true;
+        // (dev: --build-mod <a code mod's NSO>: its library built - runtime/gamebuild.c modbuild_run - then exit)
+        else if (!strcmp(argv[i], "--build-mod") && i + 1 < argc) {
+            if (!realpath(argv[++i], build_mod)) snprintf(build_mod, sizeof build_mod, "%s", argv[i]);
+        }
         else if (argv[i][0] != '-' && !realpath(argv[i], arg_root)) root = argv[i];  // (relative to where we started)
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
     launcher_log_open();
+    if (build_mod[0]) {
+        char mp[1100], dll[1100], why[512] = "";
+        snprintf(mp, sizeof mp, "%s/exefs/main", root);
+        uint64_t size = nso_image_size(build_mod), base = mod_base(nso_image_size(mp), 0, &size);
+        bool ok = size && base && modbuild_run(root, build_mod, base, dll, sizeof dll, NULL, why, sizeof why);
+        fprintf(stderr, ok ? "build-mod: %s\n" : "build-mod failed: %s\n", ok ? dll : why[0] ? why : "no room for it");
+        exit(ok ? 0 : 1);
+    }
     {   // Pokémon Legends Z-A (exefs/main build 7222e13ecf6adb32: 1.0.0, 8a1c86c437394b69: 2.0.0,
         // b1f12fd919eae86a: 2.0.2): the start screen sets its files up from the player's packages (zaimport). Started
         // without a log redirect (a double click): the log goes to logs/play.log (the previous one: logs/play-anterior.log).

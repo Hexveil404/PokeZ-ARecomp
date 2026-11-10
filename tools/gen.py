@@ -31,6 +31,13 @@ def sext26(w):
     return v - 0x04000000 if v & 0x02000000 else v
 
 
+# Every lifted function: a 5-byte NOP at its entry (clang emits one `nopl`) that a code mod's hook at the function's
+# start becomes a jump in (runtime/hle/codehooks.c; ENTRY_PAD in cpu.h), and never inlined into its callers - a hook
+# would miss the inlined copies (clang inlined 10-25% of same-file direct calls at -O1). No cost measured: the recorded
+# Lumiose walk 59.07 -> 59.06 fps (2026-11-06).
+FN_ATTR = '__attribute__((noinline, patchable_function_entry(5, 0)))'
+
+
 def fname(a):
     return f'f_{a:x}'
 
@@ -102,6 +109,12 @@ class Module:
         for off, typ, sym, add in n.relocs:
             if typ == R_AARCH64_RELATIVE:
                 starts.add(b + add)
+        # what rtld calls: the entry (text start) and DT_INIT / DT_FINI - nothing else reaches a code mod's (Lumiose
+        # Online's DT_INIT: no bl, no relocation, no eh_frame)
+        starts.add(b + n.text[0])
+        for tag in (12, 13):  # DT_INIT, DT_FINI
+            if tag in n.dyn:
+                starts.add(b + n.dyn[tag])
         starts = sorted(a for a in starts if self.in_text(a))
         return starts
 
@@ -205,7 +218,11 @@ class Module:
                 a2 = entry
                 while a2 < start:
                     w2 = self.word(a2)
-                    if (w2 & 0x1F000000) == 0x10000000 or (w2 & 0xFF800000) == 0x91000000:
+                    # (and 64-bit register moves, MOV xD, xS: a table base kept in another register first -
+                    # Lumiose Online's vfprintf, `mov x26, x21` long before its `ldrh w1, [x26, w1, uxtw #1]`:
+                    # every case read as 0 without it)
+                    if (w2 & 0x1F000000) == 0x10000000 or (w2 & 0xFF800000) == 0x91000000 or \
+                            (w2 & 0xFFE0FFE0) == 0xAA0003E0:
                         mu.emu_start(a2, 0, count=1)
                     a2 += 4
                 if set_at != start and not step_to(start, set_at):
@@ -313,7 +330,11 @@ class Module:
                 a2 = entry
                 while a2 < start:
                     w2 = self.word(a2)
-                    if (w2 & 0x1F000000) == 0x10000000 or (w2 & 0xFF800000) == 0x91000000:
+                    # (and 64-bit register moves, MOV xD, xS: a table base kept in another register first -
+                    # Lumiose Online's vfprintf, `mov x26, x21` long before its `ldrh w1, [x26, w1, uxtw #1]`:
+                    # every case read as 0 without it)
+                    if (w2 & 0x1F000000) == 0x10000000 or (w2 & 0xFF800000) == 0x91000000 or \
+                            (w2 & 0xFFE0FFE0) == 0xAA0003E0:
                         mu.emu_start(a2, 0, count=1)
                     a2 += 4
                 # (a load before the cmp may fault - a pointer chain through memory we don't have, Arceus's
@@ -414,7 +435,7 @@ class Module:
         raise Unsupported(k)
 
     def emit_function(self, entry, end, labels, tables, hle):
-        out = [f'void {fname(entry)}(Cpu *c) {{']
+        out = [f'{FN_ATTR} void {fname(entry)}(Cpu *c) {{']
         if entry in hle:
             out.append(f'    {sanitize(hle[entry])}(c);')
             out.append('}')
@@ -595,6 +616,40 @@ def write_if_changed(path, text):
         f.write(text)
 
 
+def apply_pchtxt(m, paths):
+    """A mod's .pchtxt code patches (tools/pchtxt.py) written into the image before anything is read from it: the
+    lifted code is the patched code. A patch for another build is skipped; a word one of this generator's own PATCHES
+    replaces stays as it is (they check the instruction they replace: the game patch wins)."""
+    import pchtxt
+    own = {a - m.base for a in PATCHES}
+    for path in paths:
+        try:  # (a file this can't read is skipped, as one for another build: the rest of the game still builds)
+            bid, patches = pchtxt.parse_pchtxt(open(path, encoding='utf-8', errors='replace').read())
+        except (OSError, ValueError) as e:
+            print(f'{m.name}: {path}: {e}: skipped', file=sys.stderr)
+            continue
+        mine = m.nso.build_id.lower()
+        if not bid or not (bid.startswith(mine) or mine.startswith(bid)):
+            print(f'{m.name}: {path}: for build {bid[:16] or "?"}, not this one ({mine[:16]}): skipped', file=sys.stderr)
+            continue
+        keep = []
+        for off, data in patches:
+            clash = [o for o in range(off & ~3, off + len(data), 4) if o in own]
+            if clash:
+                print(f'{m.name}: {path}: {off:#x} overlaps a game patch at {m.base + clash[0]:#x}: skipped', file=sys.stderr)
+            else:
+                keep.append((off, data))
+        try:
+            n = pchtxt.apply(m.nso.image, keep)
+        except ValueError as e:
+            print(f'{m.name}: {path}: {e}: skipped', file=sys.stderr)
+            continue
+        print(f'{m.name}: {path}: {len(keep)} patch(es), {n} bytes changed')
+    t = m.nso.text
+    m.words = struct.unpack(f'<{t[1] // 4}I', bytes(m.nso.image[t[0]:t[0] + t[1]]))
+    m.setjmp_stubs = m._import_stubs({'setjmp', '_setjmp'})
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('name')
@@ -602,6 +657,8 @@ def main():
     ap.add_argument('base', type=lambda s: int(s, 0))
     ap.add_argument('outdir')
     ap.add_argument('--hle')
+    ap.add_argument('--main', help="the game's exefs/main (default: next to the NSO): a code mod's NSO lives elsewhere")
+    ap.add_argument('--patch', action='append', default=[], help="a mod's .pchtxt to apply first (repeatable)")
     ap.add_argument('--chunk', type=int, default=1500)  # functions per file at most
     ap.add_argument('--chunk-bytes', type=int, default=1500000)  # and about this much C (even compile times)
     ap.add_argument('--big-fn', type=int, default=100000)  # bytes of C from which a function gets its own file
@@ -613,7 +670,7 @@ def main():
     t0 = time.time()
     m = Module(args.name, args.nso, args.base, args.simd)
     global HOOKS, PATCHES
-    main_build = Nso(os.path.join(os.path.dirname(args.nso), 'main')).build_id[:16]
+    main_build = Nso(args.main or os.path.join(os.path.dirname(args.nso), 'main')).build_id[:16]
     if main_build in ZA_BUILDS:  # Pokémon Legends Z-A: its own patches, none of Link's Awakening's (nor its randomizer's)
         RANDO_CODE.clear()
         if args.name == 'main':
@@ -629,6 +686,8 @@ def main():
         HOOKS, PATCHES = patches.HOOKS, patches.PATCHES
         label, build_id = game_addresses.VERSIONS[version]
         print(f'{args.name}: game version {label} (build {build_id[:16]}), address table {version}', file=sys.stderr)
+    if args.patch:
+        apply_pchtxt(m, args.patch)
     starts = m.boundaries()
     hle = {}
     if args.hle and os.path.exists(args.hle):
@@ -660,6 +719,15 @@ def main():
             table_base = any(m.words[j] == 0xD61F0000 | rd << 5 or
                              (m.words[j] & 0xFFE0FC00) == 0x8B000800 and m.words[j] & 31 == rd and
                              (m.words[j] >> 5) & 31 == rd for j in near)
+            # (also an ADD into another register, shifted or extended by 2 - `add x1, x2, w1, sxth #2` after a
+            # halfword table load, Lumiose Online's vfprintf - when a `br` of its result follows)
+            for j in near:
+                x = m.words[j]
+                if table_base or (x >> 5) & 31 != rd:
+                    continue
+                if ((x & 0xFFE0FC00) == 0x8B000800 or ((x & 0xFFE00000) == 0x8B200000 and (x >> 10) & 7 == 2)) and \
+                        any(m.words[k] == 0xD61F0000 | (x & 31) << 5 for k in range(j + 1, min(j + 4, len(m.words)))):
+                    table_base = True
             if m.in_text(pc + imm) and not table_base:
                 start_set.add(pc + imm)
         elif (w & 0x9F000000) == 0x90000000:  # ADRP

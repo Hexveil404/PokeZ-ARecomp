@@ -74,7 +74,9 @@ FLAGS=$(make -s --eval='pv: ; @echo $(GENFLAGS)' GENOPT="$GENOPT" pv)
 HOT=$(sed -n '/HOT_GIANTS\[\] = {/,/};/p' runtime/gamebuild.c | grep -o 'f_[0-9a-f]*' | sort -u)
 giants=()
 for f in generated/main/*.c generated/sdk/*.c; do
-    name=$(awk '/^void f_.*\(Cpu \*c\) \{/ {n++; s=$2} /^L_/ {l++} END {if (n == 1 && l > 1000) {sub(/\(.*/, "", s); print s}}' "$f")
+    # (definitions start with gen.py's FN_ATTR, older ones with "void")
+    name=$(awk '/^(__attribute__.*\) )?void f_.*\(Cpu \*c\) \{/ {n++; match($0, /f_[0-9a-f]+/); s=substr($0, RSTART, RLENGTH)}
+        /^L_/ {l++} END {if (n == 1 && l > 1000) print s}' "$f")
     [ -n "$name" ] && ! grep -qx "$name" <<<"$HOT" && giants+=("$f")
 done
 echo "build-linux: ${#giants[@]} giant functions at -O0"

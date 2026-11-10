@@ -23,7 +23,8 @@
 
 // GAMELIB_ID (-D, from the Makefile): a hash of the generator and the headers the game code is compiled against. A
 // library built with another one is rebuilt, not loaded. A library's own id (its .id file, GameLibTables.id) is
-// GAMELIB_ID-<the first 16 hex digits of the game's main build ID>: switching game versions rebuilds it too.
+// GAMELIB_ID-<the first 16 hex digits of the game's main build ID>[-p<the mods' .pchtxt patches' hash>]: switching game
+// versions, or turning a code patch on or off, rebuilds it too.
 #ifndef GAMELIB_ID
 #define GAMELIB_ID "dev"
 #endif
@@ -31,6 +32,11 @@
 #define GAMELIB_FULL_ID_SIZE 96
 
 bool gamelib_old_cpu(void);  // runtime/gamelib.c: no AVX2 / FMA / BMI2 - the game code is built for x86-64-v2
+// runtime/gamebuild.c: the on mods' .pchtxt code patches for this main (sorted paths), and their hash (8 hex digits;
+// false: none). The library id carries the hash: a patch turned on or off builds the game code again.
+#define MAX_PATCH_FILES 32
+int gamelib_patch_files(const char *game_dir, char (*out)[1100], int max);
+bool gamelib_patch_hash(const char *game_dir, char out[9]);
 
 // The id a library for the game files in game_dir has (GAMELIB_ID[-v2]-<build ID>); false when exefs/main is unreadable.
 static inline bool gamelib_full_id(const char *game_dir, char *out, size_t size) {
@@ -44,6 +50,8 @@ static inline bool gamelib_full_id(const char *game_dir, char *out, size_t size)
     if (!ok) return false;
     int n = snprintf(out, size, "%s%s-", GAMELIB_ID, gamelib_old_cpu() ? "-v2" : "");  // (an x86-64-v2 build: its own)
     for (int i = 0; i < 8 && n + 2 < (int)size; i++) n += snprintf(out + n, size - n, "%02X", hdr[0x40 + i]);
+    char patch[9];
+    if (gamelib_patch_hash(game_dir, patch)) snprintf(out + n, size - n, "-p%s", patch);  // (mods' .pchtxt patches)
     return true;
 }
 

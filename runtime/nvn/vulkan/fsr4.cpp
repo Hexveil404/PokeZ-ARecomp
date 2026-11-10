@@ -17,9 +17,13 @@
 #include "../../settings.h"
 
 bool vk_fsr4_wanted(void) {
+#if !defined(__linux__)
+    return false;  // (the provider path below is Linux-only; the Windows menu keeps FSR 3.1/FSR 2)
+#else
     const char *e = getenv("LARECOMP_FSR4");
     if (e && *e) return atoi(e) != 0;
     return g_settings.taa == TAA_FSR4;
+#endif
 }
 
 #if defined(__linux__)

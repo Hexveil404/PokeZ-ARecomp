@@ -686,7 +686,7 @@ static void prompt_patch(void) {
     char path[128];
     snprintf(path, sizeof path, "textures/prompts/%s/romfs.patch", set);
     FILE *f = fopen(path, "rb");
-    if (!f) return;
+    if (!f) { LOG("[fs] button prompts: no %s (the start screen makes it: the game's own icon fonts)\n", path); return; }
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);

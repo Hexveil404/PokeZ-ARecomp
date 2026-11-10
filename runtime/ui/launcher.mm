@@ -1253,6 +1253,18 @@ static void import_save() {
 static const char *FONT_STD[] = {"nintendo_udsg-r_std_003.bfttf", "nintendo_udsg-r_std_003.ttf",
                                  "nintendo_udsgr_std_003.ttf", "nintendo_udsgr_std_003.bfttf"};
 static const char *FONT_EXT[] = {"nintendo_ext_003.bfttf", "nintendo_ext_003.ttf"};
+// the console's other shared fonts, which pl.c also loads from fonts/: Chinese (Simplified, its Ext, Traditional) and
+// Korean - a game played in those languages draws its text with them (#227)
+static const char *FONT_CJK[] = {"nintendo_udsg-r_org_zh-cn_003.bfttf", "nintendo_udsg-r_org_zh-cn_003.ttf",
+                                 "nintendo_udsg-r_ext_zh-cn_003.bfttf", "nintendo_udsg-r_ext_zh-cn_003.ttf",
+                                 "nintendo_udjxh-db_zh-tw_003.bfttf",   "nintendo_udjxh-db_zh-tw_003.ttf",
+                                 "nintendo_udsg-r_ko_003.bfttf",        "nintendo_udsg-r_ko_003.ttf"};
+static bool font_known(const std::string &low) {
+    for (auto n : FONT_STD) if (low == n) return true;
+    for (auto n : FONT_EXT) if (low == n) return true;
+    for (auto n : FONT_CJK) if (low == n) return true;
+    return false;
+}
 static std::vector<std::string> g_font_picks;
 static std::string g_font_msg;
 
@@ -1270,20 +1282,44 @@ static void SDLCALL picked_fonts(void *, const char *const *files, int) {
 }
 
 static void import_fonts() {
+    static bool test_once;  // LARECOMP_LAUNCHER_IMPORT_FONTS=<a file> (test): picked as the dialog would hand it
+    if (!test_once && (test_once = true) && getenv("LARECOMP_LAUNCHER_IMPORT_FONTS")) {
+        const char *one[] = {getenv("LARECOMP_LAUNCHER_IMPORT_FONTS"), NULL};
+        picked_fonts(NULL, one, 0);
+    }
     pthread_mutex_lock(&g_lock);
     std::vector<std::string> picks;
     picks.swap(g_font_picks);
     pthread_mutex_unlock(&g_lock);
     if (picks.empty()) return;
     mkdir("fonts", 0755);
-    int ok = 0, skipped = 0;
+    // Windows hands back paths with '\': the name is after the last of either (#227: every pick was "not recognized").
+    // The other console fonts in a picked file's folder come along too - a firmware's Fonts folder is imported with
+    // one pick, and a many-file pick the dialog cut short still gets them all.
+    std::vector<std::string> todo;
+    std::vector<std::string> names;  // (lower case, one copy each)
+    int skipped = 0;
+    auto take = [&](const std::string &src, bool picked) {
+        size_t cut = src.find_last_of("/\\");
+        std::string low = cut == std::string::npos ? src : src.substr(cut + 1);
+        for (auto &c : low) c = (char)tolower((unsigned char)c);
+        if (!font_known(low)) { skipped += picked; return; }
+        if (std::find(names.begin(), names.end(), low) != names.end()) return;
+        names.push_back(low), todo.push_back(src);
+    };
+    for (auto &src : picks) take(src, true);
     for (auto &src : picks) {
-        std::string base = src.substr(src.find_last_of('/') + 1), low = base;
-        for (auto &c : low) c = (char)tolower(c);
-        bool known = false;
-        for (auto n : FONT_STD) known |= low == n;
-        for (auto n : FONT_EXT) known |= low == n;
-        if (!known) { skipped++; continue; }
+        size_t cut = src.find_last_of("/\\");
+        if (cut == std::string::npos) continue;
+        std::string dir = src.substr(0, cut);
+        if (DIR *d = opendir(dir.c_str())) {
+            while (struct dirent *e = readdir(d)) take(dir + "/" + e->d_name, false);
+            closedir(d);
+        }
+    }
+    int ok = 0;
+    for (size_t k = 0; k < todo.size(); k++) {
+        const std::string &src = todo[k], &low = names[k];
         FILE *in = fopen(src.c_str(), "rb"), *out = fopen(("fonts/" + low).c_str(), "wb");
         if (in && out) {
             char buf[65536];
@@ -1301,6 +1337,7 @@ static void import_fonts() {
 static void remove_fonts() {
     for (auto n : FONT_STD) unlink((std::string("fonts/") + n).c_str());
     for (auto n : FONT_EXT) unlink((std::string("fonts/") + n).c_str());
+    for (auto n : FONT_CJK) unlink((std::string("fonts/") + n).c_str());
     g_font_msg = "Imported fonts removed: the substitute font is used.";
 }
 
@@ -3497,6 +3534,7 @@ extern "C" void launcher_run(const char *root) {
 
             ImGui::Render();
             if (ap_frames && --ap_frames == 0) play = true;  // (test: LARECOMP_LAUNCHER_AUTOPLAY=<n>)
+            import_fonts();  // (a pick lands whichever page is shown: the dialog answers on its own thread)
 #ifdef __APPLE__
             ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cb, enc);
             [enc endEncoding];

@@ -362,6 +362,9 @@ const char *pl_prompt_set(void) {
     bool keys = g_settings.prompts == PROMPTS_KEYBOARD || (g_settings.prompts == PROMPTS_AUTO && !pad && !deck);
     (void)g_bind_pad;  // (each set is made for the bindings: runtime/ui/launcher.mm remakes them when those change)
     set = keys ? "keyboard" : deck ? "steamdeck" : xbox ? "xbox" : ps ? "playstation" : pad ? "nintendo" : NULL;
+    // (one line: which set, from what - #229's "PlayStation icons don't turn on" had no way to tell)
+    LOG("[pl] button prompts: %s (setting %d, controller %s, family %d%s)\n", set ? set : "the game's own",
+        g_settings.prompts, pad ? "connected" : "none", fam, settings_on_steam_deck() ? ", Steam Deck" : "");
     return set;
 }
 

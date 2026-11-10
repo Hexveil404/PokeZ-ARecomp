@@ -43,6 +43,7 @@ extern "C" {
 #include "settings.h"
 #include "input_bind.h"
 #include "xbox_attack_layout.h"
+#include "services/mod_layout.h"
 bool controls_ui_took_back(void);  // ui/controls_ui.mm: B went back a step on Configure inputs
 void input_mouse_release(SDL_Window *w);   // runtime/hle/input.c
 void ui_window_init(void);
@@ -389,10 +390,22 @@ static std::string game_version(const std::string &root) {
     return v ? v : "?";
 }
 
+// (runtime/codemods.c: the code mods turned on whose libraries aren't built yet, and building them)
+extern "C" int codemods_unbuilt(const char *game_dir);
+extern "C" bool codemods_build(const char *game_dir, const GameBuildOpts *o, char *why, size_t why_size);
+static const char *const MOD_CODE_UNBUILT = "Mod code not built yet";
+// (runtime/gamelib.c: the game code loaded in this process isn't the one the on mods' .pchtxt patches need - turned on
+// or off after playing. It can't be swapped here, a loaded library can't be replaced on Windows: a restart builds it)
+extern "C" bool gamelib_stale(const char *game_dir);
+static const char *const MOD_PATCH_RESTART = "Restart to apply the mods' patches";
+
 // "" = ready to play, else what is wrong
 static std::string check_game_files(const std::string &root) {
     std::string why = check_copied_files(root);
+    if (why.empty() && gamelib_stale(root.c_str())) return MOD_PATCH_RESTART;
     if (why.empty() && !gamelib_present(root.c_str())) return "Game code not built yet";
+    // (a code mod turned on: its code is compiled here, with the bar, not in the boot - a minute of a frozen window)
+    if (why.empty() && codemods_unbuilt(root.c_str())) return MOD_CODE_UNBUILT;
     return why;
 }
 
@@ -929,6 +942,7 @@ extern "C" void launcher_prompts_refresh(void) {
 static unsigned long long g_phase_base;
 static std::atomic<float> g_build_frac{-1};  // -1: not building
 static std::atomic<bool> g_cancel_build{false};  // (the Play page's Cancel while compiling)
+static std::atomic<bool> g_mods_only{false};     // (the game code is built: only code mods' libraries to compile)
 static bool build_cancelled(void) { return g_cancel_build.load(); }
 static bool g_copy_skipped;                  // (only the game code to build: the bar is all of that)
 static void setup_progress(uint64_t done, uint64_t) { g_done = g_phase_base + done; }
@@ -948,9 +962,10 @@ static float extract_progress(void) {
 static bool build_game_code(void) {
     int cores = SDL_GetNumLogicalCPUCores(), ram_gb = SDL_GetSystemRAM() / 1024;
     GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1, build_cancelled};
-    char why[256] = "";
+    char why[512] = "";
     g_build_frac = 0;
-    bool ok = gamebuild_run(g_root.c_str(), &o, why, sizeof why);
+    g_mods_only = gamelib_present(g_root.c_str());  // (only a code mod's library to build: the page says so)
+    bool ok = g_mods_only || gamebuild_run(g_root.c_str(), &o, why, sizeof why);
     if (!ok) {
         rt_launcher_log("[launcher] game code: %s\n", why);
         if (g_cancel_build) set_job("Compilation cancelled. Completed files are kept.");
@@ -960,8 +975,25 @@ static bool build_game_code(void) {
                     "If you changed Control flow guard in Exploit protection, set it back to the default and try again. "
                     "If it keeps happening, report it on GitHub.");
         else set_failure(FAIL_BUILD, gamebuild_killed() ? why : "");
+        return false;
     }
-    return ok;
+    if (codemods_unbuilt(g_root.c_str())) {
+        g_build_frac = 0;
+        if (!codemods_build(g_root.c_str(), &o, why, sizeof why)) {
+            rt_launcher_log("[launcher] mod code: %s\n", why);
+            if (g_cancel_build) set_job("Compilation cancelled.");
+            else {
+                std::string mod = why, rest;
+                size_t c = mod.find(": ");
+                if (c != std::string::npos) rest = mod.substr(c + 2), mod = mod.substr(0, c);
+                set_failure(FAIL_BUILD, mod + TR(": this mod's code didn't compile (", ": o código deste mod não compilou (") +
+                                            rest + TR("). Turn its Code switch off on the Mods page to play without it.",
+                                                      "). Desligue o botão Código dele na página Mods para jogar sem ele."));
+            }
+            return false;
+        }
+    }
+    return true;
 }
 
 static void *extract_thread(void *) {
@@ -971,7 +1003,7 @@ static void *extract_thread(void *) {
     pthread_mutex_unlock(&g_lock);
     g_done = 0, g_total = 0, g_phase_base = 0, g_build_frac = -1, g_copy_skipped = false, g_import_mode = false;
     g_fail = 0, g_fail_detail.clear();
-    g_cancel_build = false;
+    g_cancel_build = false, g_mods_only = false;
     std::string exefs, romfs;
     std::vector<std::string> pkgs;
     bool unusable = false;  // (game packages rather than its files)
@@ -1366,7 +1398,7 @@ static std::string fmt_size(unsigned long long n) {
 // the same file), each on unless it's in mods_off. Installed from a downloaded archive (.zip / .rar / .7z, by the
 // system's tar) or a folder: the folder holding a romfs/ (or an arc/ - a romfs without its own folder) in it becomes
 // mods/<name>/romfs. Mods of the game's code (exefs, IPS patches, cheats) are refused: this port has no such layer.
-struct ModEntry { std::string name; bool on; int files; };
+struct ModEntry { std::string name; bool on; int files; bool code, code_on; };  // (code: exefs - runtime/codemods.c)
 static std::vector<ModEntry> g_mods;
 static pthread_mutex_t g_mod_lock = PTHREAD_MUTEX_INITIALIZER;
 static std::string g_mod_pick, g_mod_msg;  // a pick waiting to install; the last install's result
@@ -1374,11 +1406,18 @@ static std::string g_mod_installed;        // its folder name, for the UI thread
 static bool g_mod_failed;
 static std::atomic<bool> g_mod_busy{false}, g_mods_changed{true};
 
+// mods/<name>'s romfs as fs.c finds it (mods/<name>/romfs, or the Switch / Ryujinx layout copied in by hand); "" if none
+static std::string mod_romfs(const std::string &name) {
+    char out[1100];
+    return mod_romfs_dir(("mods/" + name).c_str(), out, sizeof out) ? out : "";
+}
+
 static void mods_reload(void) {
     std::vector<std::string> names;
     if (DIR *d = opendir("mods")) {
         while (struct dirent *e = readdir(d))
-            if (e->d_name[0] != '.' && e->d_name[0] != '_' && is_dir(std::string("mods/") + e->d_name + "/romfs"))
+            if (e->d_name[0] != '.' && e->d_name[0] != '_' &&
+                (!mod_romfs(e->d_name).empty() || mod_has_code((std::string("mods/") + e->d_name).c_str())))  // (any layout: fs.c)
                 names.push_back(e->d_name);
         closedir(d);
     }
@@ -1396,17 +1435,26 @@ static void mods_reload(void) {
     for (auto &n : names)
         if (std::find(ordered.begin(), ordered.end(), n) == ordered.end()) ordered.push_back(n);
     g_mods.clear();
-    for (auto &n : ordered)
-        g_mods.push_back({n, !settings_list_has(g_settings.mods_off, n.c_str()), count_files("mods/" + n + "/romfs")});
+    for (auto &n : ordered) {
+        std::string romfs = mod_romfs(n);
+        g_mods.push_back({n, !settings_list_has(g_settings.mods_off, n.c_str()), romfs.empty() ? 0 : count_files(romfs),
+                          mod_has_code(("mods/" + n).c_str()), settings_list_has(g_settings.mods_code_on, n.c_str())});
+    }
 }
+// (a code mod turned on or off: its .pchtxt patches are part of the game code's id - gamelib_full_id - so whether the
+// game code is built is asked again, and the Play page offers the rebuild)
+static std::atomic<bool> g_recheck_game{false};
 static void mods_store(void) {
-    std::string order, off;
+    g_recheck_game = true;
+    std::string order, off, code;
     for (auto &m : g_mods) {
         order += (order.empty() ? "" : "|") + m.name;
         if (!m.on) off += (off.empty() ? "" : "|") + m.name;
+        if (m.code && m.code_on) code += (code.empty() ? "" : "|") + m.name;
     }
     snprintf(g_settings.mods_order, sizeof g_settings.mods_order, "%s", order.c_str());
     snprintf(g_settings.mods_off, sizeof g_settings.mods_off, "%s", off.c_str());
+    snprintf(g_settings.mods_code_on, sizeof g_settings.mods_code_on, "%s", code.c_str());
     settings_save();
 }
 
@@ -1459,31 +1507,44 @@ static void *mod_install_thread(void *) {
         base = tmp;
     }
     {
-        bool exefs = false;
-        std::string romfs = find_mod_romfs(base, 0, exefs);
-        if (romfs.empty()) {
-            msg = exefs ? TR("This mod changes the game's code (exefs): that kind of mod doesn't work in ZA Recomp.",
-                             "Esse mod mexe no código do jogo (exefs): esse tipo de mod não funciona no ZA Recomp.")
-                        : TR("No romfs folder in it: this doesn't look like a mod of the game's files.",
-                             "Não tem pasta romfs: não parece um mod dos arquivos do jogo.");
+        bool exefs_seen = false;
+        std::string romfs = find_mod_romfs(base, 0, exefs_seen);
+        // its code (exefs: subsdk programs, .pchtxt patches - runtime/codemods.c): next to its romfs, else at the
+        // places fs.c looks (a code-only mod); kept, off until turned on on this page
+        std::string parent = romfs.empty() ? "" : romfs.substr(0, romfs.find_last_of('/')), exefs;
+        char ex[1100];
+        if (!parent.empty() && mod_has_code(parent.c_str()) && mod_exefs_dir(parent.c_str(), ex, sizeof ex)) exefs = ex;
+        if (exefs.empty() && mod_has_code(base.c_str()) && mod_exefs_dir(base.c_str(), ex, sizeof ex)) exefs = ex;
+        if (romfs.empty() && exefs.empty()) {
+            msg = exefs_seen ? TR("Its exefs folder has no code ZA Recomp runs (a subsdk program or a .pchtxt patch).",
+                                  "A pasta exefs dele não tem código que o ZA Recomp rode (um programa subsdk ou um patch .pchtxt).")
+                             : TR("No romfs folder in it: this doesn't look like a mod of the game's files.",
+                                  "Não tem pasta romfs: não parece um mod dos arquivos do jogo.");
             goto done;
         }
-        // the mod's name: the folder around its romfs (as mods come: "<Name>/romfs"), else the file / folder name
-        std::string parent = romfs.substr(0, romfs.find_last_of('/'));
-        if (lower(base_name(romfs)) == "romfs" && parent != base && parent.size() > base.size()) name = safe_name(base_name(parent));
+        // the mod's name: the folder around its romfs or exefs (as mods come: "<Name>/romfs"), else the file / folder name
+        std::string around = romfs.empty() ? exefs : romfs, up = around.substr(0, around.find_last_of('/'));
+        if (base_name(around) != base_name(base) && up != base && up.size() > base.size() &&
+            lower(base_name(up)) != "0100f43008c44000")  // (the Switch layout's title id folder: the archive's name instead)
+            name = safe_name(base_name(up));
         std::string dst = "mods/" + name;
         for (int i = 2; file_exists(dst); i++) dst = "mods/" + name + " (" + std::to_string(i) + ")";
         name = dst.substr(5);
         mkdir(dst.c_str(), 0755);
-        ok = archive ? plat_rename(romfs.c_str(), (dst + "/romfs").c_str()) == 0 : copy_save_tree(romfs, dst + "/romfs");
+        ok = true;
+        if (!romfs.empty())
+            ok = archive ? plat_rename(romfs.c_str(), (dst + "/romfs").c_str()) == 0 : copy_save_tree(romfs, dst + "/romfs");
+        if (ok && !exefs.empty())
+            ok = archive ? plat_rename(exefs.c_str(), (dst + "/exefs").c_str()) == 0 : copy_save_tree(exefs, dst + "/exefs");
         if (!ok) {
             plat_remove_tree(dst.c_str());
             msg = TR("The mod couldn't be copied into the mods folder (disk full?).",
                      "Não deu para copiar o mod para a pasta de mods (disco cheio?).");
             goto done;
         }
-        msg = std::string(TR("Installed: ", "Instalado: ")) + name;
-        rt_launcher_log("[launcher] mod installed: %s -> %s\n", pick.c_str(), dst.c_str());
+        msg = std::string(TR("Installed: ", "Instalado: ")) + name +
+              (exefs.empty() ? "" : TR(" (its code is off: turn it on in the list)", " (o código dele está desligado: ligue na lista)"));
+        rt_launcher_log("[launcher] mod installed: %s -> %s%s\n", pick.c_str(), dst.c_str(), exefs.empty() ? "" : " (with code)");
     }
 done:
     if (archive) plat_remove_tree(tmp.c_str());
@@ -2569,6 +2630,7 @@ extern "C" void launcher_run(const char *root) {
             mods_reload();
             if (!fresh.empty()) mods_store();
         }
+        if (g_recheck_game.exchange(false)) status = check_game_files(g_root);
         pthread_mutex_lock(&g_lock);
         bool busy = g_busy;
         pthread_mutex_unlock(&g_lock);
@@ -2762,19 +2824,27 @@ extern "C" void launcher_run(const char *root) {
                     float f = test_busy ? 0.62f : extract_progress();
                     bool building = g_build_frac >= 0, icons = job.find("button icons") != std::string::npos;
                     int step = icons ? 2 : building ? 1 : 0;
-                    page_title(dl, x, 104, TR("FIRST TIME · ONLY ONCE", "PRIMEIRA VEZ · SÓ ACONTECE UMA VEZ"),
-                               TR("Getting the game ready", "Preparando o jogo"));
-                    text(dl, F_BODY, 16, x, 196, C_SOFT, TR("Your game files are read and the game's code is compiled for "
-                                                            "your processor. You can leave this window open and do "
-                                                            "something else.", "Os seus arquivos do jogo são lidos e o "
-                                                            "código do jogo é compilado para o seu processador. Pode "
-                                                            "deixar esta janela aberta e fazer outra coisa."), w);
+                    bool mods = g_mods_only;  // (only a code mod's library: its own words, same steps)
+                    page_title(dl, x, 104, mods ? TR("A CODE MOD · ONLY ONCE", "UM MOD DE CÓDIGO · SÓ UMA VEZ")
+                                                : TR("FIRST TIME · ONLY ONCE", "PRIMEIRA VEZ · SÓ ACONTECE UMA VEZ"),
+                               mods ? TR("Getting the mod ready", "Preparando o mod") : TR("Getting the game ready", "Preparando o jogo"));
+                    text(dl, F_BODY, 16, x, 196, C_SOFT,
+                         mods ? TR("The code mod you turned on is compiled for your processor, once (about a minute "
+                                   "per mod). Turning it off and on again later doesn't compile it again.",
+                                   "O mod de código que você ativou é compilado para o seu processador, uma vez (cerca de "
+                                   "um minuto por mod). Desligar e ligar de novo depois não compila de novo.")
+                              : TR("Your game files are read and the game's code is compiled for "
+                                   "your processor. You can leave this window open and do "
+                                   "something else.", "Os seus arquivos do jogo são lidos e o "
+                                   "código do jogo é compilado para o seu processador. Pode "
+                                   "deixar esta janela aberta e fazer outra coisa."), w);
                     float cy = 262, ch = 230;
                     panel(dl, x, cy, w, ch);
                     char pct[16];
                     snprintf(pct, sizeof pct, "%d%%", (int)(f * 100));
                     ImVec2 ps = text(dl, F_H2, 30, x + 24, cy + 16, C_GOLD_HI, pct);
                     const char *now_t = step == 0 ? TR("Reading your game files", "Lendo os seus arquivos do jogo")
+                                      : step == 1 && mods ? TR("Compiling the mod's code", "Compilando o código do mod")
                                       : step == 1 ? TR("Compiling the game's code", "Compilando o código do jogo")
                                                   : TR("Drawing the button icons", "Desenhando os ícones dos botões");
                     text(dl, F_BODY, 15, x + 34 + ps.x, cy + 16 + ps.y - text_size(F_BODY, 15, now_t).y - 4, C_SOFT, now_t);
@@ -2783,7 +2853,8 @@ extern "C" void launcher_run(const char *root) {
                     if (f > 0) dl->AddRectFilledMultiColor(P(x + 24, by), P(x + 24 + (w - 48) * f, by + 12), C_TEAL, C_GOLD,
                                                            C_GOLD, C_TEAL);
                     const char *steps[3] = {TR("Read your game files", "Ler os seus arquivos do jogo"),
-                                            TR("Compile the game's code (the longest part)", "Compilar o código do jogo (a parte mais demorada)"),
+                                            mods ? TR("Compile the mod's code", "Compilar o código do mod")
+                                                 : TR("Compile the game's code (the longest part)", "Compilar o código do jogo (a parte mais demorada)"),
                                             TR("Draw the button icons", "Desenhar os ícones dos botões")};
                     for (int i = 0; i < 3; i++) {
                         float ly = by + 30 + i * 34;
@@ -2798,17 +2869,36 @@ extern "C" void launcher_run(const char *root) {
                         text(dl, F_BODY, 15, x + 56, ly, c, steps[i]);
                     }
                     button("##play_wait", TR("PLAY", "JOGAR"), x, cy + ch + 26, 200, 60, BTN_PRIMARY, false, IC_PLAY, F_BTN, 24);
-                    text(dl, F_BODY, 14, x + 220, cy + ch + 46, C_MUTED,
-                         TR("After an update only what changed is compiled again.",
-                            "Depois de atualizações, só o que mudou é compilado de novo."));
+                    if (!mods)
+                        text(dl, F_BODY, 14, x + 220, cy + ch + 46, C_MUTED,
+                             TR("After an update only what changed is compiled again.",
+                                "Depois de atualizações, só o que mudou é compilado de novo."));
                     bar = {C_GOLD, TR("Setting up the game...", "Preparando o jogo...")};
                 } else if (!ready || g_changing_folder) {
                     // ---- not set up (or choosing another dump): the folder with the dump + keys, then set up
                     bool rebuild = !ready && src.empty() && check_copied_files(g_root).empty();  // (an update: new code)
-                    page_title(dl, x, 104, rebuild ? TR("AFTER AN UPDATE", "DEPOIS DE UMA ATUALIZAÇÃO") : TR("SET UP", "CONFIGURAÇÃO"),
-                               rebuild ? TR("The game code needs a rebuild", "O código do jogo precisa ser recompilado")
-                                       : TR("Let's set the game up", "Vamos preparar o jogo"));
-                    const char *what = rebuild
+                    bool mod_code = rebuild && status == MOD_CODE_UNBUILT;  // (a code mod turned on: its code only)
+                    bool mod_restart = rebuild && status == MOD_PATCH_RESTART;  // (a patch set changed after playing)
+                    page_title(dl, x, 104, mod_code || mod_restart ? TR("A CODE MOD", "UM MOD DE CÓDIGO")
+                                           : rebuild ? TR("AFTER AN UPDATE", "DEPOIS DE UMA ATUALIZAÇÃO") : TR("SET UP", "CONFIGURAÇÃO"),
+                               mod_restart ? TR("ZA Recomp needs a restart", "O ZA Recomp precisa reiniciar")
+                               : mod_code ? TR("A mod's code needs compiling", "O código de um mod precisa ser compilado")
+                               : rebuild ? TR("The game code needs a rebuild", "O código do jogo precisa ser recompilado")
+                                         : TR("Let's set the game up", "Vamos preparar o jogo"));
+                    const char *what = mod_restart
+                        ? TR("You turned a mod's code patches on or off after playing. The game code is compiled again "
+                             "with them, and that needs a fresh start of ZA Recomp: restart, then compile.",
+                             "Você ativou ou desativou os patches de código de um mod depois de jogar. O código do jogo é "
+                             "compilado de novo com eles, e isso precisa que o ZA Recomp comece de novo: reinicie, e então "
+                             "compile.")
+                        : mod_code
+                        ? TR("You turned on a code mod on the Mods page. Its code is compiled for your processor once "
+                             "(about a minute per mod), then the game starts with it. To play without it, turn its Code "
+                             "switch off.",
+                             "Você ativou um mod de código na página Mods. O código dele é compilado para o seu processador "
+                             "uma vez (cerca de um minuto por mod), e o jogo começa com ele. Para jogar sem ele, desligue "
+                             "o botão Código dele.")
+                        : rebuild
                         ? TR("This version of ZA Recomp builds the game's code a little differently. Your game files "
                              "are already here: only the code is compiled again (a few minutes).",
                              "Esta versão do ZA Recomp compila o código do jogo de um jeito um pouco diferente. Os seus "
@@ -2839,7 +2929,15 @@ extern "C" void launcher_run(const char *root) {
                         ty += 84;
                     }
                     bool can = rebuild || !src.empty();
-                    if (button("##setup", rebuild ? TR("Compile now", "Compilar agora") : TR("Set up the game", "Preparar o jogo"),
+                    if (mod_restart) {
+                        if (button("##restart", TR("Restart now", "Reiniciar agora"), x, ty, 0, 54, BTN_PRIMARY, true, IC_PLAY,
+                                   F_LABEL, 17, true)) {
+#ifdef _WIN32
+                            if (plat_relaunch()) exit(0);
+#endif
+                            rt_paths_restart();
+                        }
+                    } else if (button("##setup", rebuild ? TR("Compile now", "Compilar agora") : TR("Set up the game", "Preparar o jogo"),
                                x, ty, 0, 54, BTN_PRIMARY, can, IC_PLAY, F_LABEL, 17, true)) {
                         pthread_mutex_lock(&g_lock);
                         g_busy = true;
@@ -2862,8 +2960,9 @@ extern "C" void launcher_run(const char *root) {
                         text(dl, F_BODY, 14, x + 24, ty + 42, C_SOFT, hint.c_str(), w - 48);
                     }
                     bar = failed && g_fail ? Status{C_RED, fail_head(g_fail, g_pt)}
-                        : Status{C_GOLD, rebuild ? TR("The game code needs a rebuild", "O código do jogo precisa ser recompilado")
-                                                 : TR("Set up the game files to play", "Prepare os arquivos do jogo para jogar")};
+                        : Status{C_GOLD, mod_code ? TR("A mod's code needs compiling", "O código de um mod precisa ser compilado")
+                                         : rebuild ? TR("The game code needs a rebuild", "O código do jogo precisa ser recompilado")
+                                                   : TR("Set up the game files to play", "Prepare os arquivos do jogo para jogar")};
                 } else {
                     // ---- ready
                     page_title(dl, x, 104, "POKÉMON LEGENDS: Z-A", TR("Ready to play", "Pronto para jogar"));
@@ -2898,8 +2997,8 @@ extern "C" void launcher_run(const char *root) {
                     if (g_settings.video_rec == VREC_ASK && g_video_rec.known && settings_video_matches_recommended())
                         g_settings.video_rec = VREC_DONE, settings_save();
                     bool offer_video = g_settings.video_rec == VREC_ASK && g_video_rec.known;
-                    // (no aspect ratio question: "Unlocked" widens Link's Awakening's view only - Pokémon Z-A always draws 16:9
-                    // and showed bars on an ultrawide screen either way, #160; LARECOMP_TIP_TEST=aspect still shows it)
+                    // (no aspect ratio question: "Unlocked", the default, fills an ultrawide screen and F1 > Aspect ratio
+                    // changes it; LARECOMP_TIP_TEST=aspect still shows it)
                     if (pressed) {  // first PLAY ever: this PC's video settings, how to reach our menu
                         if (offer_video) ImGui::OpenPopup("##videorec");
                         else if (!g_settings.menu_tip_seen) ImGui::OpenPopup("##menutip");
@@ -2936,17 +3035,18 @@ extern "C" void launcher_run(const char *root) {
                 }
                 y += ts.y + 10;
                 y += text(dl, F_BODY, 15, x, y, C_SOFT, TR("Mods replace the game's files (a romfs folder): translations, "
-                                                          "textures, models. Mods of the game's code (exefs, IPS, cheats) "
-                                                          "don't work here. Where two mods replace the same file, the one "
-                                                          "higher up wins.", "Mods trocam arquivos do jogo (uma pasta romfs): "
-                                                          "tradução, texturas, modelos. Mods que mexem no código do jogo "
-                                                          "(exefs, IPS, cheats) não funcionam aqui. Se dois mods trocam o "
-                                                          "mesmo arquivo, vale o que está mais acima."), w).y + 16;
+                                                          "textures, models. Code mods (exefs: subsdk programs, .pchtxt "
+                                                          "patches) run only once their Code switch is on. Where two mods "
+                                                          "replace the same file, the one higher up wins.",
+                                                          "Mods trocam arquivos do jogo (uma pasta romfs): tradução, texturas, "
+                                                          "modelos. Mods de código (exefs: programas subsdk, patches .pchtxt) "
+                                                          "só rodam com a chave Código ligada. Se dois mods trocam o mesmo "
+                                                          "arquivo, vale o que está mais acima."), w).y + 16;
                 float list_h = H_ - 48 - 24 - 112 - 16 - y;
                 ImGui::SetCursorScreenPos(P(x, y));
                 ImGui::BeginChild("##modlist", S(w, list_h), 0, ImGuiWindowFlags_NavFlattened);
                 ImDrawList *cl = ImGui::GetWindowDrawList();
-                int move_from = -1, move_to = -1, remove_at = -1;
+                int move_from = -1, move_to = -1, remove_at = -1, code_ask = -1;
                 bool changed = false;
                 if (g_mods.empty()) {
                     ImVec2 o = ImGui::GetCursorScreenPos();
@@ -2968,12 +3068,21 @@ extern "C" void launcher_run(const char *root) {
                     ImVec2 is = text_size(F_H2, 16, ini.c_str());
                     text(cl, F_H2, 16, 34 - is.x / 2, 32 - is.y / 2, m.on ? IM_COL32(127, 230, 224, 255) : C_MUTED, ini.c_str());
                     text(cl, F_LABEL, 17, 70, 10, m.on ? C_TEXT : C_SOFT, m.name.c_str());
-                    char sub[96];
-                    snprintf(sub, sizeof sub, TR("%d files · mods/%s%s", "%d arquivos · mods/%s%s"), m.files, m.name.c_str(),
+                    char sub[160];
+                    snprintf(sub, sizeof sub, TR("%d files · mods/%s%s%s", "%d arquivos · mods/%s%s%s"), m.files, m.name.c_str(),
+                             !m.code ? "" : m.code_on ? TR(" · its code runs", " · o código dele roda") : TR(" · code off", " · código desligado"),
                              m.on ? "" : TR(" · off", " · desligado"));
                     text(cl, F_BODY, 13, 70, 36, C_MUTED, sub);
                     ImGui::PushID(i);
                     float bx = rw - 16 - 54 - 3 * 44;
+                    if (m.code) {  // (its code: off until turned on here, after the warning below)
+                        text(cl, F_BODY, 13, bx - 128, 26, m.code_on ? C_TEXT : C_MUTED, TR("Code", "Código"));
+                        bool want = m.code_on;
+                        if (toggle("##code", &want, bx - 76, 17)) {
+                            if (want) code_ask = i;
+                            else m.code_on = false, changed = true;
+                        }
+                    }
                     if (toggle("##on", &m.on, bx, 17)) changed = true;
                     if (button("##up", "", bx + 66, 14, 36, 36, BTN_GHOST, i > 0, IC_CHEV_UP)) move_from = i, move_to = i - 1;
                     if (button("##dn", "", bx + 106, 14, 36, 36, BTN_GHOST, i + 1 < (int)g_mods.size(), IC_CHEV_DOWN))
@@ -2986,8 +3095,34 @@ extern "C" void launcher_run(const char *root) {
                 }
                 ImGui::EndChild();
                 if (move_from >= 0) std::swap(g_mods[move_from], g_mods[move_to]), changed = true;
-                static std::string confirm_name;
+                static std::string confirm_name, code_name;
                 if (remove_at >= 0) confirm_name = g_mods[remove_at].name, ImGui::OpenPopup("##rmmod");
+                if (code_ask >= 0) code_name = g_mods[code_ask].name, ImGui::OpenPopup("##codemod");
+                if (begin_question("##codemod", s)) {
+                    ImGui::PushTextWrapPos(0);
+                    ImGui::Text(TR("Run the code of \"%s\"?", "Rodar o código de \"%s\"?"), code_name.c_str());
+                    ImGui::TextDisabled("%s", TR("This mod changes the game's code. Its code runs on your PC with the same rights as the "
+                                                 "game, like any program you download: only turn it on for mods from people you trust. "
+                                                 "A code mod is made for some versions of the game; on another it can crash the game.",
+                                                 "Esse mod muda o código do jogo. O código dele roda no seu PC com os mesmos direitos do "
+                                                 "jogo, como qualquer programa que você baixa: só ligue para mods de quem você confia. "
+                                                 "Um mod de código é feito para algumas versões do jogo; em outra ele pode travar o jogo."));
+                    ImGui::PopTextWrapPos();
+                    ImGui::Dummy(ImVec2(0, 10 * s));
+                    if (ImGui::Button(TR("Turn its code on", "Ligar o código"), ImVec2(220 * s, 44 * s))) {
+                        for (auto &m : g_mods)
+                            if (m.name == code_name) m.code_on = true;
+                        rt_launcher_log("[launcher] mod code on: %s\n", code_name.c_str());
+                        changed = true;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    ImGui::SetItemDefaultFocus();
+                    if (ImGui::Button(TR("Cancel", "Cancelar"), ImVec2(220 * s, 44 * s)) ||
+                        ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+                        ImGui::CloseCurrentPopup();
+                    ImGui::EndPopup();
+                }
                 if (begin_question("##rmmod", s)) {
                     ImGui::PushTextWrapPos(0);
                     ImGui::Text(TR("Delete the mod \"%s\"?", "Apagar o mod \"%s\"?"), confirm_name.c_str());

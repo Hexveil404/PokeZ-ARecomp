@@ -23,6 +23,7 @@
 #include "../romfs_build.h"
 #include "../input_bind.h"
 #include "../xbox_attack_layout.h"
+#include "mod_layout.h"
 
 #ifndef O_BINARY
 #define O_BINARY 0
@@ -390,16 +391,19 @@ static void layer_init(void) {
     for (struct dirent *e; (e = readdir(d)) && n < 15;) {
         if (e->d_name[0] == '.' || e->d_name[0] == '_') continue;
         if (settings_list_has(g_settings.mods_off, e->d_name)) { LOG("[fs] mod %s: off\n", e->d_name); continue; }
-        char p[1100];
-        struct stat sb;
-        snprintf(p, sizeof p, "mods/%s/romfs", e->d_name);
-        if (!stat(p, &sb) && S_ISDIR(sb.st_mode)) strlcpy(names[n++], e->d_name, sizeof *names);
+        char p[1100], romfs[1100];
+        snprintf(p, sizeof p, "mods/%s", e->d_name);
+        // (the code isn't run: the files are, and many code mods carry their own romfs)
+        if (mod_has_code(p) && !settings_mod_code_on(e->d_name)) LOG("[fs] mod %s: has code (exefs), turned off\n", e->d_name);
+        if (mod_romfs_dir(p, romfs, sizeof romfs)) strlcpy(names[n++], e->d_name, sizeof *names);
     }
     closedir(d);
     qsort(names, n, sizeof *names, mod_cmp);
     for (int i = 0; i < n; i++) {
-        snprintf(layer_root[nlayers++], sizeof *layer_root, "mods/%s/romfs", names[i]);
-        LOG("[fs] mod: %s\n", names[i]);
+        char p[1100];
+        snprintf(p, sizeof p, "mods/%s", names[i]);
+        mod_romfs_dir(p, layer_root[nlayers], sizeof *layer_root);  // (mods/<name>/romfs, or the Switch / Ryujinx layout)
+        LOG("[fs] mod: %s (%s)\n", names[i], layer_root[nlayers++]);
         rt_mods_on++;
     }
     maxlod_layer();

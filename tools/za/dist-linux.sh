@@ -77,7 +77,7 @@ cp -R "$L/helper/lasgen" "$L/helper/zaprompts" build/zig "$D/"
 cp third_party/ooz/COPYING "$D/zaprompts/COPYING-GPLv3.txt"
 cp third_party/ooz/README.ZARecomp.md "$D/zaprompts/README-ooz.md"
 if [ "$ZAIMPORT" = 1 ]; then mkdir "$D/zaimport" && cp "$L/zaimport/zaimport" "$D/zaimport/"; fi
-cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
+cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h runtime/modlib.h tools/gamelib_entry.c tools/modlib_entry.c runtime/hle/hle_symbols.txt \
    "$D/gamelib-src/"
 cp docs/icon/icon_1024.png "$D/icon.png"
 cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$D/"  # (start screen font, OFL)

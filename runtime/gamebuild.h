@@ -5,6 +5,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,6 +26,14 @@ bool gamebuild_killed(void);
 bool gamebuild_cfg_stopped(void);
 // The generator and the compiler are there (shipped builds; a source checkout with tools/venv and clang).
 bool gamebuild_available(void);
+// A code mod's NSO (exefs/subsdk0-9) lifted for guest address base and built into its own library (runtime/modlib.h):
+// out_dll its path (cache/mods/...); kept when its id matches. game_dir: the game files (their exefs/main).
+// o: progress and cancel, as gamebuild_run's (NULL: none; o->jobs: the compiles at once, 0: one per core).
+// Cancelled: false, why "cancelled".
+bool modbuild_run(const char *game_dir, const char *nso, uint64_t base, char *out_dll, size_t n,
+                  const GameBuildOpts *o, char *why, size_t why_size);
+// Its library is built and current: no build needed.
+bool modbuild_ready(const char *nso, uint64_t base);
 // An x86-64 CPU without AVX2 / FMA / BMI2: the game code (x86-64-v3) is built for x86-64-v2 here instead, under its own
 // id. The id a library must have on this machine: GAMELIB_ID, + "-v2" then (runtime/gamelib.c; declared here, not in
 // gamelib.h - its contents are part of GAMELIB_ID, and a new id would rebuild every player's game code).

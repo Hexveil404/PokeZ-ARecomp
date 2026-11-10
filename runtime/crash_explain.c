@@ -12,6 +12,7 @@
 #include "rt.h"
 #include "settings.h"
 
+const char *codemods_at(uint64_t pc);  // runtime/codemods.c
 static char g_line[512];   // the first fatal line (FATAL message / "signal 11 accessing 0x10")
 static uint64_t g_pc;      // a crash's host pc (0: a FATAL)
 bool rt_game_data_bad;
@@ -173,6 +174,10 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
     } else if (has("out of memory") || has("cannot allocate") || has("alloc failed")) {
         snprintf(head, sizeof head, "Out of memory");
         snprintf(what, sizeof what, "Close other programs and try again.");
+    } else if (g_pc && codemods_at(g_pc)) {  // (before the game code's case: a mod's functions are in its tables too)
+        snprintf(head, sizeof head, "A code mod crashed");
+        snprintf(what, sizeof what, "The mod \"%s\" stopped the game: it may be made for another version of the game. "
+                 "Turn its code off on the start screen's Mods page.", codemods_at(g_pc));
     } else if (g_pc && rt_host_fn_name(g_pc, NULL)) {
         snprintf(head, sizeof head, "The game crashed");
         snprintf(what, sizeof what, "This is a bug in %s, not a problem with your game files or PC. %s", app, report);

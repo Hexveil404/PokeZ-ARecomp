@@ -296,6 +296,7 @@ void settings_load(void) {
         // (the start screen's keys: an empty value is valid - no mods off, no order)
         if (!strcmp(key, "mods_order")) { strlcpy(g_settings.mods_order, val, sizeof g_settings.mods_order); continue; }
         if (!strcmp(key, "mods_off")) { strlcpy(g_settings.mods_off, val, sizeof g_settings.mods_off); continue; }
+        if (!strcmp(key, "mods_code_on")) { strlcpy(g_settings.mods_code_on, val, sizeof g_settings.mods_code_on); continue; }
         if (!strcmp(key, "launcher_language")) {
             g_settings.ui_lang = !strcmp(val, "pt") ? UI_LANG_PT : !strcmp(val, "en") ? UI_LANG_EN : UI_LANG_AUTO;
             continue;
@@ -557,7 +558,8 @@ void settings_save(void) {
     if (g_settings.rando_options[0]) fprintf(f, "rando_options = %s\n", g_settings.rando_options);
     static const char *const ui_lang[] = {"auto", "en", "pt"};
     fprintf(f, "launcher_language = %s\n", ui_lang[g_settings.ui_lang <= UI_LANG_PT ? g_settings.ui_lang : 0]);
-    fprintf(f, "mods_order = %s\nmods_off = %s\n", g_settings.mods_order, g_settings.mods_off);
+    fprintf(f, "mods_order = %s\nmods_off = %s\nmods_code_on = %s\n", g_settings.mods_order, g_settings.mods_off,
+            g_settings.mods_code_on);
     fclose(f);
 }
 
@@ -605,6 +607,13 @@ bool settings_list_has(const char *list, const char *name) {
         p = bar ? bar + 1 : NULL;
     }
     return false;
+}
+
+// mods/<name>'s code runs: the mod is on and its code was turned on (the Mods page), or LARECOMP_CODE_MODS=1 (all)
+bool settings_mod_code_on(const char *name) {
+    if (settings_list_has(g_settings.mods_off, name)) return false;
+    const char *e = getenv("LARECOMP_CODE_MODS");
+    return (e && !strcmp(e, "1")) || settings_list_has(g_settings.mods_code_on, name);
 }
 
 /// True on a Steam Deck (DMI vendor "Valve"): "Auto" button icons then use the Deck's own names (L1 R1 L2 R2 L3 R3).

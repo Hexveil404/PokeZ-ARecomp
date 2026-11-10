@@ -52,7 +52,7 @@ cp -R "$L/helper/rando-gen" "$APPDIR/usr/bin/"
 [ -d "$L/helper/lasgen" ] || { echo "no game code generator helper: tools/linux/rando_helper.sh $ARCH first"; exit 1; }
 cp -R "$L/helper/lasgen" build/zig "$APPDIR/usr/bin/"
 mkdir "$APPDIR/usr/bin/gamelib-src"
-cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
+cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h runtime/modlib.h tools/gamelib_entry.c tools/modlib_entry.c runtime/hle/hle_symbols.txt \
    "$APPDIR/usr/bin/gamelib-src/"
 cp tools/linux/AppRun "$APPDIR/" && chmod +x "$APPDIR/AppRun"
 cp tools/linux/lasrecomp.desktop "$APPDIR/"

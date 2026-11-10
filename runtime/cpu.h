@@ -76,6 +76,9 @@ typedef GUEST_MEM uint8_t __attribute__((may_alias)) u8a;
 // Function-entry profiler (runtime/fnprof.c, LARECOMP_FNPROF): one predictable branch per call when off.
 extern volatile int g_fnprof;
 void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
+// The NOP bytes at every lifted function's entry (tools/gen.py FN_ATTR): a code mod's hook at a function's start is a
+// jump written over them; the function past them is the original (runtime/hle/codehooks.c).
+#define ENTRY_PAD 5
 #define FN_ENTER(a) do { if (__builtin_expect(g_fnprof, 0)) fnprof_hit(a, c->x[30], c->x[0]); } while (0)
 
 #define LD8(a)  (*(const u8a *)(uintptr_t)(a))

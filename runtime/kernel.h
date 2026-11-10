@@ -7,7 +7,14 @@
 #define STACK_BASE 0x7200000000ull
 #define STACK_SIZE 0x0040000000ull
 
-typedef enum { KOBJ_THREAD = 1, KOBJ_EVENT, KOBJ_SESSION, KOBJ_SHMEM, KOBJ_TMEM } KType;
+typedef enum { KOBJ_THREAD = 1, KOBJ_EVENT, KOBJ_SESSION, KOBJ_SHMEM, KOBJ_TMEM, KOBJ_PROCESS } KType;
+
+// Code mods' writable views of code (svcMapProcessMemory, kernel.c): exlaunch and Hakkun map the code they hook (and
+// their own trampoline pool) a second time, writable, and write through that. Here the view is a copy (dst) of src:
+// the lifted code can't change, so runtime/hle/codehooks.c reads what was written there and turns it into hooks.
+typedef struct { uint64_t dst, src, size; } CodeAlias;
+#define MAX_CODE_ALIAS 64
+int kernel_code_aliases(CodeAlias *out, int max);  // a snapshot (g_mlock)
 typedef enum { WAIT_NONE = 0, WAIT_MUTEX, WAIT_CONDVAR, WAIT_ARBITER } WaitKind;
 
 typedef struct KObject {

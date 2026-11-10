@@ -38,6 +38,7 @@ extern "C" {
 #include "paths.h"
 #include "gamebuild.h"
 #include "gamelib.h"
+#include "update_marker.h"
 #include "romfs_build.h"
 #include "settings.h"
 #include "input_bind.h"
@@ -193,18 +194,9 @@ static void *update_thread(void *) {
             best_rank = tag_rank(tag), best = tag, url.clear(), size = 0, rebuild = -1;
             // its assets follow the tag in GitHub's release object, up to the next release's tag
             size_t end = body.find("\"tag_name\"", q2), u = q2;
-            {   // (its notes, in the same object: the game-code id it was built with)
-                static const char mark[] = "zarecomp-gamelib:";
-                size_t g = body.find(mark, q2);
-                if (g != std::string::npos && g < end) {
-                    size_t s = g + sizeof mark - 1;
-                    while (s < body.size() && body[s] == ' ') s++;
-                    size_t e = s;
-                    while (e < body.size() && isxdigit((unsigned char)body[e])) e++;
-                    std::string id = body.substr(s, e - s), mine = gamelib_build_id();
-                    if (!id.empty()) rebuild = id != mine.substr(0, mine.find('-'));
-                }
-            }
+            // (its notes, in the same object: the game-code id it was built with - runtime/update_marker.h)
+            rebuild = update_notes_rebuild(body.c_str() + q2, (end == std::string::npos ? body.size() : end) - q2,
+                                           gamelib_build_id());
             while ((u = body.find("\"browser_download_url\"", u)) != std::string::npos && u < end) {
                 size_t a = body.find('"', body.find(':', u) + 1), b = a == std::string::npos ? a : body.find('"', a + 1);
                 if (b == std::string::npos) break;

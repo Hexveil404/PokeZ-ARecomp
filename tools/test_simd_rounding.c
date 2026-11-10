@@ -49,6 +49,23 @@ int main(void) {
     }
     _mm_setcsr(original);
 #endif
+    {   // An FZ op, then the game writes FPCR = 0 (MSR FPCR lowers to c->fpcr = ...; simd_fpcr_sync): a denormal result
+        // must come out as itself. Before simd_fpcr_sync the host's FTZ / DAZ stayed on after the FZ op and it read 0.
+        Cpu c = {0};
+        volatile float tiny = 0x1p-126f, half = 0.5f;
+        c.fpcr = FPCR_FZ;
+        simd_fpcr_sync(c.fpcr);
+        assert(fb_s(op_s(&c, FOP_MUL, tiny, half, 0)) == 0);           // (FZ: flushed, as on the Switch)
+        c.fpcr = 0;
+        simd_fpcr_sync(c.fpcr);
+        assert(fb_s(op_s(&c, FOP_MUL, tiny, half, 0)) == 0x00400000u);  // (0x1p-127: kept)
+        vf32 a = {0x1p-126f, 0x1p-126f, 0x1p-126f, 0x1p-126f}, b = {0.5f, 0.5f, 0.5f, 0.5f};
+        vf32 r = vop_s(&c, FOP_MUL, a, b, a);
+        assert(fb_s(r[0]) == 0x00400000u && fb_s(r[1]) == 0x00400000u);  // (the vector path too)
+#if defined(__x86_64__) && defined(__SSE2__)
+        assert(!(_mm_getcsr() & 0x8040u));  // (FTZ / DAZ off with FPCR = 0)
+#endif
+    }
     pthread_t threads[4];
     for (int i = 0; i < 4; i++) assert(!pthread_create(&threads[i], NULL, worker, &modes[i]));
     for (int i = 0; i < 4; i++) assert(!pthread_join(threads[i], NULL));

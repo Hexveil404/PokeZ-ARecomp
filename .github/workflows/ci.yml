@@ -84,6 +84,14 @@ jobs:
         run: python3 tools/test_dynres.py
       - name: Frame pacing (simulated frames, hitches and slow machines)
         run: python3 tools/test_pace.py
+      - name: Constant game speed (channel ticks below 60 fps, no per-frame mode without the hook)
+        run: python3 tools/test_frame_step.py
+      - name: Update notes' game-code marker (the start screen's "compiled again" warning)
+        run: |
+          clang -std=gnu11 -O1 tools/test_update_marker.c -o build/test-update-marker
+          build/test-update-marker
+      - name: Draw distance generator (synthetic scene parts)
+        run: python3 tools/test_draw_dist.py
       - name: Controller light colours
         run: |
           clang -std=gnu11 -O1 tools/test_led.c -lm -o build/test-led
@@ -169,6 +177,14 @@ jobs:
         run: |
           clang -std=gnu11 -O2 $(pkg-config --cflags sdl3) tools/test_rumble.c $(pkg-config --libs sdl3) -o build/test-rumble.exe
           build/test-rumble.exe
+      - name: Constant game speed (channel ticks below 60 fps, no per-frame mode without the hook)
+        run: python tools/test_frame_step.py
+      - name: Update notes' game-code marker (the start screen's "compiled again" warning)
+        run: |
+          clang -std=gnu11 -O1 tools/test_update_marker.c -o build/test-update-marker.exe
+          build/test-update-marker.exe
+      - name: Draw distance generator (synthetic scene parts)
+        run: python tools/test_draw_dist.py
       - name: Vulkan fence sequence regression
         run: python tools/test_fence_sequence.py
       - name: Guest heap import on low-memory machines

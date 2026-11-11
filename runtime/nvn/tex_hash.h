@@ -11,6 +11,7 @@
 // 8 bytes at each (more of the data seen) in four chains (the old byte-at-a-time chain waited on each multiply);
 // textures up to 64 KB are hashed in full instead, which is quicker than the old 4096-step sample and misses nothing.
 #pragma once
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,6 +66,35 @@ static inline uint64_t tex_hash_sample(const uint8_t *p, uint64_t n) {
     r = (r ^ (r >> 29)) * 0x9E3779B97F4A7C15ull ^ c;
     r = (r ^ (r >> 29)) * 0x9E3779B97F4A7C15ull ^ d;
     return r ^ (r >> 31);
+}
+
+// The previous full hash (four lanes; the runtime's with LARECOMP_TEX_FASTHASH=0). Also the name the button prompt
+// sets file their textures under: tools/za/prompt_textures.py hash_full computes it offline (tools/test_pack_names.py).
+static inline uint64_t tex_hash_prompt(const uint8_t *p, uint64_t n) {
+    uint64_t h0 = 0x9E3779B97F4A7C15ull ^ n, h1 = 0xC2B2AE3D27D4EB4Full, h2 = 0x165667B19E3779F9ull, h3 = 0x27D4EB2F165667C5ull;
+    uint64_t i = 0;
+    for (; i + 32 <= n; i += 32) {
+        uint64_t v[4];
+        memcpy(v, p + i, 32);
+        h0 = (h0 ^ v[0]) * 0x100000001B3ull; h0 ^= h0 >> 29;
+        h1 = (h1 ^ v[1]) * 0x100000001B3ull; h1 ^= h1 >> 29;
+        h2 = (h2 ^ v[2]) * 0x100000001B3ull; h2 ^= h2 >> 29;
+        h3 = (h3 ^ v[3]) * 0x100000001B3ull; h3 ^= h3 >> 29;
+    }
+    uint64_t h = h0 ^ (h1 * 0x9E3779B97F4A7C15ull) ^ (h2 * 0xC2B2AE3D27D4EB4Full) ^ (h3 * 0x165667B19E3779F9ull);
+    for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
+    return h ^ (h >> 31);
+}
+
+// The name a texture's replacement is looked up by (vulkan/textures.c upload_texture). The two packs are named by
+// different hashes: the button prompt sets by tex_hash_prompt (tools/za/prompt_textures.py), the HD pack by
+// tex_hash_full (tools/za/hd_pack.py -> hd_native.c pack_hash). h is the upload check's hash (tex_hash_full, or
+// tex_hash_prompt with LARECOMP_TEX_FASTHASH=0). Looking the prompts up by h found none of them: every button icon
+// stayed the Switch's / Xbox's whatever the setting (#229). prompt_listed: whether the prompt set has that name.
+static inline uint64_t tex_pack_name(const uint8_t *p, uint64_t n, uint64_t h, bool fast, bool (*prompt_listed)(uint64_t)) {
+    if (!fast || !prompt_listed) return h;
+    uint64_t old = tex_hash_prompt(p, n);
+    return prompt_listed(old) ? old : h;
 }
 
 // LARECOMP_TEX_FASTHASH (default on)

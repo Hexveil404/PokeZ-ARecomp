@@ -108,6 +108,8 @@ jobs:
         run: |
           clang -std=gnu11 -O2 -Iruntime -I"$HOME/sdl3/include" tools/test_first_start_pad.c -L"$HOME/sdl3/lib" -Wl,-rpath,"$HOME/sdl3/lib" -lSDL3 -lm -o build/test-first-start-pad
           build/test-first-start-pad
+      - name: Button prompt / HD pack texture names (#229)
+        run: python3 tools/test_pack_names.py
       - name: Vulkan fence sequence regression
         run: python3 tools/test_fence_sequence.py
       - name: Guest heap import on low-memory machines
@@ -207,6 +209,8 @@ jobs:
         run: |
           clang -std=gnu11 -O2 -Iruntime $(pkg-config --cflags sdl3) tools/test_first_start_pad.c $(pkg-config --libs sdl3) -o build/test-first-start-pad.exe
           build/test-first-start-pad.exe
+      - name: Button prompt / HD pack texture names (#229)
+        run: python tools/test_pack_names.py
       - name: Vulkan fence sequence regression
         run: python tools/test_fence_sequence.py
       - name: Guest heap import on low-memory machines

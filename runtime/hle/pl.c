@@ -219,7 +219,8 @@ static int load_one_checked(const char *path, Font *ft, bool check) {
 }
 
 static int g_fonts_loaded;
-RT_ON_RESET(pl_reset) { g_fonts_loaded = 0; memset(fonts, 0, sizeof fonts); }  // (they were in the HLE heap)
+static int prompt_set_done;  // (pl_prompt_set: chosen again at each boot - the start screen may have changed it)
+RT_ON_RESET(pl_reset) { g_fonts_loaded = 0; memset(fonts, 0, sizeof fonts); prompt_set_done = 0; }  // (they were in the HLE heap)
 
 const char *pl_prompt_set(void);  // (below: the button prompt set)
 
@@ -345,10 +346,9 @@ static void load_fonts(void) {
 // font (fonts/nintendo_ext_003_<set>.ttf: tools/za/keyboard_font.py, xbox_font.py) and the game's own UI icons
 // relabelled (textures/prompts/<set>: tools/za/prompt_textures.py, runtime/nvn/vulkan/textures.c).
 const char *pl_prompt_set(void) {
-    static int done;
     static const char *set;
-    if (done) return set;
-    done = 1;
+    if (prompt_set_done) return set;
+    prompt_set_done = 1;
     // (bind_label_family, not input_pad_family: runtime/services/fs.c asks this before runtime/hle/input.c has opened
     // the controller - it asked SDL, which knows the pad's type already; "auto" used to come out as Nintendo's)
     extern int bind_label_family(void);

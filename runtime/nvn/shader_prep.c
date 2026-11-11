@@ -63,12 +63,13 @@ uint8_t shader_topo_class(uint32_t mode) { return mode == 0 ? 0 : mode == 1 || m
 // ------------------------------------------------------------------ text form
 // G vs=<hash> fs=<hash> f=<flags> a=<attrib,...> s=<stride/divisor,...> c=<format[:view],...> d=<depth> n=<samples>
 //   m=<channel mask> b=<blend enables> B=<blend state of each target, 16 hex digits,...> k=<a2c> t=<topology> p=<fill>
-// C cs=<hash> l=<x,y,z>
+// C cs=<hash> l=<x,y,z> [s=<shared memory bytes>]
 void shader_rec_format(const ShaderRec *r, char *out, size_t n) {
     size_t o = 0;
 #define PUT(...) do { if (o < n) o += (size_t)snprintf(out + o, n - o, __VA_ARGS__); } while (0)
     if (r->kind == 'C') {
         PUT("C cs=%016" PRIx64 " l=%u,%u,%u", r->vs, r->local[0], r->local[1], r->local[2]);
+        if (r->shared) PUT(" s=%u", r->shared);  // (decimal; only when there is some: older lines stay as they were)
         return;
     }
     PUT("G vs=%016" PRIx64 " fs=%016" PRIx64 " f=%x a=", r->vs, r->fs, r->flags);
@@ -127,6 +128,7 @@ bool shader_rec_parse(const char *line, ShaderRec *r) {
             if (e == v) return false;
             v = *e == ',' ? e + 1 : e;
         }
+        if ((v = field(line, "s"))) r->shared = (uint32_t)strtoul(v, NULL, 10);
         return r->vs != 0;
     }
     if (!(v = field(line, "vs"))) return false;

@@ -44,6 +44,7 @@ bool maxwell_output_layer = true;
 // gmir: an area past the copy of the guest window, read back and logged as "[guard]")
 uint32_t maxwell_guard_word;
 bool maxwell_gmem_fs_miss;
+uint32_t maxwell_shared_bytes;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
 int maxwell_dbg_reg;
@@ -122,7 +123,7 @@ typedef struct {
     uint8_t pred_used[8];
     uint32_t in_attr_mask, out_attr_mask;
     uint32_t vs_in_comp[32];
-    bool uses_branches, uses_cc, uses_local, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane, uses_layer;
+    bool uses_branches, uses_cc, uses_local, uses_shared, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane, uses_layer;
     uint8_t out_comp[32];  // vertex: output components written per varying (transform feedback order)
     bool uses_rscale;  // resolution-scale table (fragment/compute only)
     bool warned_surface;  // a dropped bindless surface op was noted
@@ -2120,34 +2121,44 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         icmp_expr(cmp, (int)bits(w, 49, 3), cv, "0u", bits(w, 48, 1));
         sprintf(t, "(%s ? %s : %s)", cmp, R(a), bv);
         set_reg(c, d, t);
-    } else if (OPM(0xef40000000000000ull, 0xfff8000000000000ull) || OPM(0xef50000000000000ull, 0xfff8000000000000ull)) {  // LDL / STL
-        // thread-private local memory, modelled as a word array (byte/short accesses within a word)
-        bool store = bits(w, 52, 1);
+    } else if (OPM(0xef40000000000000ull, 0xfff8000000000000ull) || OPM(0xef50000000000000ull, 0xfff8000000000000ull) ||
+               OPM(0xef48000000000000ull, 0xfff8000000000000ull) || OPM(0xef58000000000000ull, 0xfff8000000000000ull)) {
+        // LDL / STL: thread-private local memory; LDS / STS (bit 51): the workgroup's shared memory (compute only,
+        // maxwell_shared_bytes: Z-A has 3 compute shaders that use it, skipped every frame before). Both modelled
+        // as word arrays (byte / short accesses within a word); a local address wraps, a shared one is clamped (its
+        // size need not be a power of two, and Vulkan leaves an access past it undefined)
+        bool store = bits(w, 52, 1), shared = bits(w, 51, 1);
         int size = (int)bits(w, 48, 3);
         int32_t off = (int32_t)sbits(w, 20, 24);
-        c->uses_local = true;
-        char addr[128];
+        if (shared && (c->stage != STAGE_COMPUTE || !maxwell_shared_bytes)) { fail(c, "shared memory (stage %d, %u bytes)", c->stage, maxwell_shared_bytes); return; }
+        if (shared) c->uses_shared = true;
+        else c->uses_local = true;
+        const char *mem = shared ? "smem" : "lmem";
+        char fw[24];  // (the word index of %s, as a format for sp)
+        if (shared) sprintf(fw, "min(%%s, %uu)", (maxwell_shared_bytes + 3) / 4 - 1);
+        else sprintf(fw, "(%%s) & %du", LMEM_WORDS - 1);
+        char addr[128], wi[160], ix[192];
         if (a == RZ) sprintf(addr, "%du", off);
         else sprintf(addr, "(%s + %du)", R(a), (uint32_t)off);
         int nw = size == 5 ? 2 : size >= 6 ? 4 : 1;
         sp(&c->body, "    { uint la = %s;\n", addr);
-        if (!store) {
-            if (size < 4) {
+        if (size < 4) {
+            sprintf(ix, fw, "la >> 2");
+            if (!store) {
                 static const char *const ext[] = {"(v >> sh) & 0xFFu", "uint(int(char((v >> sh) & 0xFFu)))", "(v >> sh) & 0xFFFFu",
                                                   "uint(int(short((v >> sh) & 0xFFFFu)))"};
-                if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      uint v = lmem[(la >> 2) & %du]; uint sh = (la & 3u) * 8u; r%d = %s;\n", LMEM_WORDS - 1, d, ext[size]); }
+                if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      uint v = %s[%s]; uint sh = (la & 3u) * 8u; r%d = %s;\n", mem, ix, d, ext[size]); }
             } else {
-                for (int k = 0; k < nw; k++)
-                    if (d != RZ && d + k < RZ) { c->reg_used[d + k] = 1; sp(&c->body, "      r%d = lmem[((la >> 2) + %du) & %du];\n", d + k, k, LMEM_WORDS - 1); }
+                uint32_t m = size < 2 ? 0xFFu : 0xFFFFu;
+                sp(&c->body, "      uint sh = (la & 3u) * 8u; uint i = %s; %s[i] = (%s[i] & ~(0x%xu << sh)) | ((%s & 0x%xu) << sh);\n",
+                   ix, mem, mem, m, R(d), m);
             }
         } else {
-            if (size < 4) {
-                uint32_t m = size < 2 ? 0xFFu : 0xFFFFu;
-                sp(&c->body, "      uint sh = (la & 3u) * 8u; uint i = (la >> 2) & %du; lmem[i] = (lmem[i] & ~(0x%xu << sh)) | ((%s & 0x%xu) << sh);\n",
-                   LMEM_WORDS - 1, m, R(d), m);
-            } else {
-                for (int k = 0; k < nw; k++)
-                    sp(&c->body, "      lmem[((la >> 2) + %du) & %du] = %s;\n", k, LMEM_WORDS - 1, R(d == RZ ? RZ : d + k));
+            for (int k = 0; k < nw; k++) {
+                sprintf(wi, "(la >> 2) + %du", k);
+                sprintf(ix, fw, wi);
+                if (store) sp(&c->body, "      %s[%s] = %s;\n", mem, ix, R(d == RZ ? RZ : d + k));
+                else if (d != RZ && d + k < RZ) { c->reg_used[d + k] = 1; sp(&c->body, "      r%d = %s[%s];\n", d + k, mem, ix); }
             }
         }
         sp(&c->body, "    }\n");
@@ -2898,6 +2909,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (c->full_quads) sp(&s, "layout(full_quads) in;\nlayout(quad_derivatives) in;\n");  // (quad_control_on)
     } else {
         sp(&s, "layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;\n");
+        if (c->uses_shared) sp(&s, "shared uint smem[%u];\n", (maxwell_shared_bytes + 3) / 4);
     }
     sp(&s, c->full_quads ? "void main() [[maximally_reconverges]] {\n" : "void main() {\n");
     if (stage == STAGE_VERTEX) {
@@ -3315,6 +3327,7 @@ static ShaderInfo *translate(const uint8_t *blob, size_t max_size, int stage, co
         if (c->pred_used[i]) sp(&s, "  bool p%d = false;\n", i);
     if (c->uses_cc) sp(&s, "  uint cc = 0; bool ccz = false, ccs = false;\n");
     if (c->uses_local) sp(&s, "  uint lmem[%d] = {};\n", LMEM_WORDS);
+    if (c->uses_shared) sp(&s, "  threadgroup uint smem[%u];\n", (maxwell_shared_bytes + 3) / 4);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch) {
         sp(&s, "  uint pc = 8u; uint ssy_0 = 0u; uint ssy_1 = 0u; uint ssy_2 = 0u; uint ssy_3 = 0u; uint ssy_4 = 0u; uint ssy_5 = 0u; uint ssy_6 = 0u; uint ssy_7 = 0u; uint ssy_8 = 0u; uint ssy_9 = 0u; uint ssy_10 = 0u; uint ssy_11 = 0u; uint ssy_12 = 0u; uint ssy_13 = 0u; uint ssy_14 = 0u; uint ssy_15 = 0u; uint pbk_0 = 0u; uint pbk_1 = 0u; uint pbk_2 = 0u; uint pbk_3 = 0u; uint pbk_4 = 0u; uint pbk_5 = 0u; uint pbk_6 = 0u; uint pbk_7 = 0u; uint pbk_8 = 0u; uint pbk_9 = 0u; uint pbk_10 = 0u; uint pbk_11 = 0u; uint pbk_12 = 0u; uint pbk_13 = 0u; uint pbk_14 = 0u; uint pbk_15 = 0u; uint pcnt_0 = 0u;\n");
@@ -3442,7 +3455,7 @@ static uint64_t cache_key(const uint8_t *blob, size_t max_size, int stage, const
         if ((((const uint64_t *)code)[i] & 0xfff0000000000000ull) == 0xe250000000000000ull) return 0;  // BRX
     // (the straight-line switch is in the key: on and off translations of one shader differ, and a GPU that changes
     // the default - AMD - or a player's LARECOMP_SHADER_FLAT must not load the other form)
-    uint64_t v[6] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size, (uint64_t)maxwell_flat_on() | (uint64_t)loop_guard() << 8 | (uint64_t)maxwell_guard_word << 32, (uint64_t)quad_on() + 2 + 16 * (uint64_t)quad_deriv() + 64 * (uint64_t)!maxwell_output_layer + 128 * (uint64_t)quad_control_on() + 256 * (uint64_t)quad_lockstep()};
+    uint64_t v[7] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size, (uint64_t)maxwell_flat_on() | (uint64_t)loop_guard() << 8 | (uint64_t)maxwell_guard_word << 32, (uint64_t)quad_on() + 2 + 16 * (uint64_t)quad_deriv() + 64 * (uint64_t)!maxwell_output_layer + 128 * (uint64_t)quad_control_on() + 256 * (uint64_t)quad_lockstep(), stage == STAGE_COMPUTE ? maxwell_shared_bytes : 0};
     uint64_t h = fnv(fnv(fnv(0xcbf29ce484222325ull, cache_build, sizeof cache_build), v, sizeof v), key, sizeof *key);
     h = fnv(h, blob, (size_t)(code - blob) + end * 8);
     return h ? h : 1;

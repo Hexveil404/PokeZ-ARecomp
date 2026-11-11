@@ -7003,7 +7003,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
 }
 
 // ================================================================== compute
-typedef struct { Prog p; ShaderInfo *si; VkPipeline pipe; uint32_t local[3]; uint64_t code, gh; _Atomic int used; } CsProg;  // (gh: the GLSL's hash, first_use)
+typedef struct { Prog p; ShaderInfo *si; VkPipeline pipe; uint32_t local[3], shared; uint64_t code, gh; _Atomic int used; } CsProg;  // (gh: the GLSL's hash, first_use)
 
 // Compute programs run in 32-lane subgroups, as Maxwell's warps do. The game's compute shaders use ballot / shuffle / vote on a 32-lane warp (Pokémon Z-A's GPU culling
 // counts the visible instances of a batch with ballot + a leader's atomicAdd); AMD drivers run compute in 64-lane waves by default (RADV), where those counts are wrong:
@@ -7085,10 +7085,10 @@ static void build_compute(void *arg) {
 }
 
 
-static uint64_t cs_content_key(uint64_t code_hash, const uint32_t local[3]) {
+static uint64_t cs_content_key(uint64_t code_hash, const uint32_t local[3], uint32_t shared) {
     uint64_t h = code_hash;
     for (int i = 0; i < 3; i++) { h ^= local[i]; h *= 0x100000001B3ull; }
-    return h;
+    return (h ^ shared) * 0x100000001B3ull;
 }
 
 static bool translate_compute(CsProg *cp, const uint8_t *code, size_t max, uint64_t addr) {
@@ -7099,6 +7099,9 @@ static bool translate_compute(CsProg *cp, const uint8_t *code, size_t max, uint6
     pthread_mutex_lock(&translate_lock);  // (the globals too: the render thread translates as well - run_queued_now)
     maxwell_gmem_base = gwin_base + wl, maxwell_gmem_size = wn;
     maxwell_gmem_chunk_shift = gmem_chunk_shift();
+    // (unknown: a record from before the size was kept - the most the hardware has, 48 KB, or what this GPU allows)
+    uint32_t smax = g_vk.props.limits.maxComputeSharedMemorySize;
+    maxwell_shared_bytes = cp->shared ? cp->shared : smax < 0xC000 ? smax : 0xC000;
     cp->si = maxwell_translate(code, max, STAGE_COMPUTE, &k);
     if (ENV("LARECOMP_DUMP_GLSL")) {  // (debug) build/glsl/<code address>.comp
         mkdir("build/glsl", 0755);
@@ -7135,8 +7138,10 @@ static CsProg *compute_program(NvnProgram *np) {
         local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
         if (!local[i]) local[i] = 1;
     }
+    uint32_t shared = ss->control ? *(const uint32_t *)(ss->control + 0x754) : 0;  // (shared memory bytes: LDS / STS)
     uint64_t fp = code_fp(ss);
     fp ^= ((uint64_t)local[0] | (uint64_t)local[1] << 21 | (uint64_t)local[2] << 42) * 0x9E3779B97F4A7C15ull;
+    fp ^= (uint64_t)shared * 0xC2B2AE3D27D4EB4Full;
     uint64_t ak = (ss->code_addr * 0xff51afd7ed558ccdull) ^ fp;
     if (!ak) ak = 1;
     KvEnt *ae = kv_find(&cs_kv, ak);
@@ -7147,12 +7152,12 @@ static CsProg *compute_program(NvnProgram *np) {
         LOG("[compute] 256 code addresses for %u compute programs (the same shaders loaded again elsewhere)\n", cs_content_kv.n);
     }
     if (shader_rec_recording()) {
-        ShaderRec rec = {.kind = 'C', .vs = shader_stage_hash(ss), .local = {local[0], local[1], local[2]}};
+        ShaderRec rec = {.kind = 'C', .vs = shader_stage_hash(ss), .local = {local[0], local[1], local[2]}, .shared = shared};
         shader_rec_note(&rec);
         shader_seen_code(rec.vs, ss);  // (its code for the next start's preparation: shader_prep.h)
     }
     uint64_t ch = shader_stage_hash(ss);
-    uint64_t ck = ch ? cs_content_key(ch, local) : 0;
+    uint64_t ck = ch ? cs_content_key(ch, local, shared) : 0;
     KvEnt *ce = ck ? kv_find(&cs_content_kv, ck) : NULL;
     CsProg *cp = ce && ce->key ? ce->val : NULL;  // (this shader, already met at another address)
     if (!cp && ch && prep_cs_n) cp = PREP_GET(prep_cs, ck);  // prepared before the game
@@ -7170,6 +7175,7 @@ static CsProg *compute_program(NvnProgram *np) {
     kv_set(&cs_kv, ae, ak, cp);
     if (ck) kv_set(&cs_content_kv, kv_find(&cs_content_kv, ck), ck, cp);
     memcpy(cp->local, local, sizeof local);
+    cp->shared = shared;
     if (!translate_compute(cp, (const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, ss->code_addr))
         return cp;
     save_glsl(cp->si->msl, ss->code_addr, "cs");
@@ -7262,11 +7268,12 @@ static void prep_pipeline(void *arg) {
 
 bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlob *fsb) {
     if (r->kind == 'C') {
-        uint64_t ck = cs_content_key(r->vs, r->local);
+        uint64_t ck = cs_content_key(r->vs, r->local, r->shared);
         if (PREP_GET(prep_cs, ck)) return true;
         CsProg *cp = calloc(1, sizeof *cp);
         cp->code = r->vs;  // (prepared: its content hash, for the build logs)
         memcpy(cp->local, r->local, sizeof cp->local);
+        cp->shared = r->shared;
         if (!translate_compute(cp, vsb->code, vsb->const_offset ? vsb->const_offset : 0x10000, 0)) return false;
         PREP_PUT(prep_cs, ck, cp);
         prep_job(build_compute, cp);

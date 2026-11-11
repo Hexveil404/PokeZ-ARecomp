@@ -2407,6 +2407,59 @@ static void party_icons_kick(void) {  // made when missing (3 tries: cache/party
                     !same_data ? " (for this game data: none yet, or it changed since they were made)" : "");
 }
 
+// The code of the shipped list's Pokémon Z-A shaders (runtime/nvn/shader_variants_za.txt), taken out of the player's
+// romfs.bin by zaprompts --shader-code into SHADER_GAME_CODE (runtime/nvn/shader_prep.h: the game's packs are
+// Oodle-compressed, which only that GPLv3 helper reads): the next start's shader preparation (shader_prep_boot) then
+// has them before they're ever drawn - a fresh install's first play without the compile hitches of everything new.
+// ~30 s - 1.5 min, in the background, once per game files and list: SHADER_GAME_CODE ".need" is what was asked for
+// (the game files' size and date, then each code hash), copied to ".made" when done; 3 tries for each request.
+#define SHADER_GAME_CODE "cache/shader_code_game.bin"
+extern "C" const char *shader_prep_shipped_list_za(void);  // runtime/nvn/shader_prep.c
+static void shader_code_kick(void) {
+    static bool asked;  // (once a start)
+    char tool[1100];
+    if (asked) return;
+    asked = true;
+    std::string romfs = file_exists(g_root + "/romfs.bin") ? g_root + "/romfs.bin" : g_root + "/romfs";
+    struct stat sb;
+    if (stat(romfs.c_str(), &sb) || !file_exists(romfs + (is_dir(romfs) ? "/arc/data.trpfs" : "")) ||
+        !rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool))
+        return;
+    char line[64];
+    snprintf(line, sizeof line, "# %llx %llx\n", (unsigned long long)sb.st_size, (unsigned long long)sb.st_mtime);
+    std::string need = line;
+    for (const char *p = shader_prep_shipped_list_za(); (p = strstr(p, "s=")); p += 2) {  // (vs= fs= cs=)
+        unsigned long long h;
+        if ((p[-1] == 'v' || p[-1] == 'f' || p[-1] == 'c') && p[-2] == ' ' && sscanf(p + 2, "%16llx", &h) == 1 && h)
+            snprintf(line, sizeof line, "%016llx\n", h), need += line;
+    }
+    auto read = [](const char *path) {
+        std::string s;
+        if (FILE *f = fopen(path, "rb")) {
+            char b[65536];
+            for (size_t n; (n = fread(b, 1, sizeof b, f)) > 0;) s.append(b, n);
+            fclose(f);
+        }
+        return s;
+    };
+    if (read(SHADER_GAME_CODE ".made") == need) return;
+    uint64_t id = 0xcbf29ce484222325ull;  // (the request's tries: counted again for another one)
+    for (unsigned char ch : need) id = (id ^ ch) * 0x100000001b3ull;
+    unsigned long long had = 0;
+    int tries = 0;
+    if (FILE *f = fopen(SHADER_GAME_CODE ".tried", "rb")) {
+        if (fscanf(f, "%d %llx", &tries, &had) != 2 || had != id) tries = 0;
+        fclose(f);
+    }
+    if (tries >= 3) return;
+    mkdir("cache", 0755);
+    if (FILE *f = fopen(SHADER_GAME_CODE ".tried", "wb")) fprintf(f, "%d %llx", tries + 1, (unsigned long long)id), fclose(f);
+    if (FILE *f = fopen(SHADER_GAME_CODE ".need", "wb")) fwrite(need.data(), 1, need.size(), f), fclose(f);
+    const char *argv[] = {tool, "--romfs", romfs.c_str(), "--shader-code", SHADER_GAME_CODE, "--shader-need", SHADER_GAME_CODE ".need", NULL};
+    PlatProc p = plat_spawn(argv, SHADER_GAME_CODE ".log", false);
+    rt_launcher_log("[launcher] shader code: %s\n", p ? "being taken from the game files (" SHADER_GAME_CODE ".log)" : "zaprompts didn't start");
+}
+
 #ifdef __APPLE__
 static uint64_t party_texture(const void *rgba, int w, int h) {
     id<MTLDevice> dev = (__bridge id<MTLDevice>)ui_metal_device();
@@ -3030,6 +3083,7 @@ extern "C" void launcher_run(const char *root) {
                         pthread_mutex_unlock(&g_lock);
                     }
                     party_icons_kick();
+                    shader_code_kick();
                     party_panel(dl, x, ty + 68 + 34, w);
                     if (g_play_pending) pressed = true, g_play_pending = false;
                     // (a settings file from before the recommendation that already holds it: nothing to offer)

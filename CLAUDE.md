@@ -35,6 +35,9 @@ Machine-specific paths (game files, install folder) are in `CLAUDE.local.md` whe
   (`cache/shader_seen.txt`) and its shader code (`cache/shader_code.bin`, the player's own data, never shipped), and
   prepares them at its GPU device setup (`shader_prep_boot`, ~0.2 s warm; `LARECOMP_SHADER_PREP=0` off). Not from the
   start screen: before boot the guest memory window is Zelda's and the translations would bake the wrong one in.
+  A fresh install has none of those yet: the shipped Z-A list (`runtime/nvn/shader_variants_za.txt`, hashes and state
+  only) gets its code from the player's own packs, taken out once by `zaprompts --shader-code` (the start screen,
+  `shader_code_kick`) into `cache/shader_code_game.bin`.
 - `runtime/crash_explain.c`: the crash dialog's plain-language explanation.
 - `runtime/nvn/vulkan/device.c`: present, `[mem]` and `[scale]` log lines, screenshots.
 - `runtime/nvn/maxwell/translate.c`: Maxwell shader -> GLSL/MSL.

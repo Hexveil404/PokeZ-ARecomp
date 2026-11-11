@@ -536,8 +536,12 @@ void shader_cache_tag_write(const char *tag_path, const char *tag) { shader_cach
 static const char shipped_list[] =
 #include "shader_variants.inc"
     ;
+static const char shipped_list_za[] =  // (Pokémon Z-A: its code comes from SHADER_GAME_CODE_FILE)
+#include "shader_variants_za.inc"
+    ;
 
-const char *shader_prep_shipped_list(void) { return shipped_list; }
+const char *shader_prep_shipped_list(void) { return g_game_is_la ? shipped_list : shipped_list_za; }
+const char *shader_prep_shipped_list_za(void) { return shipped_list_za; }
 
 // The game files' shaders as one id (order-independent): another game version has another
 static uint64_t idx_game_id(void) {
@@ -575,7 +579,7 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
             if (n > 0 && fread(list, 1, (size_t)n, f) != (size_t)n) list[0] = 0;
             fclose(f);
         }
-    } else list = strdup(shipped_list);
+    } else list = strdup(shader_prep_shipped_list());
     if (!list || !*list) { free(list); LOG("[shader] preparation: no variant list\n"); return false; }
     if (!renderer_prepare_begin()) { free(list); LOG("[shader] preparation: no GPU device yet\n"); return false; }
     uint64_t seen_game;
@@ -590,6 +594,7 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
         snprintf(main_nso, sizeof main_nso, "%s/../exefs/main", romfs);
         idx_nso(main_nso);
         idx_store(SHADER_CODE_FILE);
+        idx_store(SHADER_GAME_CODE_FILE);
     }
     double t_idx = ms_now() - t0;
     if (idx_n) {  // (the player's list of other game files - none yet, or an update: only what this game has)

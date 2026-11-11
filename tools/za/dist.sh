@@ -31,6 +31,12 @@ build/gen-venv/Scripts/python.exe tools/pe_no_cfg.py build/helper/lasgen/lasgen.
 mkdir -p build/ooz
 (cd third_party/ooz && g++ -O2 -shared -static -include sys/stat.h -Dmain=ooz_main kraken.cpp bitknit.cpp lzna.cpp \
     ooz_lib.cpp -o ../../build/ooz/ooz.dll -Wl,-u,__mingw_fe_dfl_env)  # (-u: newer MinGW libmingwex needs CRT_fp10 from libmingw32)
+# oodec: the same decoder as its own program, which the runtime runs on a block the game fails to decode (#248);
+# ooz's own main renamed away, oodec.cpp's kept (runtime/services/fs.c oodle_native)
+(cd third_party/ooz && g++ -O2 -include sys/stat.h -Dmain=ooz_main -c kraken.cpp -o ../../build/ooz/kraken.o &&
+    g++ -O2 -include sys/stat.h -c bitknit.cpp -o ../../build/ooz/bitknit.o && g++ -O2 -include sys/stat.h -c lzna.cpp \
+    -o ../../build/ooz/lzna.o && g++ -O2 -include sys/stat.h -c oodec.cpp -o ../../build/ooz/oodec.o &&
+    cd ../../build/ooz && g++ -static kraken.o bitknit.o lzna.o oodec.o -o oodec.exe -Wl,-u,__mingw_fe_dfl_env)
 if [ ! -f build/prompts-venv/.ok2 ]; then  # (.ok2: texture2ddecoder, the team icons' BC7)
     py -3.12 -m venv build/prompts-venv
     build/prompts-venv/Scripts/python.exe -m pip install -q pillow==13.0.0 numpy==2.5.4 fonttools==4.67.0 cffsubr==0.4.0 texture2ddecoder==1.0.6 \
@@ -61,6 +67,7 @@ echo "<!-- zarecomp-gamelib: $(make -s gamelib-id B=$B RELEASE=1 GENARCH="$GENAR
 cat build/release-gamelib.txt
 cp -R build/helper/lasgen "$D/"
 cp -R build/helper/zaprompts "$D/"
+cp build/ooz/oodec.exe "$D/zaprompts/"
 cp third_party/ooz/COPYING "$D/zaprompts/COPYING-GPLv3.txt"
 cp third_party/ooz/README.ZARecomp.md "$D/zaprompts/README-ooz.md"
 cp -R build/zig-slim "$D/zig"

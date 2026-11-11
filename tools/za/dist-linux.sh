@@ -52,6 +52,11 @@ mkdir -p build/ooz
 O=third_party/ooz
 g++ -O2 -shared -fPIC -Itools/za/ooz_posix -include tools/za/ooz_posix/ooz_posix.h -include sys/stat.h \
     -Dmain=ooz_main $O/kraken.cpp $O/bitknit.cpp $O/lzna.cpp $O/ooz_lib.cpp -o build/ooz/libooz.so
+# oodec: the same decoder as its own program, run by the runtime on a block the game fails to decode (#248)
+OF="-O2 -Itools/za/ooz_posix -include tools/za/ooz_posix/ooz_posix.h -include sys/stat.h"
+g++ $OF -Dmain=ooz_main -c $O/kraken.cpp -o build/ooz/kraken.o && g++ $OF -c $O/bitknit.cpp -o build/ooz/bitknit.o &&
+    g++ $OF -c $O/lzna.cpp -o build/ooz/lzna.o && g++ $OF -c $O/oodec.cpp -o build/ooz/oodec.o &&
+    g++ build/ooz/kraken.o build/ooz/bitknit.o build/ooz/lzna.o build/ooz/oodec.o -o build/ooz/oodec
 PV=$L/prompts-venv
 if [ ! -f "$PV/.ok" ]; then
     rm -rf "$PV" && "$PY" -m venv "$PV"
@@ -74,6 +79,7 @@ D=$APPDIR/usr/bin
 cp "$B/lasrecomp" "$D/"
 llvm-strip --strip-debug "$D/lasrecomp"  # (symbols stay: crash backtraces name functions)
 cp -R "$L/helper/lasgen" "$L/helper/zaprompts" build/zig "$D/"
+cp build/ooz/oodec "$D/zaprompts/"
 cp third_party/ooz/COPYING "$D/zaprompts/COPYING-GPLv3.txt"
 cp third_party/ooz/README.ZARecomp.md "$D/zaprompts/README-ooz.md"
 if [ "$ZAIMPORT" = 1 ]; then mkdir "$D/zaimport" && cp "$L/zaimport/zaimport" "$D/zaimport/"; fi

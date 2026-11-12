@@ -8380,11 +8380,21 @@ static void draw_(CmdRec *r, bool indexed) {
         }
         // (Pokémon Z-A: its screen fade is a layout pane the size of the screen, 1920x1080, filled from a 16x16 white
         // texture - boxed, it left the sides unfaded through a load's fade-in in the ultrawide view,
-        // runtime/hle/widescreen.c. A pane that big with an image of its own, a menu backdrop, stays in the box.)
-        if (!g_game_is_la && fullscreen_quad && pr->fi->ntex == 1 && tex_wh[1][0][0] <= 64 && tex_wh[1][0][1] <= 64 &&
-            st.ubuf[0][0].addr && st.ubuf[0][0].size == 560 &&
-            !widescreen_ui_pane_partial((const float *)(uintptr_t)st.ubuf[0][0].addr, st.ubuf[0][0].size))
-            fade_fill = true;
+        // runtime/hle/widescreen.c. A pane that big with an image of its own, a menu's pattern, stays in the box.)
+        bool screen_pane = !g_game_is_la && fullscreen_quad && pr->fi->ntex == 1 && st.ubuf[0][0].addr &&
+                           st.ubuf[0][0].size == 560 &&
+                           !widescreen_ui_pane_partial((const float *)(uintptr_t)st.ubuf[0][0].addr, st.ubuf[0][0].size);
+        if (screen_pane && tex_wh[1][0][0] <= 64 && tex_wh[1][0][1] <= 64) fade_fill = true;
+        // (and its menus' backdrop, the world blurred: such a pane with a screen-sized image the GPU drew - the blur, made
+        // from the wide scene, so the whole wide view squeezed into 16:9. Boxed, the sides showed what the game draws
+        // under it with a menu up, its scene at 16x8 pixels, stretched: big blocks, #254. It fills the window instead.)
+        static uint64_t menu_frame = ~0ull;  // (a frame with that backdrop: a menu is up)
+        if (screen_pane && tex_wh[1][0][0] == st.rt.color[0]->width && tex_wh[1][0][1] == st.rt.color[0]->height) {
+            NvnTexture *t = hook_pass ? ftex[0] : shader_texture_object(1, &pr->fi->tex[0]);
+            if (t && t->backend && ((const TexBackend *)t->backend)->gpu_owned) fade_fill = true, menu_frame = renderer_exec_frame();
+        }
+        static uint64_t scene_frame = ~0ull;  // (a frame whose world was drawn into the window: play, not a title / load)
+        if (reads_scene) scene_frame = renderer_exec_frame();
         bool composite = reads_scene || fade_fill || (fullscreen_fill && wide_frame == renderer_exec_frame());
         if (!composite) wide_frame = ~0ull;
         if (!composite) {
@@ -8394,6 +8404,52 @@ static void draw_(CmdRec *r, bool indexed) {
             vp_sx = vp_sy = u;
             vp_ox = (pw - st.rt.color[0]->width * u) * 0.5f;
             vp_oy = (ph - st.rt.color[0]->height * u) * 0.5f;
+            float b_lo[2] = {0, 0}, b_hi[2] = {0, 0};
+            extern bool widescreen_ui_pane_bounds(const float *u, uint64_t size, float lo[2], float hi[2]);
+            bool pane = !g_game_is_la && vp[2] > 0 &&
+                        widescreen_ui_pane_bounds((const float *)(uintptr_t)st.ubuf[0][0].addr, st.ubuf[0][0].size, b_lo, b_hi);
+            float a = fmaxf(b_lo[0], -1), b = fminf(b_hi[0], 1);  // (the pane's part on the 16:9 screen)
+            // Pokémon Z-A: a background pane reaches the window's edges, not the 16:9 box's: one about a screen wide
+            // (1.95-3.6, its quad's bounds - the title's shading, and its big glows, whose bounds grow as they turn)
+            // running to or past an edge, or a plain one (no image, or a fill of 64 pixels or less) at least 15% of the
+            // screen wide that ends exactly at the left or right edge (the loading screens' band, a menu's side
+            // panel). Not the minimap's map (0.77 or 2.7 screens wide, run off the screen and clipped), images ending at
+            // an edge (a menu's title), or small pieces near it (the party's arrow glow, -0.992).
+            float wide = b_hi[0] - b_lo[0];
+            bool big = pane && wide >= 1.95f && wide <= 3.6f;
+            bool plain = pane && (pr->fi->ntex == 0 || (tex_wh[1][0][0] <= 64 && tex_wh[1][0][1] <= 64)) && b - a >= 0.3f;
+            bool at_l = (big && b_lo[0] <= -0.99f) || (plain && fabsf(b_lo[0] + 1) < 0.002f);
+            bool at_r = (big && b_hi[0] >= 0.99f) || (plain && fabsf(b_hi[0] - 1) < 0.002f);
+            static uint64_t backdrop_frame = ~0ull;  // (a frame with such a background: a screen laid out as a whole)
+            if ((at_l || at_r) && b > a + 0.01f) {
+                backdrop_frame = renderer_exec_frame();
+                // That side stretched out, its other edge (and the text and icons over it, other panes) where it was.
+                float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx;
+                float L = at_l ? 0 : vx + (a + 1) * 0.5f * vw, R = at_r ? (float)pw : vx + (b + 1) * 0.5f * vw;
+                float nw = 2 * (R - L) / (b - a), nx = L - (a + 1) * 0.5f * nw;
+                vp_sx = nw / vp[2], vp_ox = nx - vp[0] * vp_sx;
+            } else if (!g_game_is_la && g_settings.hud_width > 0 && scene_frame == renderer_exec_frame() &&
+                       menu_frame != renderer_exec_frame() && backdrop_frame != renderer_exec_frame()) {
+                // F1 > HUD width: over the world (not a title, a loading screen or a menu - a background pane or its
+                // blurred backdrop drawn this frame, above: each laid out as a whole), a piece on the left / right side
+                // of the 16:9 screen moves out by that share of the extra width (vp_ox: half of it), towards the
+                // window's edge: the minimap, the party, the battle panels reach the corners. Moved, never stretched.
+                // A pane by its edges: it reaches past 40% of the half-screen and doesn't cross 10% into the other
+                // half, so a middle widget stays whole (the battle's eye meter, +-35%, its end pieces too). A pane
+                // wider than the screen (the minimap's map, clipped) by its origin, as text: its draw has only a
+                // 128-byte transform, the origin its text box's anchor (the battle panel's "Lv. 42": -0.71, with its
+                // tag) - past 40% from the middle, so centred text (messages) stays.
+                const float *U = (const float *)(uintptr_t)st.ubuf[0][0].addr;
+                int side = 0;
+                float o = 0;
+                bool origin = false;
+                if (pane && wide > 2.0f) o = U[0] * U[19] + U[1] * U[23] + U[2] * U[27] + U[3], origin = true;
+                else if (!pane && U && st.ubuf[0][0].size == 128 && U[15] == 1 && U[12] == 0 && U[13] == 0 && U[0] > 0)
+                    o = U[3], origin = true;
+                if (origin) side = o < -0.4f ? -1 : o > 0.4f ? 1 : 0;
+                else if (pane) side = b_lo[0] < -0.4f && b_hi[0] <= 0.1f ? -1 : b_hi[0] > 0.4f && b_lo[0] >= -0.1f ? 1 : 0;
+                vp_ox += side * vp_ox * (float)g_settings.hud_width / 100.0f;
+            }
         }
     }
     {   // camera-attached effects sized for 16:9 are widened with the view (runtime/hle/widescreen.c)

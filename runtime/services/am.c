@@ -294,7 +294,21 @@ static void application_functions(Service *s, IpcReq *req, IpcResp *resp) {
         resp_size(resp, 8);
         break;
     }
-    case 23: memcpy(resp->data, "1.0.0", 6); resp_size(resp, 0x10); break;
+    case 23: {  // GetDisplayVersion: the game's own version, as on the console. It was "1.0.0" for any game (Link's
+                // Awakening's): code mods that pick their hooks by it read Pokémon Z-A 2.0.0 / 2.0.2 as 1.0.0 (#258)
+        static const struct { uint8_t id[8]; const char *v; } za[] = {
+            {{0x72, 0x22, 0xe1, 0x3e, 0xcf, 0x6a, 0xdb, 0x32}, "1.0.0"},
+            {{0x8a, 0x1c, 0x86, 0xc4, 0x37, 0x39, 0x4b, 0x69}, "2.0.0"},
+            {{0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a}, "2.0.2"}};
+        extern uint8_t g_main_build_id[8];
+        const char *v = "1.0.0";
+        for (size_t i = 0; i < sizeof za / sizeof za[0]; i++)
+            if (!memcmp(g_main_build_id, za[i].id, 8)) v = za[i].v;
+        memset(resp->data, 0, 0x10);
+        memcpy(resp->data, v, strlen(v) + 1);
+        resp_size(resp, 0x10);
+        break;
+    }
     case 40: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;  // NotifyRunning
     case 130: case 140: resp->copy_handles[resp->ncopy++] = new_event(); break;
     default: UNHANDLED("IApplicationFunctions");

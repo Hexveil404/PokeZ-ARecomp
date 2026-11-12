@@ -1065,7 +1065,7 @@ static pthread_mutex_t jobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
 // when each thread's current job started (0: idle) - wait_built says which one a stalled draw is stuck behind
 #define MAX_WORKERS 16
-static _Atomic uint64_t worker_t0[MAX_WORKERS], translator_t0;
+static _Atomic uint64_t worker_t0[MAX_WORKERS + 1], translator_t0;  // (+1: the urgent builds, run_queued_now)
 static _Atomic int nworkers;
 static _Atomic uint64_t builds_done;  // (shaders / pipelines built, all session: renderer_shader_builds)
 // Shader work for runtime/hle/framepace.c (seconds spent building shaders don't count against 60 fps): the builds
@@ -1169,7 +1169,7 @@ static void run_job(void (*fn)(void *), void *arg, _Atomic int *state) {
 // of them (over a second, a frozen frame). false: not queued (running, or done).
 // The queued job building state, taken out of its queue (take) or moved to its front, for the next free thread: a draw
 // skipped for it (wait_scene) gets it in a build or two, not after every build queued before it.
-static Job *queued_job(_Atomic int *state, bool take) {
+static Job *queued_job(_Atomic int *state, bool take, int *queue) {
     for (int q = 0; q < 2; q++) {
         pthread_mutex_t *lock = q ? &jobs_lock : &tjobs_lock;
         Job **head = q ? &jobs_head : &tjobs_head, **tail = q ? &jobs_tail : &tjobs_tail, *prev = NULL;
@@ -1183,17 +1183,39 @@ static Job *queued_job(_Atomic int *state, bool take) {
                 if (!take) j->next = *head, *head = j;
             }
             pthread_mutex_unlock(lock);
+            if (queue) *queue = q;
             return j;
         }
         pthread_mutex_unlock(lock);
     }
     return NULL;
 }
-static bool run_queued_now(_Atomic int *state) {
-    Job *j = queued_job(state, true);
-    if (!j) return false;
+// A build taken out of the workers' queue runs on a thread of its own, not the render thread: the driver's compiler can
+// crash on a pipeline (#93, #251: AMD R7 360, 22.6.1, amdvlk64.dll+885a8 on a full-screen pass's pipeline), and a build
+// thread is left where it is while the game goes on without that pipeline (vk_compile_crash_recover) - the render
+// thread can't be, so the crash dialog came instead, a run after run with one more pipeline listed each time. The
+// draw waits on the build's state as before (wait_built polls it), so it costs a thread start (~0.1 ms). Translations
+// (the first queue) are ours, not the driver's: still run here.
+static void *urgent_build(void *a) {
+    Job *j = a;
+    t_worker = MAX_WORKERS;  // (vk_compile_abandon: a build thread, not one to start again)
+    atomic_store(&worker_t0[MAX_WORKERS], SDL_GetTicksNS());
     j->fn(j->arg);
+    atomic_store(&worker_t0[MAX_WORKERS], 0);
     free(j);
+    return NULL;
+}
+static bool run_queued_now(_Atomic int *state) {
+    int q = 0;
+    Job *j = queued_job(state, true, &q);
+    if (!j) return false;
+    pthread_t t;
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    bool own = q == 1 && pthread_create(&t, &at, urgent_build, j) == 0;
+    pthread_attr_destroy(&at);
+    if (!own) { j->fn(j->arg); free(j); }  // (a translation, or no thread to be had)
     return true;
 }
 
@@ -3410,6 +3432,9 @@ static void build_pipeline(void *arg) {
         long e = -1;
         if (atomic_compare_exchange_strong(&left, &e, ENV("LARECOMP_TEST_COMPILE_CRASH") ? atol(ENV("LARECOMP_TEST_COMPILE_CRASH")) : 0)) {}
         if (atomic_load(&left) > 0 && atomic_fetch_sub(&left, 1) == 1) *(volatile int *)(uintptr_t)8 = 1;
+        static _Atomic int urgent_once;  // LARECOMP_TEST_COMPILE_CRASH_URGENT=1: the first build a draw waits on (#251)
+        if (t_worker == MAX_WORKERS && ENV("LARECOMP_TEST_COMPILE_CRASH_URGENT") && !atomic_exchange(&urgent_once, 1))
+            *(volatile int *)(uintptr_t)8 = 1;
     }
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &c.pi, NULL, &pp->pipe);
     t_build_vs = t_build_fs = 0;
@@ -3444,7 +3469,7 @@ bool vk_compile_abandon(void) {
     if (t_prep_job) prep_pending--;
     atomic_store(&worker_t0[t_worker], 0);
     pthread_t t;
-    pthread_create(&t, NULL, worker, (void *)(intptr_t)t_worker);
+    if (t_worker < MAX_WORKERS) pthread_create(&t, NULL, worker, (void *)(intptr_t)t_worker);  // (an urgent build's: none)
     t_worker = -1;
     return true;
 }
@@ -7975,7 +8000,7 @@ static void fixed_state(FixedState *f, bool flip_x, bool flip_y, bool native, Vk
 // player's PC as a battle began), and the log says what the shader threads were doing. A full-screen draw runs its
 // own build if it's still queued (run_queued_now): it waits for that build, not for every one queued before it.
 static bool wait_scene(_Atomic int *state) {
-    if (atomic_load(state) == 0) queued_job(state, false);  // (its build next: skipped for a frame or two, not until
+    if (atomic_load(state) == 0) queued_job(state, false, NULL);  // (its build next: skipped for a frame or two, not until
                                                              // the whole queue is done; 2: failed, nothing queued)
     static double budget_ms = -1;
     if (budget_ms < 0) budget_ms = ENV("LARECOMP_VK_SCENE_WAIT_MS") ? atof(ENV("LARECOMP_VK_SCENE_WAIT_MS")) : 6;

@@ -88,7 +88,9 @@ static bool dozen_crash_to_vulkan(void) {
 }
 
 // (device.c vk_compile_crash_recover; LARECOMP_TEST_COMPILE_CRASH: the test's crash is in build_pipeline itself)
-bool rt_compile_crash_at(uint64_t pc) { return in_gpu_driver(pc) || getenv("LARECOMP_TEST_COMPILE_CRASH"); }
+bool rt_compile_crash_at(uint64_t pc) {
+    return in_gpu_driver(pc) || getenv("LARECOMP_TEST_COMPILE_CRASH") || getenv("LARECOMP_TEST_COMPILE_CRASH_URGENT");
+}
 
 void rt_crash_explain(char *out, size_t n, const char *log_path) {
     static const char *const report = "Please report it as a GitHub issue and attach the log file below. "

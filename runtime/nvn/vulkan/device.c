@@ -648,12 +648,17 @@ bool vk_compile_crash_recover(uint64_t pc, const char *what, uint64_t fa) {
     extern const char *plat_symbol(uint64_t pc, uint64_t *offset);
     uint64_t off = 0;
     const char *m = plat_symbol(pc, &off);
-    LOG("[vk] %s accessing %#llx at %s+%llx, on a build worker: the game goes on\n", what, (unsigned long long)fa, m ? m : "?",
-        (unsigned long long)off);
     int was = rt_gpu_bad_code;
     vk_compile_crash_note();
+    if (!vk_compile_abandon()) {  // (not a build thread: the crash report follows, the pipeline listed for the next start)
+        LOG("[vk] %s accessing %#llx at %s+%llx, not on a build thread: the game can't go on\n", what,
+            (unsigned long long)fa, m ? m : "?", (unsigned long long)off);
+        return false;
+    }
     rt_gpu_bad_code = was;  // (no dialog comes: a later, unrelated crash mustn't read as this one)
-    return vk_compile_abandon();
+    LOG("[vk] %s accessing %#llx at %s+%llx, on a build thread: the game goes on\n", what, (unsigned long long)fa,
+        m ? m : "?", (unsigned long long)off);
+    return true;
 }
 
 void vk_device_fault_report(void) {

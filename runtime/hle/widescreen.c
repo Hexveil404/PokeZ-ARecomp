@@ -56,6 +56,20 @@ bool widescreen_ui_pane_bounds(const float *u, uint64_t size, float lo[2], float
     }
     return true;
 }
+// F1 > HUD width (vulkan/exec.c): -1 / 1 for a piece on the left / right side of the 16:9 screen, 0 for one in the
+// middle. A pane (its bounds lo / hi) by its edges: it reaches past 40% of the half-screen and doesn't cross 10% into
+// the other half, so a middle widget stays whole (the battle's eye meter, +-35%, its end pieces too). A pane wider than
+// the screen (the minimap's map, clipped) by its origin, and text too: its draw has only a 128-byte transform (no
+// pane rect), the origin its text box's anchor (the battle panel's "Lv. 42": -0.71, with its tag) - past 40% from
+// the middle, so centred text (messages) stays.
+int widescreen_ui_hud_side(const float *u, uint64_t size, bool pane, const float lo[2], const float hi[2]) {
+    float o;
+    if (pane && hi[0] - lo[0] > 2.0f) o = u[0] * u[19] + u[1] * u[23] + u[2] * u[27] + u[3];
+    else if (pane) return lo[0] < -0.4f && hi[0] <= 0.1f ? -1 : hi[0] > 0.4f && lo[0] >= -0.1f ? 1 : 0;
+    else if (u && size == 128 && u[15] == 1 && u[12] == 0 && u[13] == 0 && u[0] > 0) o = u[3];
+    else return 0;
+    return o < -0.4f ? -1 : o > 0.4f ? 1 : 0;
+}
 // true when they describe a pane that doesn't cover the screen (such a draw stays in the 16:9 box).
 bool widescreen_ui_pane_partial(const float *u, uint64_t size) {
     float lo[2], hi[2];

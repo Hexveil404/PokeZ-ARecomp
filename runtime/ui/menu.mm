@@ -553,9 +553,12 @@ static void tab_display(bool in_game) {
     if (!la && g_settings.aspect == ASPECT_UNLOCKED)  // (Pokémon Z-A: its HUD is boxed 16:9 - vulkan/exec.c moves it out)
         opt_int(TR("HUD width", "Largura do HUD"), &g_settings.hud_width, 0, 100, 10, 0, "%d%%",
                 TR("In a window wider than 16:9: how far the HUD's corners move out towards the window's sides. 16:9: "
-                   "the HUD as the game lays it out, in the middle. 100%: at the window's edges. Menus stay in the middle.",
+                   "the HUD as the game lays it out, in the middle. 100%: at the window's edges. Menus stay in the middle. "
+                   "Markers over characters and places near the sides (name tags, quest markers) move with the HUD.",
                    "Numa janela mais larga que 16:9: quanto os cantos do HUD se afastam para os lados da janela. 16:9: "
-                   "o HUD como o jogo o dispõe, no meio. 100%: nas bordas da janela. Os menus ficam no meio."),
+                   "o HUD como o jogo o dispõe, no meio. 100%: nas bordas da janela. Os menus ficam no meio. "
+                   "Marcadores sobre personagens e lugares perto das laterais (nomes, marcadores de missão) se movem "
+                   "com o HUD."),
                 "16:9");
     bool fs = g_settings.fullscreen;
     if (opt_toggle(TR("Fullscreen", "Tela cheia"), &fs, false,

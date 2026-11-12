@@ -44,6 +44,9 @@ ap.add_argument('--party-icons', metavar='DIR', help="the Pokémon box icons int
 ap.add_argument('--maxlod', metavar='DIR', help='DIR/romfs: every model at its full detail (lod_mod.py; then make nothing else)')
 ap.add_argument('--drawdist', metavar='DIR', help='DIR/romfs: the scene parts with draw distances x --factor (draw_dist.py)')
 ap.add_argument('--factor', type=float, default=2, help='with --drawdist: the distances times this')
+ap.add_argument('--shader-code', metavar='FILE', help="the code of the shaders --shader-need names, from the game's packs, "
+                                                       'into FILE (then make nothing else)')
+ap.add_argument('--shader-need', metavar='FILE', help='with --shader-code: the shaders wanted, one hex code hash a line')
 ap.add_argument('--xbox-attack-layout', action='store_true', help='prepare the optional battle layout during setup')
 ap.add_argument('--xbox-attack-layout-only', action='store_true', help='prepare only the battle layout (release smoke test)')
 ap.add_argument('--xbox-attack-layout-version', action='store_true', help='check the frozen helper includes battle layout support')
@@ -329,6 +332,91 @@ if args.party_icons:
     if made:
         with open(os.path.join(args.party_icons, '.made'), 'w') as f: f.write('%d\n' % made)
     sys.exit(0 if made else 1)
+
+
+# ------------------------------------------------------------------ shader code (--shader-code)
+# The shader preparation (runtime/nvn/shader_prep.c) finds a record's shaders by the hash of their code in the BNSH
+# shader containers of the game files - which Pokémon Z-A keeps inside its Oodle-compressed packs, where the runtime
+# can't read (it doesn't load ooz: GPLv3). So once per game files (runtime/ui/launcher.mm shader_code_kick) every pack
+# is unpacked here and the code of each shader the shipped list names is written out in shader_code.bin's format
+# (runtime/nvn/shader_prep.h ShaderCodeHdr: hash, size, constants' offset and size, then the bytes). The player's own
+# data, made from their own files, never shipped. ~1.5 min on a fast CPU.
+def bnsh_stages(d, b):  # one BNSH container at d[b:] -> (code offset, code + constants' length, constants' offset, size)
+    rd32 = lambda o: struct.unpack_from('<I', d, o)[0]  # (the same walk, and checks, as shader_prep.c idx_bnsh)
+    rd64 = lambda o: struct.unpack_from('<Q', d, o)[0]
+    n = len(d)
+    if b + 0x20 > n or d[b + 0xC:b + 0xE] != b'\xff\xfe': return
+    fsz = rd32(b + 0x1C)
+    if fsz < 0x40 or b + fsz > n: return
+    first = d[b + 0x16] | d[b + 0x17] << 8
+    if first + 0x28 > fsz or d[b + first:b + first + 4] != b'grsc': return
+    nvar, pvar = rd32(b + first + 0x1C), rd64(b + first + 0x20)
+    if pvar >= fsz or nvar > (fsz - pvar) // 0x40: return
+    for v in range(nvar):
+        pbin = rd64(b + pvar + v * 0x40 + 0x10)
+        if not pbin or pbin + 0x38 > fsz: continue
+        for s in range(6):
+            pc = rd64(b + pbin + 8 + 8 * s)
+            if not pc or pc + 0x20 > fsz: continue
+            pctl, pcode, csz = rd64(b + pc + 8), rd64(b + pc + 0x10), rd32(b + pc + 0x18)
+            if pctl + 0x750 > fsz or pcode >= fsz or csz > fsz - pcode: continue
+            coff, cs = rd32(b + pctl + 0x700), rd32(b + pctl + 0x6FC)
+            if not coff or coff > csz or cs > csz - coff: continue
+            yield b + pcode, coff + cs, coff, cs
+
+
+if args.shader_code:
+    if hasattr(ooz, 'ooz_fnv64'):
+        ooz.ooz_fnv64.argtypes, ooz.ooz_fnv64.restype = [ctypes.c_char_p, ctypes.c_size_t], ctypes.c_uint64
+        fnv64 = lambda b: ooz.ooz_fnv64(b, len(b))
+    else:  # (an older ooz: slow)
+        def fnv64(b):
+            h = 0xcbf29ce484222325
+            for c in b: h = ((h ^ c) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+            return h
+    need = set()
+    with open(args.shader_need) as f:
+        for line in f:
+            if line.strip() and not line.startswith('#'): need.add(int(line, 16))  # ('#': the game files' identity)
+    got, files = {}, 0
+    for romfs in args.romfs:
+        m = open_game(romfs)[0]
+        fb = FB(m)
+        root = fb.u64(8)
+        n, op = fb.vec(fb.table(root + fb.u32(root))[1])
+        for i in range(n):
+            off = fb.u64(op + 8 * i)
+            nf, fp = fb.vec(fb.table(off + fb.u32(off))[1])
+            for j in range(nf):
+                e = fp + 4 * j
+                ft = fb.table(e + fb.u32(e))
+                comp = m[ft[1]] if len(ft) > 1 and ft[1] else 0xFF
+                size = fb.u64(ft[3]) if len(ft) > 3 and ft[3] else 0
+                if size > 64 << 20: continue
+                dn, dp = fb.vec(ft[4])
+                try:
+                    d = unpack(comp, size, m[dp:dp + dn])
+                except ValueError:
+                    continue
+                files += 1
+                b = d.find(b'BNSH\0\0\0\0')
+                while b >= 0:
+                    if b % 8 == 0:  # (containers are aligned)
+                        for at, ln, coff, cs in bnsh_stages(d, b):
+                            code = d[at:at + ln]
+                            h = fnv64(code)
+                            if h in need and h not in got: got[h] = (code, coff, cs)
+                    b = d.find(b'BNSH\0\0\0\0', b + 8)
+    tmp = args.shader_code + '.tmp'
+    with open(tmp, 'wb') as f:
+        for h, (code, coff, cs) in got.items():
+            f.write(struct.pack('<QIIII', h, len(code), coff, cs, 0) + code)
+    os.replace(tmp, args.shader_code)  # (whole or not at all: the runtime reads it at its next start)
+    if got:  # (done for this request: the start screen asks again only for another one)
+        import shutil
+        shutil.copyfile(args.shader_need, args.shader_code + '.made')
+    print('shader code: %d of %d shaders found, %d files unpacked' % (len(got), len(need), files), flush=True)
+    sys.exit(0 if got else 1)
 
 
 # ------------------------------------------------------------------ labels

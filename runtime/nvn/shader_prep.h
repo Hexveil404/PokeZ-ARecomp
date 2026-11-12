@@ -89,6 +89,11 @@ void shader_seen_note(const ShaderRec *r);
 // the seen list's writer thread.
 #define SHADER_CODE_FILE "cache/shader_code.bin"
 typedef struct { uint64_t hash; uint32_t size, const_offset, const_size, pad; } ShaderCodeHdr;
+// The same for the shipped list's Pokémon Z-A shaders (shader_variants_za.txt), taken out of the player's own game files
+// by zaprompts --shader-code (tools/za/prompt_textures.py: the packs are Oodle-compressed, which only that helper reads)
+// once per game files (runtime/ui/launcher.mm shader_code_kick): a fresh install prepares them before its first play.
+#define SHADER_GAME_CODE_FILE "cache/shader_code_game.bin"
+const char *shader_prep_shipped_list_za(void);
 void shader_seen_code(uint64_t hash, const struct NvnShaderStage *s);
 bool shader_seen_shipped(const char *line);  // the record (its text form) is in the shipped list
 // (preparation) the file's text (NULL: none) and the game id in its header (0: none)

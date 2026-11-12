@@ -192,10 +192,11 @@ $(B)/fsr2/%.o: third_party/fsr2/%.cpp
 
 # The shader preparation's variant list (runtime/nvn/shader_prep.h: no shader code, hashes and pipeline state only)
 # as a C string for runtime/nvn/shader_prep.c
-$(B)/inc/shader_variants.inc: runtime/nvn/shader_variants.txt
+# (shader_variants_za.inc: Pokémon Z-A's, runtime/nvn/shader_variants_za.txt)
+$(B)/inc/%.inc: runtime/nvn/%.txt
 	@mkdir -p $(dir $@)
 	(LC_ALL=C tr -d '\r' < $< | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/'; echo '""') > $@
-$(B)/rt/nvn/shader_prep.o: $(B)/inc/shader_variants.inc
+$(B)/rt/nvn/shader_prep.o: $(B)/inc/shader_variants.inc $(B)/inc/shader_variants_za.inc
 $(B)/rt/nvn/shader_prep.o: RTFLAGS += -I$(B)/inc
 # the shader translator's id: part of the shader caches' tag (shader_cache_tag), so a changed translator rebuilds them
 TRANSLATOR_SRCS := runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h

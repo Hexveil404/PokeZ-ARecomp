@@ -39,6 +39,7 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 - [Troubleshooting](#troubleshooting)
 - [Building from source](#building-from-source)
 - [Developer tools](#developer-tools)
+- [Related projects](#related-projects)
 - [Credits](#credits)
 - [Legal](#legal)
 
@@ -368,6 +369,16 @@ For anyone working on the port itself. Players don't need these, and they stay o
 
 The [developer tools guide](docs/dev-tools.md) covers setup and how to use each one. To build ZA DevTools on Windows:
 `bash tools/devtools/build.sh`.
+
+## Related projects
+
+Projects that took ZA Recomp as their starting point, by [@fabioschmidt01](https://github.com/fabioschmidt01) - thank
+you for building on this work and for crediting it (#256):
+
+- **[PokeL-ARecomp](https://github.com/fabioschmidt01/PokeL-ARecomp)**: Pokémon Legends: Arceus.
+- **[PokeV-Recomp](https://github.com/fabioschmidt01/PokeV-Recomp)**: Pokémon Violet.
+
+They are separate projects: their issues and releases are on their own pages.
 
 ## Credits
 

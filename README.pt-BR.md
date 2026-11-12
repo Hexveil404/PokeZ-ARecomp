@@ -39,6 +39,7 @@ para *The Legend of Zelda: Link's Awakening*.
 - [Solução de problemas](#solução-de-problemas)
 - [Compilando o código-fonte](#compilando-o-código-fonte)
 - [Ferramentas de desenvolvimento](#ferramentas-de-desenvolvimento)
+- [Projetos relacionados](#projetos-relacionados)
 - [Créditos](#créditos)
 - [Aviso legal](#aviso-legal)
 
@@ -366,6 +367,16 @@ Para quem trabalha no próprio port. Quem só joga não precisa delas, e elas fi
 
 O [guia das ferramentas de desenvolvimento](docs/dev-tools.pt-BR.md) explica a preparação e como usar cada uma. Para
 compilar o ZA DevTools no Windows: `bash tools/devtools/build.sh`.
+
+## Projetos relacionados
+
+Projetos que partiram do ZA Recomp, de [@fabioschmidt01](https://github.com/fabioschmidt01) - obrigado por construir
+em cima deste trabalho e por dar o crédito (#256):
+
+- **[PokeL-ARecomp](https://github.com/fabioschmidt01/PokeL-ARecomp)**: Pokémon Legends: Arceus.
+- **[PokeV-Recomp](https://github.com/fabioschmidt01/PokeV-Recomp)**: Pokémon Violet.
+
+São projetos à parte: problemas e versões deles ficam nas páginas de cada um.
 
 ## Créditos
 

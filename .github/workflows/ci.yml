@@ -74,6 +74,10 @@ jobs:
         run: |
           clang -O2 -pthread tools/test_condvar.c -o build/test-condvar
           build/test-condvar
+      - name: Build threads (a waiting draw's build off the render thread; a compiler crash there survived, #251)
+        run: |
+          clang -std=gnu11 -O1 -pthread -Iruntime tools/test_build_threads.c -o build/test-build-threads
+          timeout 60 build/test-build-threads
       - name: Settings regression tests
         run: DEPS="$HOME/sdl3" python3 tools/test_settings.py
       - name: Game-files delete guard (links, outside the data folder)
@@ -189,6 +193,10 @@ jobs:
         run: |
           clang -O2 -pthread tools/test_condvar.c -o build/test-condvar.exe
           build/test-condvar.exe
+      - name: Build threads (a waiting draw's build off the render thread; a compiler crash there survived, #251)
+        run: |
+          clang -std=gnu11 -O1 -pthread -Iruntime tools/test_build_threads.c -o build/test-build-threads.exe
+          timeout 60 build/test-build-threads.exe
       - name: Controller rumble (HID bridge to SDL, fake gamepad)
         run: |
           clang -std=gnu11 -O2 $(pkg-config --cflags sdl3) tools/test_rumble.c $(pkg-config --libs sdl3) -o build/test-rumble.exe

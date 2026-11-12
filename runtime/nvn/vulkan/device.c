@@ -1759,14 +1759,19 @@ static int screen_watch(void *arg) {
     bool test = ENV("LARECOMP_TEST_SCREEN_STALE") != NULL, have = false;
     bool fired = false, moved = false;  // (a recovery asked for; the grab changed since)
     uint32_t last_scr = 0, last_img = 0;
-    int stale = 0;
+    int stale = 0, since = 0;  // (since: grabs since the recovery)
     for (;;) {
         SDL_Delay(1000);
         void *hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
         uint32_t scr = 0, img = atomic_load(&g_img_changes);
         // (in the background or minimised: can't tell - and the window shown anew after it, a recovery counts again)
         if (!test && !plat_window_screen_hash(hwnd, &scr)) { have = fired = false, stale = 0; continue; }
-        if (have && scr != last_scr) moved = true;
+        // The grab changing counts once two grabs have passed since the recovery: the new swapchain's own black frame
+        // and the redraw after it are a change the grab sees even where it is blind to the game's frames (fullscreen,
+        // frames flipped to the display) - taken for "it worked", a blink every few seconds on and on (seen 4 times
+        // in 2 minutes at 50 fps, fullscreen; each focus change let it start again).
+        since++;
+        if (have && scr != last_scr && (!fired || since > 2)) moved = true;
         // (the game's image moving meanwhile)
         stale = have && scr == last_scr && (img - last_img >= 5 || test) ? stale + 1 : 0;
         have = true, last_scr = scr, last_img = img;
@@ -1777,7 +1782,7 @@ static int screen_watch(void *arg) {
             return 0;
         }
         atomic_store(&g_screen_stale, true);
-        stale = 0, fired = true, moved = false;
+        stale = 0, fired = true, moved = false, since = 0;
     }
     return 0;
 }

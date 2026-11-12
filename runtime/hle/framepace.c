@@ -112,6 +112,43 @@ static bool fps60_holds(void) {
 //   LARECOMP_FRAME_DT_FORCE=<n> (test) always hand the game n (its step is n + 1 ticks)
 //   LARECOMP_FRAME_DT_LOG=1    the first 20 calls and every 60th: the time measured and the step handed on
 static uint32_t za_step_n;  // (the game thread) this frame's accumulator step (rt_za_frame_step hands it on)
+// ---- The pacing a recorded play had (runtime/hle/input.c LARECOMP_RECORD / LARECOMP_REPLAY): one line a frame in
+// <recording>.pace - the accumulator's step, whether the 60 fps mode held, and the game's time step. Replayed, the
+// game gets those instead of this PC's clock: the buttons alone, keyed by the game's time, drifted within seconds -
+// at another frame rate (a hidden window here ran at 30 fps where the player had 45) the steps, the per-frame 30 / 60
+// fps mode and so every movement came out different, and the replay walked somewhere else.
+typedef struct { uint8_t n, on, vstep; } PaceRec;
+static FILE *pace_rec;
+static PaceRec *pace_tab;
+static size_t pace_n, pace_at;
+static int pace_mode = -1;  // 0 off, 1 recording, 2 replaying
+static void pace_init(void) {
+    if (pace_mode >= 0) return;
+    pace_mode = 0;
+    const char *p = getenv("LARECOMP_REPLAY"), *r = getenv("LARECOMP_RECORD");
+    char path[1100];
+    if (p && *p) {
+        snprintf(path, sizeof path, "%s.pace", p);
+        FILE *f = fopen(path, "rb");
+        if (!f) { LOG("[replay] no %s: the pacing comes from this PC's clock (the replay drifts)\n", path); return; }
+        size_t cap = 0;
+        unsigned n, on, vs;
+        while (fscanf(f, "%u %u %u", &n, &on, &vs) == 3) {
+            if (pace_n == cap) pace_tab = realloc(pace_tab, (cap = cap ? cap * 2 : 65536) * sizeof *pace_tab);
+            pace_tab[pace_n++] = (PaceRec){(uint8_t)n, (uint8_t)on, (uint8_t)vs};
+        }
+        fclose(f);
+        pace_mode = 2;
+        LOG("[replay] pacing of %zu frames from %s\n", pace_n, path);
+    } else if (r && *r) {
+        snprintf(path, sizeof path, "%s.pace", r);
+        if ((pace_rec = fopen(path, "wb"))) pace_mode = 1;
+    }
+}
+static const PaceRec *pace_replayed(void) {
+    pace_init();
+    return pace_mode == 2 && pace_at < pace_n ? &pace_tab[pace_at] : NULL;
+}
 static bool za_dyn30, za_dyn30_prev;  // (rt_za_frame_cfg: this frame / the one before ran in the game's 30 fps mode)
 uint64_t rt_za_frame_dt(uint64_t real_ns) {
     static uint64_t acc, last_ns;
@@ -140,6 +177,8 @@ uint64_t rt_za_frame_dt(uint64_t real_ns) {
         // the vsyncs owed less one: 60 fps -> 0 (one tick), 40 fps -> 0, 1, 0, 1 (1.5: full speed), 30 fps -> 1
         n = owed ? owed - 1 : 0;
         if (n > 4) n = 4;  // (the game's own most: a hitch steps at most 4)
+        const PaceRec *pr = pace_replayed();
+        if (pr) n = pr->n > 4 ? 4 : pr->n;  // (a replay: the recorded play's step)
     }
     static int log = -1;
     if (log < 0) log = ENV("LARECOMP_FRAME_DT_LOG") != NULL;
@@ -200,10 +239,39 @@ static uint32_t frame_step(uint32_t game_step, uint32_t channel, bool on) {
     // channel 0 ran slower than the world: the camera shaking while running and the player stuck after a few rolls
     // (#179 #188, RX 7600 at ~45-48 fps). So channel 0 goes by the previous frame's mode, as that code does: one tick
     // after a 60 fps frame, two after a 30 fps one; over any run of frames it gets the world's ticks.
-    // LARECOMP_DYN_CH0=3 that (default); =2 v0.1.20's (one tick on the way in only); =0: two ticks on the way in (stuck
-    // on the Deck); =1: one tick on every frame in the 30 fps mode
+    // That still left the player stuck after a roll (#237, RTX 4060 Ti at ~45 fps outside the hotel; a recorded play
+    // replayed with its pacing - testes' rolagem2 - got stuck every time, ~4 s in, right after a roll). Measured on that
+    // replay, several runs each: what gets the player stuck is channel 0's step changing between one and two ticks
+    // every frame or two, not the frame mode nor which way the ticks lean - two ticks on the way in (=0, the Switch's
+    // own rule, every channel alike) 3/3 stuck, the previous frame's mode (=3) 4/4, a stored 60 fps mode with the same
+    // steps 3/3, the 30 fps mode kept in pairs 3/3; one tick always (=1) or two only now and then never got stuck, but
+    // fell behind the world (16% at ~45 fps: #179's camera shake). On the Switch that step only changes when the game
+    // changes its frame mode, which it does seldom. So (=5, the default) channel 0 goes in runs: one tick a frame while
+    // the world is under LARECOMP_DYN_CH0_RUN (4) ticks ahead of it, then two a frame until it has caught up - the
+    // world's ticks over time (2324 of 2326 on the replay), its step changing ~5 times a second instead of every frame
+    // or two. Runs bisected on the replay: a change every frame or two (run 1) stuck, 2 / 4 / 8 never.
+    // LARECOMP_DYN_CH0=5 that (default); =3 the previous frame's mode (v0.1.21-v0.1.22); =2 v0.1.20's (one tick on the
+    // way in only); =0: two ticks on the way in; =1: one tick on every frame in the 30 fps mode
     static int ch0 = -1;
-    if (ch0 < 0) ch0 = ENV("LARECOMP_DYN_CH0") ? atoi(ENV("LARECOMP_DYN_CH0")) : 3;
+    if (ch0 < 0) ch0 = ENV("LARECOMP_DYN_CH0") ? atoi(ENV("LARECOMP_DYN_CH0")) : 5;
+    if (on && g_settings.frame_dt && channel == 0 && keeps_game_step(0) && g_za_mode_dyn && ch0 == 5) {
+        static int run = -1;
+        if (run < 0) run = ENV("LARECOMP_DYN_CH0_RUN") ? atoi(ENV("LARECOMP_DYN_CH0_RUN")) : 4;
+        static int owed;    // (the world's ticks channel 0 has yet to get; below 0: ahead by that)
+        static bool fast;   // (in a run of two-tick frames)
+        static uint64_t t_world, t_ch0, t_n, t_changes;
+        uint32_t world = (za_step_n > game_step ? za_step_n : game_step) + 1, give = fast ? 2 : 1;
+        owed += (int)world - (int)give;
+        if (owed > 30) owed = 30;  // (a load: the world far ahead - not caught up at double speed afterwards)
+        bool was = fast;
+        if (owed >= run) fast = true;
+        else if (owed <= 0) fast = false;
+        t_changes += was != fast, t_world += world, t_ch0 += give;
+        if (++t_n % 3600 == 0)
+            LOG("[pace] channel 0 runs: %llu ticks (world %llu), owed %d, step changes %llu\n", (unsigned long long)t_ch0,
+                (unsigned long long)t_world, owed, (unsigned long long)t_changes);
+        return give - 1;
+    }
     if (on && g_settings.frame_dt && channel == 0 && keeps_game_step(0) && g_za_mode_dyn && ch0 == 3)
         return za_dyn30_prev ? (game_step > 1 ? game_step : 1) : (za_dyn30 ? 0 : game_step);
     if (!on || !g_settings.frame_dt || (game_step == 0 && keeps_game_step(channel))) return game_step;
@@ -245,7 +313,8 @@ bool g_za_mode_dyn, g_za_mode_dyn_interval;
 int32_t rt_za_frame_cfg(int32_t cfg) {
     g_za_frame_hook = true;
     const char *e = ENV("LARECOMP_FPS");
-    bool on = e ? atoi(e) >= 60 : fps60_holds();
+    const PaceRec *pr = pace_replayed();
+    bool on = pr ? pr->on != 0 : e ? atoi(e) >= 60 : fps60_holds();
     static int dyn = -1;
     if (dyn < 0) dyn = ENV("LARECOMP_FRAME_MODE_DYN") ? atoi(ENV("LARECOMP_FRAME_MODE_DYN")) : 1;
     // Only with the per-channel hook (rt_za_frame_step: game code built with tools/za_patches.py FRAME_STEP, which
@@ -290,8 +359,14 @@ int32_t rt_za_frame_cfg(int32_t cfg) {
         uint64_t now = __atomic_load_n(&g_vsync_count, __ATOMIC_RELAXED), passed = last ? now - last : 0;
         uint64_t step = (uint64_t)mode + 1;
         if (passed > step) step = passed > 8 ? 8 : passed;  // (a long stall: the game caps its step too)
+        if (pr) step = pr->vstep;
         last = now;
         g_game_vsyncs += step;
+        if (pace_mode == 1) {
+            fprintf(pace_rec, "%u %u %u\n", za_step_n, on ? 1u : 0u, (unsigned)step);
+            fflush(pace_rec);  // (the game may be closed any way)
+        } else if (pace_mode == 2 && pace_at < pace_n && ++pace_at == pace_n)
+            LOG("[replay] end of the recorded pacing (frame %zu): this PC's clock from here\n", pace_n);
     }
     return mode;
 }

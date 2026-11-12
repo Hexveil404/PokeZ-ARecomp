@@ -1,6 +1,6 @@
 """Constant game speed (runtime/hle/framepace.c) against simulated frames (tools/test_frame_step.c), one process per
 case (the pacing code keeps its state in statics): 1 - ~45 fps with the per-channel hook: channel 0 gets the world's
-ticks, the first 30 fps frame gives it one, the world at 60 ticks/s (#179 #188); 2 - no hook: the per-frame mode never
+ticks in runs (its step changing seldom, #237), the world at 60 ticks/s (#179 #188); 2 - no hook: the per-frame mode never
 runs; 3 - 60 fps: nothing changes. No game data."""
 import os
 from pathlib import Path

@@ -123,6 +123,9 @@ extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 // 0: one buffer.
 extern uint32_t maxwell_gmem_chunk_shift;
 extern bool maxwell_gmem_lazy;
+// (compute) The workgroup's shared memory in bytes (the control section's +0x754), set before translating: LDS / STS
+// use `shared uint smem[]` of that size, addresses clamped to it. 0: unknown, a shader using it fails to translate.
+extern uint32_t maxwell_shared_bytes;
 // The straight-line form of forward-only branches (glsl_flatten) unless LARECOMP_SHADER_FLAT says otherwise: the
 // runtime sets it before the first translation (Vulkan: off on AMD GPUs, exec.c vk_exec_init).
 extern bool maxwell_flat_default;

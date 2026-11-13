@@ -330,6 +330,17 @@ int32_t rt_za_frame_cfg(int32_t cfg) {
         LOG("[pace] no per-channel step in this game code: the game's 30 fps mode is not used per frame (#188)\n");
         dyn = 0;
     }
+    {   // LARECOMP_TEST_FPS_CAP=<fps> (test, #224): the game's frames no faster than that - a machine that holds ~37 fps
+        // (a Xeon E5-2697A v4: two ticks on ~60% of the frames), on any PC. A steady cap, not a fixed sleep.
+        static double cap = -1;
+        static uint64_t next;
+        if (cap < 0) cap = ENV("LARECOMP_TEST_FPS_CAP") ? atof(ENV("LARECOMP_TEST_FPS_CAP")) : 0;
+        if (cap > 0) {
+            uint64_t now = plat_now_ns(), per = (uint64_t)(1e9 / cap);
+            if (next > now) plat_sleep_until_ns(next), now = next;
+            next = (next && now - next < per) ? next + per : now + per;
+        }
+    }
     {   // LARECOMP_ZA_SLOW_MS=<ms> (test): the game thread sleeps that long every frame - a machine at 40-55 fps
         static long slow = -1;
         if (slow < 0) slow = ENV("LARECOMP_ZA_SLOW_MS") ? atol(ENV("LARECOMP_ZA_SLOW_MS")) : 0;

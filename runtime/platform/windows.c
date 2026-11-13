@@ -62,6 +62,21 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
     uint64_t fa = er->ExceptionInformation[1];
     // (not for an execute fault: on a read-write page, retrying it would fault again forever)
     if (er->ExceptionInformation[0] != EXCEPTION_EXECUTE_FAULT && lazy_commit(fa)) return EXCEPTION_CONTINUE_EXECUTION;
+    // (#274: a listed game getter reading a null object - dispatch.c rt_null_getter_recover gave the caller zeros; the
+    // getter's frame is unwound by its own unwind info and the caller goes on as if it had returned)
+    extern bool rt_null_getter_recover(uint64_t pc, uint64_t fa);
+    if (er->ExceptionInformation[0] == EXCEPTION_READ_FAULT && fa < 0x10000 &&
+        rt_null_getter_recover(ep->ContextRecord->Rip, fa)) {
+        CONTEXT *cx = ep->ContextRecord;
+        DWORD64 base = 0;
+        PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(cx->Rip, &base, NULL);
+        if (rf) {
+            void *hd = NULL;
+            DWORD64 est = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, cx->Rip, rf, cx, &hd, &est, NULL);
+        } else cx->Rip = *(DWORD64 *)cx->Rsp, cx->Rsp += 8;  // (a leaf without a frame: its return address is on top)
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     extern int g_watch_write;
     g_watch_write = (int)er->ExceptionInformation[0];
     if (g_report_crashes && rt_fault_watch(fa, ep->ContextRecord->Rip)) return EXCEPTION_CONTINUE_EXECUTION;

@@ -240,6 +240,10 @@ static void boot_delegate_set(Cpu *c) {
         pthread_detach(t);
     }
     LOG("[boot] step store: object ready %u, delegate %llx\n", *BOOT_OBJ_READY, (unsigned long long)*BOOT_OBJ_FN);
+    if (getenv("LARECOMP_TEST_NULL_GETTER")) {  // (test, #274: the listed getter called with no object, here, once)
+        extern bool rt_null_getter_test(Cpu *c);
+        rt_null_getter_test(c);
+    }
     if (!*BOOT_OBJ_READY && boot_wait_on()) boot_wait("the object", BOOT_OBJ_READY, NULL, 30000000000ull);
     const char *sl = getenv("LARECOMP_TEST_STORE_LATE");
     if (sl) plat_sleep_until_ns(plat_now_ns() + (uint64_t)atoll(sl) * 1000000);
@@ -534,6 +538,54 @@ bool rt_fault_watch(uint64_t fa, uint64_t pc) {
     }
     plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_RW);
     return true;
+}
+
+// #274 (2.0.2 + DLC, the first DLC mission's battle against Grisham, twice at the same point): the game crashed
+// "accessing 0xc0" in f_70009e198c, a leaf that only copies 48 bytes (three vectors) from an object's +0xc0 into
+// v0-v2. Its callers take the object from a handle (f_70002d2c78, then f_7000349b1c reads it) and some of them
+// (0x7002968c58, 0x7002971074, 0x70009df558) never check the handle (f_7000349c3c) first: an object gone at that
+// moment - thread timing, which is ours and not the Switch's - is a null object. A null-page read inside one of these
+// getters (the table below, per build) gives the caller zeros instead, and the platform's handler returns to it
+// (windows.c: one frame unwound). Logged the first times. LARECOMP_NULL_GETTER=0 off.
+typedef struct { uint8_t id[8]; uint64_t fn; int nvec; } NullGetter;
+static const NullGetter null_getters[] = {
+    {{0x8A, 0x1C, 0x86, 0xC4, 0x37, 0x39, 0x4B, 0x69}, 0x70009e012cull, 3},  // 2.0.0 (the same body)
+    {{0xB1, 0xF1, 0x2F, 0xD9, 0x19, 0xEA, 0xE8, 0x6A}, 0x70009e198cull, 3},  // 2.0.2
+};
+bool rt_null_getter_recover(uint64_t pc, uint64_t fa) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("LARECOMP_NULL_GETTER"); on = !(e && !atoi(e)); }
+    if (!on || fa >= 0x10000 || g_game_is_la) return false;
+    uint64_t off = 0, fn = 0;
+    const char *nm = host_sym(pc, &off);
+    if (!nm || sscanf(nm, "f_%llx", (unsigned long long *)&fn) != 1) return false;
+    const NullGetter *g = NULL;
+    for (size_t i = 0; i < sizeof null_getters / sizeof *null_getters; i++)
+        if (null_getters[i].fn == fn && !memcmp(g_main_build_id, null_getters[i].id, 8)) g = &null_getters[i];
+    Cpu *c = g ? kernel_current_cpu() : NULL;
+    if (!c) return false;
+    for (int i = 0; i < g->nvec; i++) c->v[i] = 0;
+    static _Atomic int n;
+    int k = ++n;
+    if (k <= 10 || !(k & (k - 1)))
+        LOG("[guard] f_%llx read an object that isn't there (accessing %#llx, guest lr %llx): zeros given back (%d so far, #274)\n",
+            (unsigned long long)fn, (unsigned long long)fa, (unsigned long long)c->x[30], k);
+    return true;
+}
+
+bool rt_null_getter_test(Cpu *c) {
+    const NullGetter *g = NULL;
+    for (size_t i = 0; i < sizeof null_getters / sizeof *null_getters; i++)
+        if (!memcmp(g_main_build_id, null_getters[i].id, 8)) g = &null_getters[i];
+    if (!g || !dispatch_lookup(g->fn)) return false;
+    uint64_t x0 = c->x[0];
+    __uint128_t v[3] = {c->v[0], c->v[1], c->v[2]};
+    c->x[0] = 0, c->v[0] = c->v[1] = c->v[2] = ~(__uint128_t)0;
+    dispatch_lookup(g->fn)(c);
+    bool ok = !c->v[0] && !c->v[1] && !c->v[2];
+    LOG("[guard] test: f_%llx called with no object came back, v0-v2 %s\n", (unsigned long long)g->fn, ok ? "zero" : "NOT zero");
+    c->x[0] = x0, c->v[0] = v[0], c->v[1] = v[1], c->v[2] = v[2];
+    return ok;
 }
 
 void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {

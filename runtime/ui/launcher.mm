@@ -2859,6 +2859,28 @@ extern "C" void launcher_run(const char *root) {
                      tab_names[i]);
                 tx += tw + 4;
             }
+            {  // close (#258: in fullscreen, with a controller, there was no way out but F11 or Alt+F4). Like closing the
+               // window: the same quit event. Not while the game is being set up (busy), as the window's own close.
+                float cs = 30, cx = W_ - 24 - 92 - 12 - cs, cy = 17;
+                ImGui::SetCursorScreenPos(P(cx, cy));
+                ImGui::BeginDisabled(busy);
+                if (ui_invisible_button("##close", S(cs, cs), ImGuiButtonFlags_EnableNav)) {
+                    settings_save();
+                    SDL_Event q = {};
+                    q.type = SDL_EVENT_QUIT;
+                    SDL_PushEvent(&q);
+                }
+                ImGui::EndDisabled();
+                bool hot = item_hot() && !busy;
+                if (hot) {
+                    dl->AddCircleFilled(P(cx + cs / 2, cy + cs / 2), cs / 2 * g_s, IM_COL32(220, 70, 60, 200));
+                    ImGui::SetTooltip("%s", TR("Close ZA Recomp", "Fechar o ZA Recomp"));
+                } else dl->AddCircleFilled(P(cx + cs / 2, cy + cs / 2), cs / 2 * g_s, IM_COL32(255, 255, 255, 18));
+                float a = 6, mx = cx + cs / 2, my = cy + cs / 2;
+                ImU32 xc = busy ? IM_COL32(159, 179, 194, 110) : hot ? C_TEXT : C_SOFT;
+                dl->AddLine(P(mx - a, my - a), P(mx + a, my + a), xc, 2 * g_s);
+                dl->AddLine(P(mx - a, my + a), P(mx + a, my - a), xc, 2 * g_s);
+            }
             {  // PT | EN
                 float sw = 92, sx = W_ - 24 - sw, sy = 17, sh = 30;
                 dl->AddRectFilled(P(sx, sy), P(sx + sw, sy + sh), IM_COL32(255, 255, 255, 18), sh / 2 * g_s);

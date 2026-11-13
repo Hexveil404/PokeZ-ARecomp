@@ -268,8 +268,9 @@ def deswizzle_np(src, wb, hb, bpb, bh_log2):  # deswizzle() with numpy: the same
 
 # ------------------------------------------------------------------ full-detail models (--maxlod)
 # F1 > Full-detail models (runtime/ui/launcher.mm launcher_maxlod_kick): tools/za/lod_mod.py on the player's own game
-# files, into DIR.new and then swapped in whole; DIR/.made holds data.trpfs's size, which runtime/services/fs.c checks
-# against the game it serves (another version's models are never layered over it).
+# files, into DIR.new (.made last), which runtime/services/fs.c cache_take_new swaps in whole at the game's next start -
+# never here: the game may be playing from DIR now (#266). DIR/.made holds data.trpfs's size, which runtime/services/fs.c
+# checks against the game it serves (another version's models are never layered over it).
 # F1 > Draw distance (runtime/ui/launcher.mm launcher_drawdist_kick): tools/za/draw_dist.py, the world's LOD and
 # culling distances times --factor, into DIR (.made: data.trpfs's size and the factor, checked by runtime/services/fs.c)
 if args.drawdist:
@@ -280,9 +281,7 @@ if args.drawdist:
     files, dists, miss = draw_dist.make(trpfs, trpfd, unpack, new, args.factor, log=lambda *a: print(*a, flush=True))
     if not files: sys.exit(1)
     with open(os.path.join(new, '.made'), 'w') as f: f.write('%d %d\n' % (len(trpfs), round(args.factor * 100)))
-    shutil.rmtree(args.drawdist, ignore_errors=True)
-    os.replace(new, args.drawdist)
-    sys.exit(0)
+    sys.exit(0)  # (DIR.new: taken in by the game at its next start, runtime/services/fs.c cache_take_new - #266)
 
 if args.maxlod:
     import shutil, lod_mod
@@ -292,8 +291,6 @@ if args.maxlod:
     made, miss = lod_mod.make(trpfs, trpfd, unpack, new, log=lambda *a: print(*a, flush=True))
     if not made: sys.exit(1)
     with open(os.path.join(new, '.made'), 'w') as f: f.write('%d\n' % len(trpfs))
-    shutil.rmtree(args.maxlod, ignore_errors=True)
-    os.replace(new, args.maxlod)
     sys.exit(0)
 
 if args.party_icons:

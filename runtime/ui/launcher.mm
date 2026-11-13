@@ -864,7 +864,7 @@ extern "C" int launcher_maxlod_state(void) {  // 0 off / nothing to do, 1 being 
         if (plat_proc_wait(g_maxlod_proc, false) < 0) return 1;
         g_maxlod_proc = 0;
     }
-    return file_exists("cache/maxlod/.made") ? 2 : 0;
+    return file_exists("cache/maxlod.new/.made") || file_exists("cache/maxlod/.made") ? 2 : 0;  // (.new: taken in at the start)
 }
 extern "C" void launcher_maxlod_kick(void) {
     char tool[1100];
@@ -876,7 +876,7 @@ extern "C" void launcher_maxlod_kick(void) {
     if (stat(data.c_str(), &sb)) return;
     snprintf(src, sizeof src, "%lld %lld", (long long)sb.st_size, (long long)sb.st_mtime);
     if (FILE *f = fopen("cache/maxlod.src", "rb")) { size_t n = fread(had, 1, sizeof had - 1, f); had[n] = 0; fclose(f); }
-    if (!strcmp(src, had) && file_exists("cache/maxlod/.made")) return;
+    if (!strcmp(src, had) && launcher_maxlod_state() == 2) return;
     if (!rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool))
         return;
     mkdir("cache", 0755);
@@ -897,7 +897,9 @@ extern "C" int launcher_drawdist_state(void) {  // 0 nothing to do, 1 being made
     }
     unsigned long long made = 0;
     int pct = 0;
-    if (FILE *f = fopen("cache/drawdist/.made", "rb")) { if (fscanf(f, "%llu %d", &made, &pct) != 2) pct = 0; fclose(f); }
+    FILE *f = fopen("cache/drawdist.new/.made", "rb");  // (made, not taken in yet: runtime/services/fs.c cache_take_new)
+    if (!f) f = fopen("cache/drawdist/.made", "rb");
+    if (f) { if (fscanf(f, "%llu %d", &made, &pct) != 2) pct = 0; fclose(f); }
     return pct && pct == g_settings.draw_dist ? 2 : 0;
 }
 extern "C" void launcher_drawdist_kick(void) {

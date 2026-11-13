@@ -316,9 +316,35 @@ static bool xbox_layer_prepare(void) {
 // F1 > Draw distance (#190): cache/drawdist/romfs, the scene parts holding the world's trinity_ModelLodSetting /
 // trinity_ModelCullingSetting tables with their distances scaled (tools/za/draw_dist.py via zaprompts --drawdist).
 // .made: the data.trpfs size and the factor in percent - both must match this game and the setting.
+// Both are made in the background by zaprompts (the launcher starts it, then the game) into DIR.new, .made written last.
+// They used to be swapped in by zaprompts itself as soon as they were done - while the game was playing from the old
+// DIR: it deleted the files the game was serving, which read as zeros from then on, and a model read as zeros is a
+// crash (#266: "can't open randomizer file cache/maxlod/romfs/ik_pokemon/.../pm0158_00_00.trmdl (No such file or
+// directory)", then "accessing 0" in f_7001864c30). Now a finished DIR.new is taken in here, at the start, before
+// anything is served from DIR: the old DIR is moved aside first, so if it can't be (in use), nothing changes.
+static void cache_take_new(const char *dir) {
+    char nd[300], made[320], old[300];
+    snprintf(nd, sizeof nd, "%s.new", dir), snprintf(made, sizeof made, "%s/.made", nd), snprintf(old, sizeof old, "%s.old", dir);
+    struct stat st;
+    if (stat(made, &st)) return;  // (none, or still being made)
+    if (!stat(old, &st)) plat_remove_tree(old);
+    if (!stat(dir, &st) && rename(dir, old)) {
+        LOG("[fs] %s: a new one is ready, but the old one can't be moved aside (%s): taken in at a later start\n",
+            dir, strerror(errno));
+        return;
+    }
+    if (rename(nd, dir)) {
+        LOG("[fs] %s: the new one can't be moved in (%s)\n", dir, strerror(errno));
+        if (!stat(old, &st)) rename(old, dir);
+        return;
+    }
+    plat_remove_tree(old);
+    LOG("[fs] %s: the one made in the background taken in\n", dir);
+}
 bool g_drawdist_on;
 static void drawdist_layer(void) {
     if (g_settings.draw_dist == 100) return;
+    cache_take_new("cache/drawdist");
     unsigned long long made = 0;
     int pct = 0;
     FILE *f = fopen("cache/drawdist/.made", "rb");
@@ -341,6 +367,7 @@ static void drawdist_layer(void) {
 bool g_maxlod_on;  // (this session serves cache/maxlod: F1 says so)
 static void maxlod_layer(void) {
     if (!g_settings.full_detail) return;
+    cache_take_new("cache/maxlod");
     unsigned long long made = 0;
     FILE *f = fopen("cache/maxlod/.made", "rb");
     if (!f) { LOG("[fs] full-detail models: not made yet (cache/maxlod.log)\n"); return; }

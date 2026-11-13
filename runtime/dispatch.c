@@ -286,6 +286,42 @@ static void boot_delegate_use(Cpu *c) {
     }
 }
 
+// The same kind of start-up race elsewhere: a step reached only through a pointer that reads a global object without
+// checking its ready flag - when the flag is 0 the game's own code picks address 0 + field, a sure crash. #271 (2.0.2,
+// a first start with 158 s of shader preparation): f_7002c209d8+0x14c reads [0x700610db00 + 0xd0] behind the flag at
+// +0x100 and crashed "accessing 0xd0" right after the boot delegate's store. The step waits for the flag here (up to
+// 30 s; then it runs as before). LARECOMP_BOOT_READY_WAIT=0: no wait.
+typedef struct { uint8_t id[8]; uint64_t fn, flag; } ReadyWait;
+static const ReadyWait ready_waits[] = {
+    {{0x8A, 0x1C, 0x86, 0xC4, 0x37, 0x39, 0x4B, 0x69}, 0x7002c1e578ull, 0x7006108b00ull + 0x100},  // 2.0.0 (its twin)
+    {{0xB1, 0xF1, 0x2F, 0xD9, 0x19, 0xEA, 0xE8, 0x6A}, 0x7002c209d8ull, 0x700610db00ull + 0x100},  // 2.0.2
+};
+static const ReadyWait *g_rw;
+static int g_rw_known;  // (0 not looked up yet, 1 this build has one, -1 none)
+static bool ready_wait_build(void) {
+    if (!g_rw_known) {
+        g_rw_known = -1;
+        if (!g_game_is_la)
+            for (size_t i = 0; i < sizeof ready_waits / sizeof *ready_waits; i++)
+                if (!memcmp(g_main_build_id, ready_waits[i].id, 8)) g_rw = &ready_waits[i], g_rw_known = 1;
+    }
+    return g_rw_known > 0;
+}
+static void ready_wait_step(Cpu *c) {
+    volatile uint32_t *flag = (volatile uint32_t *)(uintptr_t)g_rw->flag;
+    static _Atomic int seen;
+    if (!seen++) LOG("[boot] step %llx: its object ready %u\n", (unsigned long long)g_rw->fn, *flag);
+    if (!*flag && boot_wait_on()) {
+        const char *e = getenv("LARECOMP_BOOT_READY_WAIT");
+        if (!(e && !atoi(e))) {
+            LOG("[boot] step %llx before its object (%llx) is ready: waiting for it (#271)\n", (unsigned long long)g_rw->fn,
+                (unsigned long long)(g_rw->flag - 0x100));
+            boot_wait("the object", flag, NULL, 30000000000ull);
+        }
+    }
+    dispatch_lookup(g_rw->fn)(c);
+}
+
 static bool mod_blank(uint64_t pc) {  // (inside a code mod, and its image's word there is 0: nothing written yet)
     for (int i = 2; i < g_nmodules; i++)
         if (pc >= g_modules[i].base && pc < g_modules[i].base + g_modules[i].size)
@@ -297,6 +333,7 @@ __attribute__((noinline)) static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
     if (boot_delegate_build() && pc == BOOT_DELEGATE_SET) return boot_delegate_set;
     if (boot_delegate_build() && pc == BOOT_DELEGATE_USE) return boot_delegate_use;
+    if (ready_wait_build() && pc == g_rw->fn) return ready_wait_step;
     if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
         rt_unwind_point();  // (HLE calls aren't cached below, so every one passes here: a reboot's safe point)
         int i = (int)((pc - HLE_BASE) / 16);

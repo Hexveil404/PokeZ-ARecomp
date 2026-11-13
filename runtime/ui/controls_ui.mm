@@ -94,6 +94,15 @@ static void stick_mouse_rows() {
     }
     opt_section(TR("Right stick", "Analógico direito"));
     {
+        float rdz = (float)g_settings.rstick_deadzone;
+        if (opt_slider(TR("Dead zone", "Zona morta"), &rdz, 0, 30, 1, 0, "%g%%",
+                       TR("How far the stick must move before it turns the camera (0 = off: the stick goes to the game as it "
+                          "is). Raise it if the camera turns on its own with the stick at rest (stick drift).",
+                          "O quanto o analógico precisa se mover para girar a câmera (0 = desligado: o analógico vai ao jogo "
+                          "como está). Aumente se a câmera gira sozinha com o analógico parado (drift)."))) {
+            g_settings.rstick_deadzone = (int)rdz;
+            changed = true;
+        }
         static const int deg[] = {0, 10, 15, 20, 25};
         const char *const names[] = {TR("Off", "Desligado"), TR("10 degrees", "10 graus"), TR("15 degrees", "15 graus"),
                                      TR("20 degrees", "20 graus"), TR("25 degrees", "25 graus")};

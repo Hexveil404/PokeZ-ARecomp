@@ -96,6 +96,7 @@ typedef struct {
     float mouse_sens;    // mouse camera speed, 1 = default
     int rstick_snap;     // degrees: a right stick this close to an axis is put on it (0 = off): runtime/hle/input.c
     int lstick_deadzone; // percent of the left stick's travel read as rest (0 = off, the stick goes raw): runtime/hle/input.c
+    int rstick_deadzone; // percent of the right stick's travel read as rest (0 = off, the default): camera drift, #275
     int lstick_outer;    // percent of its travel from which the left stick reads as full (a pad's diagonals stop short)
     bool blur_removal;   // no tilt-shift blur at the top / bottom of the screen
     bool hide_hero_icon; // no Hero Mode icon on the HUD

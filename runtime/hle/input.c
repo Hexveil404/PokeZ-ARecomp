@@ -248,6 +248,13 @@ static void recompute_pad(void) {
             pad_lx = (int32_t)lround(m ? x : 0), pad_ly = (int32_t)lround(m ? y : 0);
         }
     }
+    // rstick_deadzone (#275): a right stick that doesn't center (drift) turned the camera on its own. A radial dead zone
+    // like the left stick's, the rest rescaled to the full range; 0 (the default) leaves the stick raw.
+    if (pad && !host_test && g_settings.rstick_deadzone > 0 && (rx || ry)) {
+        double m = sqrt((double)rx * rx + (double)ry * ry), dz = 32767.0 * g_settings.rstick_deadzone / 100;
+        double n = m <= dz ? 0 : fmin((m - dz) / (32767.0 - dz) * 32767.0, 32767.0);
+        rx = (int32_t)lround(rx * n / m), ry = (int32_t)lround(ry * n / m);
+    }
     // rstick_snap: a stick pushed sideways also reads a little up or down (an Xbox One pad: 4 degrees on average, up
     // to 12), and the camera tilts with it. That close to an axis the stick is put on the axis; the angles in between
     // are spread over the rest, so nothing jumps at the edge. The length is kept.

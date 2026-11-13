@@ -382,6 +382,7 @@ void settings_load(void) {
         else if (!strcmp(key, "rstick_snap")) { int d = atoi(val); g_settings.rstick_snap = d < 0 ? 0 : d > 30 ? 30 : d; }
         else if (!strcmp(key, "lstick_deadzone")) g_settings.lstick_deadzone = atoi(val);
         else if (!strcmp(key, "lstick_outer")) g_settings.lstick_outer = atoi(val);
+        else if (!strcmp(key, "rstick_deadzone")) g_settings.rstick_deadzone = atoi(val);
         else if (!strcmp(key, "blur_removal")) g_settings.blur_removal = atoi(val) != 0;
         else if (!strcmp(key, "hide_hero_icon")) g_settings.hide_hero_icon = atoi(val) != 0;
         else if (!strcmp(key, "mirror_mode")) g_settings.mirror_mode = atoi(val) != 0;
@@ -445,6 +446,7 @@ void settings_load(void) {
     if (!(g_settings.mouse_sens >= 0.1f && g_settings.mouse_sens <= 5)) g_settings.mouse_sens = 1.0f;
     if (g_settings.lstick_deadzone < 0 || g_settings.lstick_deadzone > 30) g_settings.lstick_deadzone = 10;
     if (g_settings.lstick_outer < 70 || g_settings.lstick_outer > 100) g_settings.lstick_outer = 90;
+    if (g_settings.rstick_deadzone < 0 || g_settings.rstick_deadzone > 30) g_settings.rstick_deadzone = 0;
     if (g_settings.rumble_strength < 25 || g_settings.rumble_strength > 100) g_settings.rumble_strength = 100;
     if (g_settings.draw_dist != 150 && g_settings.draw_dist != 200 && g_settings.draw_dist != 300) g_settings.draw_dist = 100;
     settings_env_overrides();
@@ -516,6 +518,7 @@ void settings_save(void) {
     fprintf(f, "controller_light = %d\n", g_settings.controller_light);
     fprintf(f, "background_input = %d\n", g_settings.bg_input);
     fprintf(f, "rstick_snap = %d\n", g_settings.rstick_snap);
+    fprintf(f, "rstick_deadzone = %d\n", g_settings.rstick_deadzone);
     fprintf(f, "lstick_deadzone = %d\nlstick_outer = %d\n", g_settings.lstick_deadzone, g_settings.lstick_outer);
     fprintf(f, "move_360 = %d\nblur_removal = %d\nhide_hero_icon = %d\n", g_settings.move_360, g_settings.blur_removal,
             g_settings.hide_hero_icon);

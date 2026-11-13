@@ -46,6 +46,20 @@ static void bt_check(uint64_t a, uint64_t lr, uint64_t x0) {
 
 void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
     if (bt_n) bt_check(a, lr, x0);
+    {   // LARECOMP_FNPROF_TL=<timeline update fn hex> (#224): each entry inside the window on a short timeline (end frame
+        // +0x4c at most 2) logged with its state (+0x98), time (+0x90, 30 fps frames) and caller - where a step is skipped
+        static int64_t tlfn = -1;
+        if (tlfn < 0) tlfn = getenv("LARECOMP_FNPROF_TL") ? (int64_t)strtoull(getenv("LARECOMP_FNPROF_TL"), NULL, 16) : 0;
+        if (tlfn && a == (uint64_t)tlfn && x0 > 0x7000000000ull && x0 < 0x7800000000ull) {
+            int32_t end = *(volatile int32_t *)(uintptr_t)(x0 + 0x4c);
+            if (end >= 0 && end <= 2) {
+                extern uint64_t renderer_present_count(void);
+                fprintf(stderr, "[tl] f%llu tl %llx lr %llx end %d state %u time %g\n", (unsigned long long)renderer_present_count(),
+                        (unsigned long long)x0, (unsigned long long)lr, end, *(volatile uint32_t *)(uintptr_t)(x0 + 0x98),
+                        (double)*(volatile float *)(uintptr_t)(x0 + 0x90));
+            }
+        }
+    }
     uint32_t h = (uint32_t)((a >> 2) * 0x9E3779B1u) & (NSLOT - 1);
     for (int n = 0; n < NSLOT; n++, h = (h + 1) & (NSLOT - 1)) {
         uint64_t cur = atomic_load_explicit(&slots[h].addr, memory_order_relaxed);

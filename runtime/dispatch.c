@@ -187,10 +187,15 @@ RtJmp *rt_setjmp_site(Cpu *c, uint64_t ret) {
 // the step's last call: + 0x98, the same in both builds) waits for the store and is made by the store's thread right
 // after it stores. LARECOMP_BOOT_DELEGATE_DEFER=0: the old 30 s wait. LARECOMP_TEST_STORE_LATE=<ms> (test): the store
 // waits that long before storing, so the call comes first.
-typedef struct { uint8_t id[8]; uint64_t obj, set, use; } BootDelegate;
+// 1.0.0 (main 7222E13ECF6ADB32) has the same race: #276 crashed at "host pc 0", lr 7000480c50 = f_7000480c18+0x38 with
+// x0 = 7005f0f5c0 (the object + 0xc0). The store is f_7000a3e9bc (the twin of 2.0.0's f_7000ac2a2c, line for line:
+// object 0x7005f0f500, ready flag +0x140, delegate +0xc0) and the step is f_7000480b9c, which ends in a tail call of
+// the delegate's call f_7000480c18 (+0x7c here: 1.0.0's step makes one call less). Both reached only through pointers.
+typedef struct { uint8_t id[8]; uint64_t obj, set, use, call; } BootDelegate;  // (call: the delegate's call, from use)
 static const BootDelegate boot_delegates[] = {
-    {{0x8A, 0x1C, 0x86, 0xC4, 0x37, 0x39, 0x4B, 0x69}, 0x7006109cc0ull, 0x7000ac2a2cull, 0x7000bbb0dcull},  // 2.0.0
-    {{0xB1, 0xF1, 0x2F, 0xD9, 0x19, 0xEA, 0xE8, 0x6A}, 0x700610ecc0ull, 0x7000ac321cull, 0x7000bb9cccull},  // 2.0.2
+    {{0x72, 0x22, 0xE1, 0x3E, 0xCF, 0x6A, 0xDB, 0x32}, 0x7005f0f500ull, 0x7000a3e9bcull, 0x7000480b9cull, 0x7c},  // 1.0.0
+    {{0x8A, 0x1C, 0x86, 0xC4, 0x37, 0x39, 0x4B, 0x69}, 0x7006109cc0ull, 0x7000ac2a2cull, 0x7000bbb0dcull, 0x98},  // 2.0.0
+    {{0xB1, 0xF1, 0x2F, 0xD9, 0x19, 0xEA, 0xE8, 0x6A}, 0x700610ecc0ull, 0x7000ac321cull, 0x7000bb9cccull, 0x98},  // 2.0.2
 };
 static const BootDelegate *g_bd;  // (this game's entry: boot_delegate_build)
 // (a step call that went on without its delegate: running it, or its delegate's call waiting for the store)
@@ -200,6 +205,7 @@ static pthread_mutex_t g_bd_lock = PTHREAD_MUTEX_INITIALIZER;
 #define BOOT_DELEGATE_OBJ (g_bd->obj)
 #define BOOT_DELEGATE_SET (g_bd->set)
 #define BOOT_DELEGATE_USE (g_bd->use)
+#define BOOT_DELEGATE_CALL (g_bd->use + g_bd->call)
 #define BOOT_OBJ_READY ((volatile uint32_t *)(uintptr_t)(BOOT_DELEGATE_OBJ + 0x140))
 #define BOOT_OBJ_DONE ((volatile uint8_t *)(uintptr_t)(BOOT_DELEGATE_OBJ + 0x100))
 #define BOOT_OBJ_FN ((volatile uint64_t *)(uintptr_t)(BOOT_DELEGATE_OBJ + 0xc0 + 0x20))
@@ -247,14 +253,14 @@ static void boot_delegate_set(Cpu *c) {
         uint64_t ret = c->x[0];  // (the store's own result, 1)
         LOG("[boot] the delegate stored after its step: called now, on the storing thread\n");
         c->x[0] = BOOT_DELEGATE_OBJ;
-        dispatch_lookup(BOOT_DELEGATE_USE + 0x98)(c);
+        dispatch_lookup(BOOT_DELEGATE_CALL)(c);
         c->x[0] = ret;
     }
 }
 static void boot_delegate_use(Cpu *c) {
     LOG("[boot] step call: object ready %u, delegate %llx, done %u\n", *BOOT_OBJ_READY, (unsigned long long)*BOOT_OBJ_FN, *BOOT_OBJ_DONE);
     const char *df = getenv("LARECOMP_BOOT_DELEGATE_DEFER"), *wm = getenv("LARECOMP_BOOT_DELEGATE_WAIT_MS");
-    bool defer = !(df && !atoi(df)) && dispatch_lookup(BOOT_DELEGATE_USE + 0x98);
+    bool defer = !(df && !atoi(df)) && dispatch_lookup(BOOT_DELEGATE_CALL);
     uint64_t wait_ns = defer ? (uint64_t)(wm ? atoll(wm) : 2000) * 1000000 : 30000000000ull;
     if (!*BOOT_OBJ_DONE && !*BOOT_OBJ_FN && boot_wait_on()) boot_wait("the delegate", NULL, BOOT_OBJ_FN, wait_ns);
     // (LARECOMP_TEST_DELEGATE_LATE=1, test: the delegate reads as not stored here - the step without it, then its call)
@@ -276,7 +282,7 @@ static void boot_delegate_use(Cpu *c) {
     if (now) {
         LOG("[boot] the delegate was stored during the step: called now\n");
         c->x[0] = BOOT_DELEGATE_OBJ;
-        dispatch_lookup(BOOT_DELEGATE_USE + 0x98)(c);
+        dispatch_lookup(BOOT_DELEGATE_CALL)(c);
     }
 }
 

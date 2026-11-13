@@ -40,21 +40,41 @@ float widescreen_effect_stretch(uint64_t fs_hash) {
 // (runtime/nvn/renderer.m), but a layout pane draws that way too, whatever its size: the speaker-less message box's
 // dark band (622x46 behind the rounded box, "Wow! This looks pretty heavy!...") came out stretched to the window's
 // width, two dark bars beside the box at 32:9 (user 2026-10-20). A layout (ui2d) draw's vertex uniforms hold the
-// projection (floats 0-15), the pane's model-view rows (16-27) and its rect (132-135: width, height, left, top; y up):
-// true when they describe a pane that doesn't cover the screen (such a draw stays in the 16:9 box).
-bool widescreen_ui_pane_partial(const float *u, uint64_t size) {
-    if (!u || size != 560) return false;
-    if (u[15] != 1 || u[12] != 0 || u[13] != 0 || !(u[0] > 0) || u[5] == 0) return false;  // (orthographic projection)
+// projection (floats 0-15), the pane's model-view rows (16-27) and its rect (132-135: width, height, left, top; y up).
+static bool ortho(const float *u) { return u[15] == 1 && u[12] == 0 && u[13] == 0 && u[0] > 0; }  // (the projection's)
+// The pane's bounds on the screen (-1..1 each way; false: not a layout draw).
+bool widescreen_ui_pane_bounds(const float *u, uint64_t size, float lo[2], float hi[2]) {
+    if (!u || size != 560 || !ortho(u) || u[5] == 0) return false;
     float w = u[132], h = u[133], l = u[134], t = u[135];
     if (!(w > 0) || !(h > 0) || !(w < 1e5f) || !(h < 1e5f)) return false;
-    float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
+    lo[0] = lo[1] = 1e9f, hi[0] = hi[1] = -1e9f;
     for (int i = 0; i < 4; i++) {
         float x = l + (i & 1 ? w : 0), y = t - (i & 2 ? h : 0);
         float X = u[16] * x + u[17] * y + u[19], Y = u[20] * x + u[21] * y + u[23], Z = u[24] * x + u[25] * y + u[27];
         float n[2] = {u[0] * X + u[1] * Y + u[2] * Z + u[3], u[4] * X + u[5] * Y + u[6] * Z + u[7]};
         for (int k = 0; k < 2; k++) lo[k] = fminf(lo[k], n[k]), hi[k] = fmaxf(hi[k], n[k]);
     }
+    return true;
+}
+// F1 > HUD width (vulkan/exec.c): -1 / 1 for a piece on the left / right side of the 16:9 screen, 0 in the middle.
+// A pane by its edges (past 40% of the half-screen, not 10% into the other half: the battle's eye meter, +-35%, stays
+// whole); one wider than the screen (the minimap's map) and text (a 128-byte transform, anchored at its text box: the
+// battle panel's "Lv. 42", -0.71) by their origin, past 40% from the middle (centred messages stay).
+int widescreen_ui_hud_side(const float *u, uint64_t size, bool pane, const float lo[2], const float hi[2]) {
+    float o;
+    if (pane && hi[0] - lo[0] > 2.0f) o = u[0] * u[19] + u[1] * u[23] + u[2] * u[27] + u[3];
+    else if (pane) return lo[0] < -0.4f && hi[0] <= 0.1f ? -1 : hi[0] > 0.4f && lo[0] >= -0.1f ? 1 : 0;
+    else if (u && size == 128 && ortho(u)) o = u[3];
+    else return 0;
+    return o < -0.4f ? -1 : o > 0.4f ? 1 : 0;
+}
+// true for bounds that don't cover the screen: a smaller pane (such a draw stays in the 16:9 box)
+bool widescreen_ui_bounds_partial(const float lo[2], const float hi[2]) {
     return lo[0] > -0.99f || hi[0] < 0.99f || lo[1] > -0.99f || hi[1] < 0.99f;
+}
+bool widescreen_ui_pane_partial(const float *u, uint64_t size) {  // (the uniforms' pane: renderer.m)
+    float lo[2], hi[2];
+    return widescreen_ui_pane_bounds(u, size, lo, hi) && widescreen_ui_bounds_partial(lo, hi);
 }
 
 // Off in rooms that should keep 16:9 framing (interiors, dungeons) -- see widescreen_update.

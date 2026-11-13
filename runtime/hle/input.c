@@ -18,6 +18,7 @@
 #include "../rumble.h"
 #include "../led.h"
 #include "../ui/menu.h"
+#include "codehooks.h"
 
 enum {
     BTN_A = 0, BTN_B, BTN_X, BTN_Y, BTN_LSTICK, BTN_RSTICK, BTN_L, BTN_R, BTN_ZL, BTN_ZR, BTN_PLUS, BTN_MINUS,
@@ -1041,14 +1042,40 @@ static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -
 
 // NpadFullKeyState / NpadHandheldState / NpadJoy*State share this layout (0x28 bytes):
 // {int64 sampling, u64 buttons, AnalogStick L {x,y}, AnalogStick R {x,y}, u32 attributes}
-static void fill_state(Cpu *c) {
+enum { NPAD_FULLKEY, NPAD_HANDHELD, NPAD_JOY_DUAL, NPAD_JOY_LEFT, NPAD_JOY_RIGHT, NPAD_STYLE_COUNT };
+// SDK detail::GetNpadStates entries, in the same order as the GetNpadState handlers below.
+static const uint64_t npad_states_sites[NPAD_STYLE_COUNT] = {
+    0x70084f5d80ull, 0x70084f5f90ull, 0x70084f61a0ull, 0x70084f63b0ull, 0x70084f65c0ull
+};
+static _Atomic bool npad_states_hook_logged[NPAD_STYLE_COUNT];
+static __thread bool npad_states_hook_active;
+RT_ON_RESET(npad_states_hook_reset) {
+    for (int i = 0; i < NPAD_STYLE_COUNT; i++) atomic_store(&npad_states_hook_logged[i], false);
+}
+
+static void npad_states_hook(Cpu *c, int style) {
+    if (npad_states_hook_active || g_nmodules <= 2) return;
+    Cpu hook = *c;
+    hook.x[1] = 1;        // one state
+    hook.x[2] = c->x[1];  // NpadIdType&
+    hook.pc = npad_states_sites[style];
+    npad_states_hook_active = true;
+    bool fired = codehooks_invoke(npad_states_sites[style], &hook);
+    npad_states_hook_active = false;
+    if (fired && !atomic_exchange(&npad_states_hook_logged[style], true)) {
+        static const char *names[NPAD_STYLE_COUNT] = {"FullKey", "Handheld", "JoyDual", "JoyLeft", "JoyRight"};
+        LOG("[mods] GetNpadStates hook fired (%s)\n", names[style]);
+    }
+}
+
+static void fill_state(Cpu *c, int style) {
     uint8_t *s = (uint8_t *)(uintptr_t)c->x[0];
     uint32_t id = *(uint32_t *)(uintptr_t)c->x[1];
     memset(s, 0, 0x28);
     *(int64_t *)s = ++sampling;
     static int nlog;
     if (nlog < 6 && (sampling % 600) == 1) { nlog++; LOG("[input] GetNpadState id %#x lr %llx\n", id, c->x[30]); }
-    if (id != 0) return;  // docked: only player 1 (FullKey); Handheld stays disconnected
+    if (id != 0) { npad_states_hook(c, style); return; }  // docked: only player 1 (FullKey); Handheld stays disconnected
     if (g_game_is_la) {
     extern void warp_game_tick(Cpu *c);
     warp_game_tick(c);  // game main thread, once per frame: apply a queued warp
@@ -1168,13 +1195,14 @@ static void fill_state(Cpu *c) {
     *(int32_t *)(s + 24) = rx;
     *(int32_t *)(s + 28) = ry;
     *(uint32_t *)(s + 32) = 1;  // IsConnected
+    npad_states_hook(c, style);
 }
 
-HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", hid_state_fullkey) { fill_state(c); }
-HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", hid_state_dual) { fill_state(c); }
-HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", hid_state_left) { fill_state(c); }
-HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", hid_state_handheld) { fill_state(c); }
-HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", hid_state_right) { fill_state(c); }
+HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", hid_state_fullkey) { fill_state(c, NPAD_FULLKEY); }
+HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", hid_state_dual) { fill_state(c, NPAD_JOY_DUAL); }
+HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", hid_state_left) { fill_state(c, NPAD_JOY_LEFT); }
+HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", hid_state_handheld) { fill_state(c, NPAD_HANDHELD); }
+HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", hid_state_right) { fill_state(c, NPAD_JOY_RIGHT); }
 
 // FullKey for player 1 only (we report docked mode, where Handheld is unavailable)
 HLE_FUNC("_ZN2nn3hid15GetNpadStyleSetERKj", hid_style_set) {

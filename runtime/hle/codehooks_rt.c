@@ -137,6 +137,15 @@ RT_ON_RESET(codehooks_reset) {
 // guest addr runs `to` from now on (until a reboot, codehooks_reset); `to` runs the original through the returned
 // body (the function past its pad). NULL: no lifted function there, or no entry pad (game code built before code mods).
 static pthread_mutex_t hooks_lock = PTHREAD_MUTEX_INITIALIZER;  // (the thunks and patched[]: one writer at a time)
+bool codehooks_invoke(uint64_t site, Cpu *c) {
+    pthread_mutex_lock(&hooks_lock);
+    GuestFn fn = hooks_target(site);
+    pthread_mutex_unlock(&hooks_lock);
+    if (!fn) return false;
+    fn(c);
+    return true;
+}
+
 GuestFn codehooks_entry(uint64_t addr, GuestFn to) {
     GuestFn f = dispatch_lookup(addr);
     pthread_mutex_lock(&hooks_lock);

@@ -52,6 +52,10 @@ static Hook *last_hook_at(uint64_t site) {
         if (hooks[i].site == site) return &hooks[i];
     return NULL;
 }
+GuestFn hooks_target(uint64_t site) {
+    Hook *h = last_hook_at(site);
+    return h ? h->target : NULL;
+}
 static GuestFn past_pad(GuestFn f) { return (GuestFn)(void *)((const char *)(const void *)f + ENTRY_PAD); }
 static bool told_once(uint64_t site) {  // (a pass runs at every unmap: each case logged once)
     for (int j = 0; j < ntold; j++)

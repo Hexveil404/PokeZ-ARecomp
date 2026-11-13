@@ -36,3 +36,5 @@ typedef struct { int applied, mid, unknown, stubs, failed, removed; } HookStats;
 // registered are left as they are). st: totals of this pass.
 void hooks_apply(const CodeAlias *al, int n, const HookOps *ops, HookStats *st);
 void hooks_reset(void);  // (a reboot; tests)
+GuestFn hooks_target(uint64_t site);  // codehooks_rt.c calls this with hooks_lock held
+bool codehooks_invoke(uint64_t site, Cpu *c);  // invoke the last mod hook at a lifted site, if any

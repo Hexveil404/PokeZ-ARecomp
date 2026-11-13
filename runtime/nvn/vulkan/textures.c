@@ -444,8 +444,31 @@ static void create_image(NvnTexture *t, TexBackend *b) {
                             .extent = {tw, th, depth}, .mipLevels = levels, .arrayLayers = layers,
                             .samples = (VkSampleCountFlagBits)samples, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage,
                             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
-    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    // An integrated GPU whose "video memory" is a small carve-out of the RAM (#281: Ryzen 7 5700U, heap 0 = 256 MB,
+    // budget 243 MB) got the game's ~4000 textures there anyway: 629 MB in it, 2.5x its budget, and after ~5 min a
+    // 6.4 s frame, corrupted draws and device lost. Such a GPU reads system memory the same way (it is all RAM), so
+    // there the textures stay within the heap's budget and the rest goes to system memory (VMA picks the next memory
+    // type). Only when the largest device-local heap is under 1 GB; LARECOMP_VK_TEX_BUDGET=0 off, =1 on any GPU.
+    static int within = -1;
+    if (within < 0) {
+        const char *e = getenv("LARECOMP_VK_TEX_BUDGET");
+        VkPhysicalDeviceMemoryProperties mp;
+        vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+        VkDeviceSize big = 0;
+        for (uint32_t h = 0; h < mp.memoryHeapCount; h++)
+            if ((mp.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && mp.memoryHeaps[h].size > big) big = mp.memoryHeaps[h].size;
+        within = e ? atoi(e) != 0
+                   : g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && big < (1ull << 30);
+        if (within) LOG("[vk] textures kept within the video memory budget (largest device-local heap %llu MB): the rest in system memory\n",
+                        (unsigned long long)(big >> 20));
+    }
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+                                  .flags = within ? VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT : 0};
     VkResult r = vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL);
+    if (r != VK_SUCCESS && ai.flags) {  // (over every heap's budget: as before, wherever it fits)
+        ai.flags = 0;
+        r = vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL);
+    }
     if (r != VK_SUCCESS) {
         // (the Vulkan side too: a driver can refuse a format / usage / tiling combination with "out of device memory",
         // issue #45 - a GTX 1060 failing a 1920x1080 image with plenty of memory free)

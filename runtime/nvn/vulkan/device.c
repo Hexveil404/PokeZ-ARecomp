@@ -1230,6 +1230,17 @@ static void create_device(void) {
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
                                  .pVulkanFunctions = &vf, .vulkanApiVersion = g_vkc.api,
                                  .flags = budget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0};
+    // (test: LARECOMP_TEST_HEAP_LIMIT_MB=<n> - every device-local heap seen as that small, like an integrated GPU's
+    // carve-out: textures.c's budget fallback, #281)
+    VkDeviceSize heap_limit[VK_MAX_MEMORY_HEAPS];
+    if (getenv("LARECOMP_TEST_HEAP_LIMIT_MB")) {
+        VkPhysicalDeviceMemoryProperties mp;
+        vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+        for (uint32_t h = 0; h < VK_MAX_MEMORY_HEAPS; h++)
+            heap_limit[h] = h < mp.memoryHeapCount && (mp.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+                                ? (VkDeviceSize)atoll(getenv("LARECOMP_TEST_HEAP_LIMIT_MB")) << 20 : VK_WHOLE_SIZE;
+        ai.pHeapSizeLimit = heap_limit;
+    }
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
     vk_log_memory("start");
 

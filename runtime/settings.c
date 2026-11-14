@@ -453,6 +453,18 @@ void settings_load(void) {
     if (g_settings.draw_dist != 150 && g_settings.draw_dist != 200 && g_settings.draw_dist != 300) g_settings.draw_dist = 100;
     settings_env_overrides();
     LOG("[settings] loaded %s\n", SETTINGS_FILE);
+    {   // F1 > Compatibility choices that aren't Auto, and a chosen graphics card: a report's log shows them (#288 had
+        // robust access 2 on, which Auto keeps off on AMD GPUs, and nothing in its log said so)
+        static const char *const names[GPU_COMPAT_N] = {"gpu_dynamic_vertex", "gpu_overlap", "gpu_straight_shaders", "gpu_xfb_mirror",
+            "gpu_robust_access", "gpu_texture_prefetch", "gpu_prepare_shaders", "gpu_pages_outside"};
+        char line[256] = "";
+        size_t n = 0;
+        for (int i = 0; i < GPU_COMPAT_N && n < sizeof line - 48; i++)
+            if (g_settings.gpu_compat[i] != GPU_AUTO)
+                n += (size_t)snprintf(line + n, sizeof line - n, " %s=%s", names[i], g_settings.gpu_compat[i] == GPU_ON ? "on" : "off");
+        if (n) LOG("[settings] F1 > Compatibility, not Auto:%s\n", line);
+        if (g_settings.gpu_name[0]) LOG("[settings] graphics card chosen in F1: %s\n", g_settings.gpu_name);
+    }
 }
 
 void settings_save(void) {

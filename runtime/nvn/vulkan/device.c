@@ -255,6 +255,8 @@ static void pick_device(void) {
     VkPhysicalDevice *pd = calloc(n, sizeof *pd);
     vkEnumeratePhysicalDevices(g_vk.inst, &n, pd);
     int want = ENV("LARECOMP_GPU") ? atoi(ENV("LARECOMP_GPU")) : -1, best = -1, best_score = -1;
+    uint32_t best_api = 0, best_drv = 0;
+    bool twin = false;  // (two equally ranked GPUs - the same one through two drivers: see below)
     for (uint32_t i = 0; i < n; i++) {
         VkPhysicalDeviceProperties p;
         vkGetPhysicalDeviceProperties(pd[i], &p);
@@ -266,9 +268,16 @@ static void pick_device(void) {
         if (p.apiVersion >= VK_API_VERSION_1_3) score++;
         if (g_settings.gpu_name[0] && !strcmp(p.deviceName, g_settings.gpu_name)) score = 50;
         if ((int)i == want) score = 100;
-        if (score > best_score) { best_score = score; best = (int)i; }
+        // The same GPU twice, through two drivers (#288: a laptop's RX 5600M listed by its maker's old AMD driver, Vulkan
+        // 1.3.212, and by AMD's current one, 1.4.315): the first listed was taken - the old one, whose shader compiler
+        // crashed on every pipeline, so nothing was drawn. Equal scores go to the newer Vulkan, then the newer driver.
+        bool newer = score == best_score && (p.apiVersion > best_api || (p.apiVersion == best_api && p.driverVersion > best_drv));
+        if (score == best_score && best >= 0) twin = true;
+        if (score > best_score || newer) { best_score = score; best = (int)i; best_api = p.apiVersion; best_drv = p.driverVersion; }
     }
     if (best < 0) FATAL("no Vulkan 1.2 device: the GPU driver is too old, or the GPU has no Vulkan 1.2 driver\n");
+    if (twin) LOG("[vk] gpu %d chosen: of the equally ranked ones, the newest Vulkan / driver (api %u.%u.%u)\n", best,
+                  VK_API_VERSION_MAJOR(best_api), VK_API_VERSION_MINOR(best_api), VK_API_VERSION_PATCH(best_api));
     g_vk.phys = pd[best];
     free(pd);
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);

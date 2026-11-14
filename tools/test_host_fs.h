@@ -97,6 +97,24 @@ int plat_open_file(const char *path, int flags) { return open(path, flags, 0644)
 int plat_rename(const char *from, const char *to) { return rename(from, to); }
 #endif
 uint64_t plat_now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
+// (fs.c's cache_take_new swaps a remade cache folder in, #266: rm -rf, as the platform files do, with dirent alone)
+#include <dirent.h>
+#include <sys/stat.h>
+bool plat_remove_tree(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) return remove(dir) == 0;
+    bool ok = true;
+    for (struct dirent *e; (e = readdir(d));) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char path[1024];
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (!stat(path, &st) && S_ISDIR(st.st_mode)) ok = plat_remove_tree(path) && ok;
+        else ok = remove(path) == 0 && ok;
+    }
+    closedir(d);
+    return rmdir(dir) == 0 && ok;
+}
 #include "../runtime/game_addresses.h"
 static uint8_t live_save[0x6000];
 static GameAddrs test_ga = {  // the 1.0.0 table, with the live save in host memory

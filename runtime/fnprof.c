@@ -2,6 +2,7 @@
 // function calls FN_ENTER) between those presented frames, then writes build/fnprof.txt (addr count, most
 // called first). Diffing two runs shows which game functions a change brings in; counts also show hot code.
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +42,16 @@ static void bt_check(uint64_t a, uint64_t lr, uint64_t x0) {
                     (unsigned long long)a, (unsigned long long)lr, (unsigned long long)x0, (unsigned long long)vt,
                     (unsigned long long)v100, (unsigned long long)p8);
             plat_print_backtrace();  // (execinfo is macOS / glibc only)
+            if (i == 0 && getenv("LARECOMP_BT_WATCH")) {  // <hex size>: watch [x0, x0 + size) from here (dispatch.c)
+                extern uint64_t g_watch_lo, g_watch_hi;
+                extern void watch_arm(void);
+                char spec[64];
+                g_watch_lo = x0, g_watch_hi = x0 + strtoull(getenv("LARECOMP_BT_WATCH"), NULL, 16);
+                snprintf(spec, sizeof spec, "LARECOMP_WATCH_ADDR=%llx,%llx", (unsigned long long)g_watch_lo, (unsigned long long)g_watch_hi);
+                putenv(strdup(spec));
+                watch_arm();
+                fprintf(stderr, "[fnprof-bt] watching %llx-%llx\n", (unsigned long long)g_watch_lo, (unsigned long long)g_watch_hi);
+            }
             {   // the guest's own call chain: lifted code keeps the frame records (x29 -> {previous x29, x30}) on the guest stack
                 extern struct Cpu *kernel_current_cpu(void);
                 const uint64_t *cp = (const uint64_t *)kernel_current_cpu();
@@ -59,6 +70,23 @@ static void bt_check(uint64_t a, uint64_t lr, uint64_t x0) {
 
 void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
     if (bt_n) bt_check(a, lr, x0);
+    {   // LARECOMP_FNPROF_X0=<fn hex>[,...] (#224): every entry of those functions inside the window, with its x0 and caller
+        static uint64_t xf[8];
+        static int nxf = -1;
+        if (nxf < 0) {
+            nxf = 0;
+            for (const char *p = getenv("LARECOMP_FNPROF_X0"); p && *p && nxf < 8;) {
+                xf[nxf++] = strtoull(p, (char **)&p, 16);
+                if (*p == ',') p++; else break;
+            }
+        }
+        for (int i = 0; i < nxf; i++)
+            if (a == xf[i]) {
+                extern uint64_t renderer_present_count(void);
+                fprintf(stderr, "[x0] f%llu %llx x0 %llx lr %llx\n", (unsigned long long)renderer_present_count(),
+                        (unsigned long long)a, (unsigned long long)x0, (unsigned long long)lr);
+            }
+    }
     {   // LARECOMP_FNPROF_TL=<timeline update fn hex> (#224): each entry inside the window on a short timeline (end frame
         // +0x4c at most 2) logged with its state (+0x98), time (+0x90, 30 fps frames) and caller - where a step is skipped
         static int64_t tlfn = -1;
@@ -134,8 +162,82 @@ static void dbg_scan(uint64_t frame) {
 static void dbg_scan(uint64_t frame) { (void)frame; }
 #endif
 
+#ifdef _WIN32
+// LARECOMP_SLOT_SCAN=<frame> (#224): at that frame, every guest address holding the first LARECOMP_FNPROF_BT function's
+// x0 as a pointer is logged, and the first one outside that object is watched (who sets / clears the slot)
+static uint64_t slot_at[8], slot_val[8];
+static void slot_monitor(uint64_t frame) {  // (each frame after the scan: a slot's value when it changes)
+    for (int i = 0; i < 8 && slot_at[i]; i++) {
+        uint64_t v = *(volatile uint64_t *)(uintptr_t)slot_at[i];
+        if (v != slot_val[i]) {
+            LOG("[slot] frame %llu: %llx %llx -> %llx\n", (unsigned long long)frame, (unsigned long long)slot_at[i],
+                (unsigned long long)slot_val[i], (unsigned long long)v);
+            slot_val[i] = v;
+        }
+    }
+}
+static void slot_scan(uint64_t frame) {
+    slot_monitor(frame);
+    static long at = -2;
+    if (at == -2) at = getenv("LARECOMP_SLOT_SCAN") ? atol(getenv("LARECOMP_SLOT_SCAN")) : -1;
+    if (at < 0 || (long)frame != at || !g_bt_first_x0) return;
+    at = -1;
+    uint64_t v = g_bt_first_x0, first = 0;
+    int hits = 0;
+    for (uint64_t a = 0x7000000000ull; a < 0x7800000000ull && hits < 40;) {
+        MEMORY_BASIC_INFORMATION mi;
+        if (!VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi)) break;
+        uint64_t end = (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize;
+        if (mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+            for (uint64_t p = a; p + 8 <= end && hits < 40; p += 8)
+                if (*(const uint64_t *)(uintptr_t)p == v) {
+                    LOG("[slot] frame %llu: %llx holds %llx\n", (unsigned long long)frame, (unsigned long long)p, (unsigned long long)v);
+                    if (!first && (p < v || p >= v + 0x200) && hits >= (getenv("LARECOMP_SLOT_PICK") ? atoi(getenv("LARECOMP_SLOT_PICK")) : 0))
+                        first = p;  // (LARECOMP_SLOT_PICK=<n>: watch the n-th hit)
+                    if (hits < 8) slot_at[hits] = p, slot_val[hits] = v;
+                    hits++;
+                }
+        a = end;
+    }
+    if (first) {
+        extern uint64_t g_watch_lo, g_watch_hi;
+        extern void watch_arm(void);
+        char spec[64];
+        g_watch_lo = first, g_watch_hi = first + 8;
+        snprintf(spec, sizeof spec, "LARECOMP_WATCH_ADDR=%llx,%llx", (unsigned long long)first, (unsigned long long)first + 8);
+        putenv(strdup(spec));
+        watch_arm();
+        LOG("[slot] watching %llx\n", (unsigned long long)first);
+    }
+}
+#else
+static void slot_scan(uint64_t frame) { (void)frame; }
+#endif
+
 void fnprof_frame(uint64_t frame) {
     dbg_scan(frame);
+    slot_scan(frame);
+    {   // LARECOMP_DUMP=<frame>:<hex addr>:<hex size>[;...] (#224): guest memory written to build/dump_<frame>_<addr>.bin
+        static char spec[512];
+        static int init;
+        if (!init) { init = 1; const char *e = getenv("LARECOMP_DUMP"); if (e) snprintf(spec, sizeof spec, "%s", e); }
+        for (const char *p = spec; *p;) {
+            unsigned long long fr = 0, ad = 0, sz = 0;
+            char as[24] = "";
+            bool ok = sscanf(p, "%llu:%23[^:]:%llx", &fr, as, &sz) == 3;
+            ad = !strcmp(as, "bt") ? g_bt_first_x0 : strtoull(as, NULL, 16);  // (bt: the first LARECOMP_FNPROF_BT function's x0)
+            if (ok && fr == frame && ad >= 0x7000000000ull && ad + sz < 0x7800000000ull) {
+                char path[160];
+                snprintf(path, sizeof path, "build/dump_%llu_%llx.bin", fr, ad);
+                FILE *f = fopen(path, "wb");
+                if (f) { fwrite((const void *)(uintptr_t)ad, 1, sz, f); fclose(f); }
+                LOG("[dump] frame %llu: %llx+%llx -> %s\n", fr, ad, sz, path);
+            }
+            p = strchr(p, ';');
+            if (!p) break;
+            p++;
+        }
+    }
     static long from = -2, to;
     if (from == -2) {
         from = -1;

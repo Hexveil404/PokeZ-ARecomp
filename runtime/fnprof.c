@@ -41,6 +41,19 @@ static void bt_check(uint64_t a, uint64_t lr, uint64_t x0) {
                     (unsigned long long)a, (unsigned long long)lr, (unsigned long long)x0, (unsigned long long)vt,
                     (unsigned long long)v100, (unsigned long long)p8);
             plat_print_backtrace();  // (execinfo is macOS / glibc only)
+            {   // the guest's own call chain: lifted code keeps the frame records (x29 -> {previous x29, x30}) on the guest stack
+                extern struct Cpu *kernel_current_cpu(void);
+                const uint64_t *cp = (const uint64_t *)kernel_current_cpu();
+                uint64_t fp = cp ? cp[29] : 0;
+                fprintf(stderr, "  guest chain: %llx", (unsigned long long)lr);
+                for (int k = 0; k < 24 && fp >= 0x7000000000ull && fp < 0x7800000000ull && !(fp & 7); k++) {
+                    uint64_t nfp = *(const uint64_t *)(uintptr_t)fp, ra = *(const uint64_t *)(uintptr_t)(fp + 8);
+                    fprintf(stderr, " <- %llx", (unsigned long long)ra);
+                    if (nfp <= fp) break;
+                    fp = nfp;
+                }
+                fprintf(stderr, "\n");
+            }
         }
 }
 

@@ -94,6 +94,10 @@ jobs:
         run: |
           clang -std=gnu11 -O1 tools/test_update_marker.c -o build/test-update-marker
           build/test-update-marker
+      - name: Mystery Gift (BCAT delivery cache over a made-up folder, EventsGallery list parsing)
+        run: |
+          clang -std=gnu11 -O1 -Iruntime tools/test_bcat.c -o build/test-bcat -lpthread
+          build/test-bcat
       - name: Draw distance generator (synthetic scene parts)
         run: python3 tools/test_draw_dist.py
       - name: Controller light colours
@@ -207,6 +211,10 @@ jobs:
         run: |
           clang -std=gnu11 -O1 tools/test_update_marker.c -o build/test-update-marker.exe
           build/test-update-marker.exe
+      - name: Mystery Gift (BCAT delivery cache over a made-up folder, EventsGallery list parsing)
+        run: |
+          clang -std=gnu11 -O1 -Iruntime tools/test_bcat.c -o build/test-bcat.exe -lpthread
+          build/test-bcat.exe
       - name: Draw distance generator (synthetic scene parts)
         run: python tools/test_draw_dist.py
       - name: Controller in use (two virtual gamepads, #455)

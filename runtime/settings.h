@@ -63,6 +63,7 @@ typedef struct {
     bool reverb;         // room reverb effect
     bool movie_audio;
     bool show_fps;
+    bool mystery_gift;   // Pokémon Z-A: Mystery Gift from mystery_gift/ (bcat.c; nifm reports a connection: misc.c)
     bool fps60;  // Pokémon Z-A: its frame clock at 1/60 s per frame (runtime/hle/framepace.c)
     bool aniso16;  // Texture filtering High: 16x anisotropic and trilinear on every mipmapped sampler (runtime/nvn/vulkan/textures.c)
     bool hdr;            // HDR output when Windows has the display in HDR mode (vulkan/device.c, exec.c vk_hdr_encode)

@@ -168,8 +168,71 @@ bool plat_mem_usage(uint64_t *process, uint64_t *guest) {
             if (mi.State == MEM_COMMIT && mi.Type == MEM_PRIVATE && (ab < g_lo || ab >= g_hi)) sz += mi.RegionSize;
             if ((uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize < a) break;
         }
-        for (int i = 0; i < 16 && top[i].size; i++)
-            fprintf(stderr, "[mem] private allocation %llx: %llu MB\n", (unsigned long long)top[i].base, (unsigned long long)(top[i].size >> 20));
+        for (int i = 0; i < 16 && top[i].size; i++) {
+            fprintf(stderr, "[mem] private allocation %llx: %llu MB", (unsigned long long)top[i].base, (unsigned long long)(top[i].size >> 20));
+            // (what is in it: its first committed bytes and how much of it is non-zero, sampled every 4 KB)
+            MEMORY_BASIC_INFORMATION r;
+            uint64_t p = top[i].base, nz = 0, pages = 0;
+            for (uint64_t q = p; q < p + top[i].size + (1ull << 30) && VirtualQuery((void *)(uintptr_t)q, &r, sizeof r) &&
+                                 (uint64_t)(uintptr_t)r.AllocationBase == p; q = (uint64_t)(uintptr_t)r.BaseAddress + r.RegionSize)
+                if (r.State == MEM_COMMIT && !(r.Protect & (PAGE_GUARD | PAGE_NOACCESS)))
+                    for (uint64_t g = (uint64_t)(uintptr_t)r.BaseAddress; g < (uint64_t)(uintptr_t)r.BaseAddress + r.RegionSize; g += 4096, pages++) {
+                        const uint64_t *w = (const uint64_t *)(uintptr_t)g;
+                        if (w[0] | w[1] | w[64] | w[256]) nz++;
+                        if (pages == 0) fprintf(stderr, " | protect %lx, first %016llx %016llx %016llx %016llx", r.Protect,
+                                                (unsigned long long)w[0], (unsigned long long)w[1], (unsigned long long)w[2], (unsigned long long)w[3]);
+                    }
+            fprintf(stderr, " | %llu of %llu pages non-zero", (unsigned long long)nz, (unsigned long long)pages);
+            {   // (a heap segment's header points into the module that made the heap: named here)
+                const uint64_t *w = (const uint64_t *)(uintptr_t)p;
+                HMODULE mod = NULL;
+                char name[MAX_PATH] = "";
+                if (VirtualQuery((void *)(uintptr_t)p, &r, sizeof r) && r.State == MEM_COMMIT && !(r.Protect & (PAGE_GUARD | PAGE_NOACCESS)) &&
+                    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                       (LPCSTR)(uintptr_t)w[3], &mod) && GetModuleFileNameA(mod, name, sizeof name))
+                    fprintf(stderr, " | header points into %s", strrchr(name, '\\') ? strrchr(name, '\\') + 1 : name);
+            }
+            fputc('\n', stderr);
+        }
+        {   // (every private allocation outside the guest window, by size: how the host share adds up)
+            static const uint64_t lim[] = {1ull << 20, 8ull << 20, 31ull << 20, 33ull << 20, 64ull << 20, 256ull << 20, ~0ull};
+            static const char *const nm[] = {"<1 MB", "1-8 MB", "8-31 MB", "32 MB", "33-64 MB", "64-256 MB", ">256 MB"};
+            uint64_t tot[7] = {0}, cnt[7] = {0}, base = 0, s = 0;
+            for (uint64_t a = 0x10000;; ) {
+                bool ok = VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi) != 0;
+                uint64_t ab = ok ? (uint64_t)(uintptr_t)mi.AllocationBase : ~0ull;
+                if (ab != base) {
+                    for (int k = 0; s && k < 7; k++) if (s < lim[k]) { tot[k] += s, cnt[k]++; break; }
+                    base = ab, s = 0;
+                }
+                if (!ok) break;
+                if (mi.State == MEM_COMMIT && mi.Type == MEM_PRIVATE && (ab < g_lo || ab >= g_hi)) s += mi.RegionSize;
+                uint64_t next = (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize;
+                if (next <= a) break;
+                a = next;
+            }
+            for (int k = 0; k < 7; k++)
+                if (cnt[k]) fprintf(stderr, "[mem] private outside the game, %s each: %llu allocations, %llu MB\n", nm[k],
+                                    (unsigned long long)cnt[k], (unsigned long long)(tot[k] >> 20));
+        }
+        // (and the process heaps - malloc's: in use per heap, and every block of 64 MB or more, so an allocation above
+        // is told apart as a malloc (its base among these) or something reserved directly, the driver's)
+        HANDLE heaps[64];
+        DWORD nh = GetProcessHeaps(64, heaps);
+        for (DWORD h = 0; h < nh && h < 64; h++) {
+            PROCESS_HEAP_ENTRY e = {0};
+            uint64_t busy = 0, nbusy = 0;
+            if (!HeapLock(heaps[h])) continue;
+            while (HeapWalk(heaps[h], &e))
+                if (e.wFlags & PROCESS_HEAP_ENTRY_BUSY) {
+                    busy += e.cbData, nbusy++;
+                    if (e.cbData >= (64u << 20))
+                        fprintf(stderr, "[mem] heap %lu block %p: %llu MB\n", (unsigned long)h, e.lpData, (unsigned long long)(e.cbData >> 20));
+                }
+            HeapUnlock(heaps[h]);
+            if (busy >> 20) fprintf(stderr, "[mem] heap %lu (%p): %llu MB in use in %llu blocks\n", (unsigned long)h, heaps[h],
+                                    (unsigned long long)(busy >> 20), (unsigned long long)nbusy);
+        }
     }
     return true;
 }

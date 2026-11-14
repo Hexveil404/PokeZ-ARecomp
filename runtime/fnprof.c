@@ -71,11 +71,11 @@ static void bt_check(uint64_t a, uint64_t lr, uint64_t x0) {
 void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
     if (bt_n) bt_check(a, lr, x0);
     {   // LARECOMP_FNPROF_X0=<fn hex>[,...] (#224): every entry of those functions inside the window, with its x0 and caller
-        static uint64_t xf[8];
+        static uint64_t xf[16];
         static int nxf = -1;
         if (nxf < 0) {
             nxf = 0;
-            for (const char *p = getenv("LARECOMP_FNPROF_X0"); p && *p && nxf < 8;) {
+            for (const char *p = getenv("LARECOMP_FNPROF_X0"); p && *p && nxf < 16;) {
                 xf[nxf++] = strtoull(p, (char **)&p, 16);
                 if (*p == ',') p++; else break;
             }
@@ -86,6 +86,21 @@ void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
                 fprintf(stderr, "[x0] f%llu %llx x0 %llx lr %llx\n", (unsigned long long)renderer_present_count(),
                         (unsigned long long)a, (unsigned long long)x0, (unsigned long long)lr);
             }
+    }
+    {   // LARECOMP_FNPROF_VAR=<fn hex> (#224): each entry logs x0 and the {u64 hash, u64 value} record x1 points to
+        static int64_t vf = -1;
+        if (vf < 0) vf = getenv("LARECOMP_FNPROF_VAR") ? (int64_t)strtoull(getenv("LARECOMP_FNPROF_VAR"), NULL, 16) : 0;
+        if (vf && a == (uint64_t)vf) {
+            extern struct Cpu *kernel_current_cpu(void);
+            const uint64_t *cp = (const uint64_t *)kernel_current_cpu();
+            uint64_t x1 = cp ? cp[1] : 0;
+            if (x1 >= 0x7000000000ull && x1 < 0x7800000000ull) {
+                extern uint64_t renderer_present_count(void);
+                fprintf(stderr, "[var] f%llu g %llx lr %llx hash %016llx val %016llx\n", (unsigned long long)renderer_present_count(),
+                        (unsigned long long)x0, (unsigned long long)lr, (unsigned long long)*(uint64_t *)(uintptr_t)x1,
+                        (unsigned long long)*(uint64_t *)(uintptr_t)(x1 + 8));
+            }
+        }
     }
     {   // LARECOMP_FNPROF_TL=<timeline update fn hex> (#224): each entry inside the window on a short timeline (end frame
         // +0x4c at most 2) logged with its state (+0x98), time (+0x90, 30 fps frames) and caller - where a step is skipped
@@ -176,6 +191,12 @@ static void slot_monitor(uint64_t frame) {  // (each frame after the scan: a slo
             snprintf(path, sizeof path, "build/st_%llu.bin", (unsigned long long)frame);
             FILE *f = fopen(path, "wb");
             if (f) { fwrite(&o, 8, 1, f); fwrite((const void *)(uintptr_t)o, 1, 0x400, f); fclose(f); }
+            uint64_t g = *(volatile uint64_t *)(uintptr_t)(o + 0x58);  // (the state's graph instance: its variables)
+            if (g >= 0x7000000000ull && g < 0x7800000000ull) {
+                snprintf(path, sizeof path, "build/gr_%llu.bin", (unsigned long long)frame);
+                f = fopen(path, "wb");
+                if (f) { fwrite(&g, 8, 1, f); fwrite((const void *)(uintptr_t)g, 1, 0x1000, f); fclose(f); }
+            }
         }
     }
     for (int i = 0; i < 8 && slot_at[i]; i++) {
@@ -187,15 +208,52 @@ static void slot_monitor(uint64_t frame) {  // (each frame after the scan: a slo
         }
     }
 }
+static int ok_ptr(uint64_t p) { return p >= 0x7000000000ull && p < 0x7800000000ull && !(p & 7); }
 static void slot_scan(uint64_t frame) {
     slot_monitor(frame);
+    {   // LARECOMP_INTENT_MON=<frame> (#224): from that frame, the BT function's x0 is the player's state manager M; the
+        // entity E holds it at +0x2090; E's +0x2060 component C: mask +0xa8, list +0xa0 -> [0] -> +0x2c (move intent)
+        static long im = -2;
+        static uint64_t ent;
+        static char last[160];
+        if (im == -2) im = getenv("LARECOMP_INTENT_MON") ? atol(getenv("LARECOMP_INTENT_MON")) : -1;
+        if (im >= 0 && (long)frame >= im && g_bt_first_x0 && !ent) {
+            uint64_t m = g_bt_first_x0;
+            for (uint64_t a = 0x7000000000ull; a < 0x7800000000ull && !ent;) {
+                MEMORY_BASIC_INFORMATION mi;
+                if (!VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi)) break;
+                uint64_t end = (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize;
+                if (mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+                    for (uint64_t p = a; p + 8 <= end && !ent; p += 8)
+                        if (*(const uint64_t *)(uintptr_t)p == m && p >= a + 0x2090 && ok_ptr(*(const uint64_t *)(uintptr_t)(p - 0x2090 + 0x2060)))
+                            ent = p - 0x2090;
+                a = end;
+            }
+            LOG("[intent] frame %llu: manager %llx -> entity %llx\n", (unsigned long long)frame, (unsigned long long)m, (unsigned long long)ent);
+        }
+        if (ent) {
+            uint64_t cc = *(volatile uint64_t *)(uintptr_t)(ent + 0x2060), mask = 0, l = 0, q = 0, r = 0;
+            float s6 = -1;
+            if (ok_ptr(cc)) {
+                mask = *(volatile uint64_t *)(uintptr_t)(cc + 0xa8);
+                l = *(volatile uint64_t *)(uintptr_t)(cc + 0xa0);
+                if (ok_ptr(l)) q = *(volatile uint64_t *)(uintptr_t)l;
+                if (ok_ptr(q)) r = *(volatile uint64_t *)(uintptr_t)q;
+                if (ok_ptr(r)) s6 = *(volatile float *)(uintptr_t)(r + 0x2c);
+            }
+            char now[160];
+            snprintf(now, sizeof now, "comp %llx mask %llx list %llx -> %llx -> %llx intent %g", (unsigned long long)cc,
+                     (unsigned long long)mask, (unsigned long long)l, (unsigned long long)q, (unsigned long long)r, (double)s6);
+            if (strcmp(now, last)) { LOG("[intent] frame %llu: %s\n", (unsigned long long)frame, now); strcpy(last, now); }
+        }
+    }
     {   // LARECOMP_COMP_WATCH=<frame> (#224): the BT function's x0 is an entity whose components are the pointer
         // vector [x0+0x60, x0+0x68); each component's +0x60 (its running sub-object) monitored from that frame
         static long cw = -2;
         if (cw == -2) cw = getenv("LARECOMP_COMP_WATCH") ? atol(getenv("LARECOMP_COMP_WATCH")) : -1;
         if (cw >= 0 && (long)frame >= cw && g_bt_first_x0) {
-            cw = -1;
             uint64_t b = *(uint64_t *)(uintptr_t)(g_bt_first_x0 + 0x60), e = *(uint64_t *)(uintptr_t)(g_bt_first_x0 + 0x68);
+            if (b < e) cw = -1;  // (none yet: tried again next frame)
             int k = 0;
             LOG("[comp] frame %llu: entity %llx, components %llx-%llx\n", (unsigned long long)frame,
                 (unsigned long long)g_bt_first_x0, (unsigned long long)b, (unsigned long long)e);
@@ -204,6 +262,15 @@ static void slot_scan(uint64_t frame) {
                 slot_at[k] = comp + 0x60, slot_val[k] = *(uint64_t *)(uintptr_t)(comp + 0x60);
                 LOG("[comp] frame %llu: component %d at %llx (vtable %llx), +0x60 = %llx\n", (unsigned long long)frame, k,
                     (unsigned long long)comp, (unsigned long long)*(uint64_t *)(uintptr_t)comp, (unsigned long long)slot_val[k]);
+            }
+            if (getenv("LARECOMP_COMP_WATCH_SLOT0") && slot_at[0]) {  // (who writes component 0's running state)
+                extern uint64_t g_watch_lo, g_watch_hi;
+                extern void watch_arm(void);
+                char spec[64];
+                g_watch_lo = slot_at[0], g_watch_hi = slot_at[0] + 8;
+                snprintf(spec, sizeof spec, "LARECOMP_WATCH_ADDR=%llx,%llx", (unsigned long long)g_watch_lo, (unsigned long long)g_watch_hi);
+                putenv(strdup(spec));
+                watch_arm();
             }
         }
     }

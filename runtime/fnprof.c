@@ -68,7 +68,59 @@ static void bt_check(uint64_t a, uint64_t lr, uint64_t x0) {
         }
 }
 
+// Mystery Gift diagnostics (misc.c turns this and g_fnprof on when the game goes online for it): entries of the
+// Mystery Gift code - its screens and gift list (main+0x2c60000..), its cards and downloads (main+0x2d9c000..), the
+// network requests (main+0x1900000..) - with their callers, each pair once, to logs/mystery_gift_calls.log. The
+// message window (main+0x2c6a808, x1 = {hash, label}) is logged every time, with the message's label.
+volatile int g_mg_fn;
+static FILE *g_mgf;
+static uint64_t g_mg_seen[1 << 15][2];
+static volatile int g_mg_reset;
+void mg_calls_mark(const char *what) {  // (dispatch.c mg_trace_mark: a new phase - every pair is logged again)
+    if (!g_mg_fn) return;
+    if (!g_mgf) g_mgf = fopen("logs/mystery_gift_calls.log", "w");
+    if (g_mgf) { fprintf(g_mgf, "==== %.80s\n", what); fflush(g_mgf); }
+    g_mg_reset = 1;
+}
+static void mg_fn(uint64_t a, uint64_t lr) {
+    static int lines;
+    if (g_mg_reset) { memset(g_mg_seen, 0, sizeof g_mg_seen); g_mg_reset = 0; }
+    uint64_t (*seen)[2] = g_mg_seen;
+    FILE *f = g_mgf;
+    if (!g_nmodules || lines >= 150000) return;
+    uint64_t b = g_modules[0].base, off = a - b;
+    // the async library's error makers (2.0.2): main+0xc57f50 (x1 = {hash, name}), main+0x2a1d3f0 (x0 = {hash, name},
+    // x1 = result code) - every error the gift chain makes, by name
+    bool err = off == 0xc57f50 || off == 0x2a1d3f0;
+    if (a < b || !(err || (off >= 0x2c60000 && off < 0x2c78000) || (off >= 0x2d9c000 && off < 0x2dc8000) ||
+                   (off >= 0x1900000 && off < 0x1920000)))
+        return;
+    Cpu *c = kernel_current_cpu();
+    bool msg = off == 0x2c6a808 || err;
+    if (!msg) {
+        unsigned h = (unsigned)(((a >> 2) ^ (lr * 0x9E3779B1u)) * 2654435761u) & ((1 << 15) - 1);
+        for (unsigned i = 0; i < 64; i++, h = (h + 1) & ((1 << 15) - 1)) {
+            if (seen[h][0] == a && seen[h][1] == lr) return;
+            if (!seen[h][0]) { seen[h][0] = a, seen[h][1] = lr; break; }
+        }
+    }
+    if (!f && !(f = g_mgf = fopen("logs/mystery_gift_calls.log", "w"))) return;
+    uint64_t e = b + g_modules[0].size;
+    fprintf(f, "main+%llx <- %s%llx", (unsigned long long)off, lr >= b && lr < e ? "main+" : "",
+            (unsigned long long)(lr >= b && lr < e ? lr - b : lr));
+    if (c) fprintf(f, "  x0=%llx x1=%llx x2=%llx", (unsigned long long)c->x[0], (unsigned long long)c->x[1],
+                   (unsigned long long)c->x[2]);
+    uint64_t named = !c ? 0 : off == 0x2a1d3f0 ? c->x[0] : c->x[1];
+    if (msg && named >> 36 == 7) {  // the label / error name: a C string in the game's memory
+        const char *label = *(const char *const *)(uintptr_t)(named + 8);
+        if ((uint64_t)(uintptr_t)label >> 36 == 7) fprintf(f, "  %s %.48s", err ? "ERROR" : "MESSAGE", label);
+    }
+    fputc('\n', f);
+    if (msg || ++lines % 32 == 0) fflush(f);
+}
+
 void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
+    if (g_mg_fn) { mg_fn(a, lr); if (bt_n <= 0) return; }
     if (bt_n) bt_check(a, lr, x0);
     {   // LARECOMP_FNPROF_X0=<fn hex>[,...] (#224): every entry of those functions inside the window, with its x0 and caller
         static uint64_t xf[16];

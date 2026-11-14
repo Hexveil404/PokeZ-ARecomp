@@ -333,8 +333,40 @@ static bool mod_blank(uint64_t pc) {  // (inside a code mod, and its image's wor
     return false;
 }
 
+// Mystery Gift diagnostics: once the game goes online for it (misc.c nifm_online), every main-module function first
+// reached through a pointer (a cache miss here) is written to logs/mystery_gift_trace.log with its caller - the steps
+// of the game's connection sequence, in order. Off otherwise; at most 20000 lines.
+volatile int g_mg_trace;  // (misc.c: set when the connection is first reported)
+static FILE *g_mg_f;
+static int g_mg_lines;
+static void mg_open(void) { if (!g_mg_f) g_mg_f = fopen("logs/mystery_gift_trace.log", "w"); }
+void mg_calls_mark(const char *what);  // (fnprof.c)
+void mg_trace_mark(const char *what) {  // (bcat.c, misc.c: what the services saw, between the calls)
+    if (!g_mg_trace) return;
+    mg_calls_mark(what);
+    mg_open();
+    if (g_mg_f) { fprintf(g_mg_f, "---- %s\n", what); fflush(g_mg_f); }
+}
+static void mg_trace(Cpu *c, uint64_t pc) {
+    static uint64_t seen[1 << 15][2];
+    if (!g_nmodules || pc < g_modules[0].base || pc >= g_modules[0].base + g_modules[0].size || g_mg_lines >= 60000) return;
+    uint64_t lr = c->x[30];
+    unsigned h = (unsigned)(((pc >> 2) ^ (lr * 0x9E3779B1u)) * 2654435761u) & ((1 << 15) - 1);
+    for (unsigned i = 0; i < 64; i++, h = (h + 1) & ((1 << 15) - 1)) {
+        if (seen[h][0] == pc && seen[h][1] == lr) return;
+        if (!seen[h][0]) { seen[h][0] = pc, seen[h][1] = lr; break; }
+    }
+    mg_open();
+    if (!g_mg_f) return;
+    uint64_t b = g_modules[0].base, e = b + g_modules[0].size;
+    fprintf(g_mg_f, "main+%llx <- %s%llx  x0=%llx x1=%llx\n", (unsigned long long)(pc - b), lr >= b && lr < e ? "main+" : "",
+            (unsigned long long)(lr >= b && lr < e ? lr - b : lr), (unsigned long long)c->x[0], (unsigned long long)c->x[1]);
+    if (++g_mg_lines % 64 == 0) fflush(g_mg_f);
+}
+
 __attribute__((noinline)) static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
+    if (g_mg_trace) mg_trace(c, pc);
     if (boot_delegate_build() && pc == BOOT_DELEGATE_SET) return boot_delegate_set;
     if (boot_delegate_build() && pc == BOOT_DELEGATE_USE) return boot_delegate_use;
     if (ready_wait_build() && pc == g_rw->fn) return ready_wait_step;
@@ -372,6 +404,8 @@ __attribute__((noinline)) static GuestFn dispatch_slow(Cpu *c) {
 #endif
         FATAL("no function at %llx (lr=%llx %s+%llx)\n", pc, c->x[30], s ? s : "?", off);
     }
+    if (g_mg_trace && g_nmodules && pc >= g_modules[0].base && pc < g_modules[0].base + g_modules[0].size)
+        return f;  // (tracing: main's calls stay uncached, so every caller -> callee pair passes mg_trace)
     unsigned h = (unsigned)(pc >> 2) & (DCACHE - 1);
     dcache[h].addr = pc;
     dcache[h].fn = f;

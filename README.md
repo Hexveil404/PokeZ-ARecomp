@@ -36,6 +36,7 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 - [Saves](#saves)
 - [Mods](#mods)
 - [Multiplayer (test)](#multiplayer-test)
+- [Mystery Gift](#mystery-gift)
 - [Troubleshooting](#troubleshooting)
 - [Building from source](#building-from-source)
 - [Developer tools](#developer-tools)
@@ -310,6 +311,23 @@ corporate routers). A virtual LAN (Radmin VPN, ZeroTier, Hamachi) works around t
 - **What you can do today:** link trades and private battles with friends, game to game, over the internet or on the
   same network, using the steps above. Nothing in between can go offline, and nobody but your friend is involved.
 
+## Mystery Gift
+
+**Link Play > Mystery Gift > Get via Internet** works without Nintendo's servers. It lists every Pokémon Legends: Z-A
+gift [Project Pokémon's EventsGallery](https://github.com/projectpokemon/EventsGallery) has, past and present, and
+you receive them in the game as on a console (the gift, its ribbons and IDs are the game's own).
+
+- **Nothing to keep up to date:** the list is read from EventsGallery when the game starts, so a new distribution
+  shows up once it's there. The gifts are downloaded to your PC (`cache/mystery_gift/`) the first time, and still work
+  offline after that. Nothing is sent to Nintendo, and no game data is in this repository.
+- **Spewpa** (16 Vivillon patterns, one gift): one pattern is picked for you, as the real distribution did.
+- **Your own cards:** any file in `mystery_gift/bcat/normal/` (wonder cards back to back, 0x2C8 bytes each) is listed
+  too.
+- **Turn it off:** **F1 > Online > Mystery Gift**. Off, the game sees no internet connection, as before.
+- **Needs** game version **2.0.2**. Typed codes (Get with Code/Password) aren't supported: their gifts are in the list.
+- **Multiplayer isn't affected:** Link Play with Nearby Players and F1 > Online use the emulated local wireless, not
+  this.
+
 ## DirectX 12
 
 ZA Recomp normally runs on your graphics card's **Vulkan** driver. On Windows it can also run the same renderer on the
@@ -340,6 +358,10 @@ card's **DirectX 12** driver, which helps where the Vulkan driver crashes or mis
   [docs/linux.md](docs/linux.md#amd-rdna4-and-mesa-270-devel).
 - **Low frame rate**: lower the internal resolution or turn on Dynamic resolution, and turn off the optional graphics
   features.
+- **Mystery Gift says "We aren't able to retrieve that gift right now"** or lists nothing: check
+  **F1 > Online > Mystery Gift** is on and look at the `[mystery-gift]` lines in `logs/play.log` (the gifts listed, or
+  why a download failed; curl's own messages are in `cache/mystery_gift/curl.log`). Offline, the gifts downloaded
+  before are used.
 - **Report a bug**: [open an issue](https://github.com/Hexveil404/PokeZ-ARecomp/issues) with your GPU, driver version,
   game version and `logs/play.log`.
 

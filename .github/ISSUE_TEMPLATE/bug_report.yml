@@ -1,0 +1,103 @@
+name: "Bug / crash · Bug / travamento"
+description: "Something went wrong in ZA Recomp: a crash, a freeze, a graphics problem. / Algo deu errado no ZA Recomp: crash, travamento, problema gráfico."
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **EN:** Thanks for reporting! The **log** is what lets us find the cause, so please attach it below. Without it we usually can't tell what happened.
+        **PT:** Obrigado por relatar! O **log** é o que nos deixa achar a causa, então anexe ele abaixo. Sem ele quase nunca dá para saber o que aconteceu.
+
+        **Where the logs are / Onde ficam os logs** — in the ZA Recomp folder / na pasta do ZA Recomp:
+        - `logs/play.log`: the last game session / a última sessão do jogo
+        - `logs/play-anterior.log`: the session before it (use this one if you already opened the game again after the problem) / a sessão anterior (use esta se você já abriu o jogo de novo depois do problema)
+        - `logs/launcher.log`: the start screen (setup, compiling, updates) / a tela inicial (instalação, compilação, atualizações)
+
+  - type: textarea
+    id: description
+    attributes:
+      label: "What happened? · O que aconteceu?"
+      description: |
+        What you saw, what you expected, and how to make it happen again (where in the game, what you were doing).
+        O que você viu, o que esperava, e como fazer acontecer de novo (onde no jogo, o que estava fazendo).
+      placeholder: |
+        Ex.: The game closes when I enter Wild Zone 6 and the alpha uses Snarl. It happens every time.
+        Ex.: O jogo fecha quando entro na Wild Zone 6 e o alfa usa Snarl. Acontece toda vez.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Logs (required) · Logs (obrigatório)"
+      description: |
+        **Drag `logs/play.log` into this box** (and `play-anterior.log` / `launcher.log` if they apply). Attach the files rather than pasting: logs are long.
+        **Arraste o `logs/play.log` para esta caixa** (e o `play-anterior.log` / `launcher.log` se for o caso). Anexe os arquivos em vez de colar: os logs são longos.
+      placeholder: "Drag the .log files here · Arraste os arquivos .log aqui"
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: "ZA Recomp version · Versão do ZA Recomp"
+      description: "Shown on the start screen and in the first line of play.log. · Aparece na tela inicial e na primeira linha do play.log."
+      placeholder: "v0.1.23"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: game
+    attributes:
+      label: "Game version · Versão do jogo"
+      description: "Shown on the start screen (e.g. 2.0.2 + DLC). · Aparece na tela inicial (ex.: 2.0.2 + DLC)."
+      options:
+        - "2.0.2"
+        - "2.0.2 + DLC"
+        - "2.0.0"
+        - "2.0.0 + DLC"
+        - "1.0.0"
+        - "1.0.0 + DLC"
+        - "I don't know · Não sei"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: system
+    attributes:
+      label: "System · Sistema"
+      options:
+        - "Windows"
+        - "Linux"
+        - "Steam Deck"
+        - "Other · Outro"
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: "Graphics card · Placa de vídeo"
+      placeholder: "RTX 4060 Ti / RX 6600 / Intel UHD 620 / Steam Deck"
+    validations:
+      required: true
+
+  - type: textarea
+    id: mods
+    attributes:
+      label: "Mods"
+      description: "The folders inside `mods/`, if any (translation, DLC unlock, clothes...). · As pastas dentro de `mods/`, se houver (tradução, desbloqueio de DLC, roupas...)."
+      placeholder: "None · Nenhum"
+    validations:
+      required: false
+
+  - type: textarea
+    id: files
+    attributes:
+      label: "Screenshots, videos, save · Prints, vídeos, save"
+      description: |
+        Optional, but they help a lot: a print or short video of the problem; your `save` folder zipped if it happens at a specific point of the game.
+        Opcional, mas ajuda muito: um print ou vídeo curto do problema; a pasta `save` compactada se acontecer num ponto específico do jogo.
+      placeholder: "Drag files here · Arraste os arquivos aqui"
+    validations:
+      required: false

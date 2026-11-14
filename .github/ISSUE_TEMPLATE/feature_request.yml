@@ -1,0 +1,18 @@
+name: "Suggestion · Sugestão"
+description: "An idea or a new option for ZA Recomp. / Uma ideia ou uma opção nova para o ZA Recomp."
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: "What would you like? · O que você gostaria?"
+      description: "What it would do and why it helps. · O que faria e por que ajuda."
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: "Images or examples · Imagens ou exemplos"
+      description: "Optional. · Opcional."
+    validations:
+      required: false

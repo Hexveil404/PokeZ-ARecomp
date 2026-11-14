@@ -12,8 +12,10 @@
 //   LARECOMP_FRAME_STEPS_MAX maximum steps per frame (default 4: after a long stall the game doesn't jump ahead)
 //   LARECOMP_FORCE_STEPS=<n> (test) always n
 #include <stdlib.h>
+#include <string.h>
 
 #include "../hle.h"
+#include "../game_addresses.h"
 
 extern volatile uint64_t g_vsync_count;  // runtime/hle/vi.c
 uint64_t g_frame_steps_late;             // (stats) frames that advanced more than one step
@@ -463,10 +465,70 @@ int32_t rt_za_frame_cfg(int32_t cfg) {
 }
 uint64_t g_game_vsyncs;  // (see rt_za_frame_cfg)
 
-// Smooth distant animation (tools/za_patches.py SMOOTH_ANIM, Pokemon Z-A 2.0.2): the byte the animation update reads for
-// each entity says "update every frame"; the game clears it for the ones outside a small set chosen by distance and view,
-// and those move in visible steps. On, every entity reads it set (the game's own logic, and its selection, stay as they
-// are). F1 > Smooth distant animation; LARECOMP_SMOOTH_ANIM=0 / 1 overrides the setting at load.
-uint8_t rt_za_smooth_anim(uint8_t flag) {
+// Smooth distant animation (Pokemon Z-A 2.0.2; F1 > Smooth distant animation; LARECOMP_SMOOTH_ANIM=0 / 1 overrides the
+// setting at load). Each animated entity runs two update channels a frame: the entity update's first (policy at
+// ctx+0x180, result at ctx+0x1f0 / +0x1f4, the components' update at vtable +0x48), then its second (policy at ctx+0x1c0,
+// result at ctx+0x1f8 / +0x1fc, vtable +0x50). A policy updates the entity only when its rank (by distance and view) is
+// within a limit both policies share, and the second advances it: that is what moves distant characters and Pokemon in
+// visible steps. The option lowers the rank to the limit for the duration of each policy call, so both channels update
+// every frame together, each policy keeping its own timing, accumulators and skip rules. Until #187 it forced only the
+// first channel's flag (tools/za_patches.py SMOOTH_ANIM, the byte at 0x7001dcdf60): the second stayed at the reduced
+// rate and the two disagreed - the café's blonde woman's head and an Eevee alternated between two poses every frame
+// (#187, #270; reproduced on NVIDIA too, every report on 2.0.2). Cause and approach from MonZaMac by @lucabravi
+// (lucabravi/MonZaMac#178, a Totodile's head). The four policies are found by their code (2.0.2 only); not recognised,
+// the old flag forcing stays. LARECOMP_SMOOTH_POLICY=0: the old flag forcing, for comparison.
+static GuestFn g_anim_policy_orig[4];
+static bool g_anim_policies;  // (the four policies are overridden: the flag read below stays the game's)
+static void anim_policy(Cpu *c, int i) {
+    uint64_t rank_p = c->x[3], limit_pp = c->x[5];
+    uint32_t rank = 0;
+    bool lowered = false;
+    if (g_settings.smooth_anim && rank_p >> 36 == 7 && !(rank_p & 3) && limit_pp >> 36 == 7 && !(limit_pp & 7)) {
+        uint64_t limit_p = *(const uint64_t *)(uintptr_t)limit_pp;
+        if (limit_p >> 36 == 7 && !(limit_p & 3)) {
+            rank = *(const uint32_t *)(uintptr_t)rank_p;
+            int32_t limit = *(const int32_t *)(uintptr_t)limit_p;
+            if ((int32_t)rank > limit) {  // (the rank is a stack local of the caller, read by the policy synchronously)
+                *(int32_t *)(uintptr_t)rank_p = limit;
+                lowered = true;
+            }
+        }
+    }
+    g_anim_policy_orig[i](c);
+    if (lowered) *(uint32_t *)(uintptr_t)rank_p = rank;
+}
+static void anim_policy0(Cpu *c) { anim_policy(c, 0); }
+static void anim_policy1(Cpu *c) { anim_policy(c, 1); }
+static void anim_policy2(Cpu *c) { anim_policy(c, 2); }
+static void anim_policy3(Cpu *c) { anim_policy(c, 3); }
+static void anim_policies_install(void) {
+    static bool tried;
+    if (tried) return;
+    tried = true;
+    const char *e = ENV("LARECOMP_SMOOTH_POLICY");
+    if (e && !atoi(e)) { LOG("[anim] smooth animation: the first channel's flag only (LARECOMP_SMOOTH_POLICY=0)\n"); return; }
+    static const uint8_t b202[8] = {0xB1, 0xF1, 0x2F, 0xD9, 0x19, 0xEA, 0xE8, 0x6A};
+    if (!g_nmodules || memcmp(g_main_build_id, b202, 8)) return;
+    static const uint64_t off[4] = {0x1e70db4, 0x1e70f04, 0x29019f8, 0x2901a54};
+    static const uint32_t code[4][6] = {  // (their first instructions: the arguments' loads)
+        {0xbd400020, 0x39400041, 0xb9400062, 0xf9400083, 0xf94000a4, 0xf9400000},
+        {0xbd400020, 0x39400041, 0xb9400062, 0xf9400083, 0xf94000a4, 0xf9400000},
+        {0xf9400088, 0xbd400020, 0xf94000aa, 0xb9400069, 0xbd400101, 0x1e212801},
+        {0xf9400089, 0xbd400020, 0xf94000a8, 0xb940006b, 0xbd400121, 0x1e212801}};
+    static const HostFn hook[4] = {anim_policy0, anim_policy1, anim_policy2, anim_policy3};
+    uint64_t base = g_modules[0].base;
+    for (int i = 0; i < 4; i++)
+        if (memcmp((const void *)(uintptr_t)(base + off[i]), code[i], sizeof code[i]) ||
+            !(g_anim_policy_orig[i] = dispatch_lookup(base + off[i]))) {
+            LOG("[anim] smooth animation: update policy %d not recognised, the first channel's flag only\n", i);
+            return;
+        }
+    for (int i = 0; i < 4; i++) hle_override(base + off[i], hook[i], "za_anim_policy");
+    g_anim_policies = true;
+    LOG("[anim] smooth animation: both update channels relaxed through their four policies\n");
+}
+uint8_t rt_za_smooth_anim(uint8_t flag) {  // (the first channel's flag, read at 0x7001dcdf60: tools/za_patches.py SMOOTH_ANIM)
+    anim_policies_install();
+    if (g_anim_policies) return flag;  // (the policies set it themselves, for both channels)
     return g_settings.smooth_anim ? 1 : flag;
 }

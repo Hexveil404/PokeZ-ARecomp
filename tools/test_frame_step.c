@@ -30,6 +30,9 @@ Cpu *kernel_current_cpu(void) { return NULL; }
 GuestFn dispatch_lookup(uint64_t addr) { (void)addr; return NULL; }
 void hle_override(uint64_t guest_addr, HostFn fn, const char *name) { (void)guest_addr; (void)fn; (void)name; }
 void guest_call(Cpu *c, uint64_t addr) { (void)c; (void)addr; }
+uint8_t g_main_build_id[8];  // (the smooth-animation policies: not 2.0.2 here, never installed)
+int g_nmodules;
+Module g_modules[6];
 
 static int frames_30;  // (frames run in the game's 30 fps mode)
 // One game frame of ms milliseconds: the frame clock's three calls; ticks[] += what each channel was handed (+1: a

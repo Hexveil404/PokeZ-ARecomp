@@ -185,6 +185,21 @@ static void ir_note(uint64_t pa, const uint32_t *p, uint64_t vs) {
 typedef struct { uint64_t seq, ms, draws, passes, dispatches, vs, fs, cs; uint32_t w, h, ncolor, color0, depth; } SubRec;
 static SubRec subr[SUBR_N], subr_now;
 static uint64_t subr_n;
+// Every pipeline drawn, in order, with the submission it went into - always on, runs of the same pair counted once:
+// a GPU that never finishes a submission (#284: an RTX 5080 on Linux, Snarl in Wild Zone 6) showed only the last pair of
+// each submission, not the draw it was stuck on. The pairs of the unfinished ones are logged with the hang; their
+// hashes are the shader_seen ones, so the shaders can be found and translated again from the game's own files.
+#define PRR_N 4096  // (a power of two)
+static struct { uint64_t seq, vs, fs; uint32_t n; } prr[PRR_N];
+static unsigned prr_n;
+static void prr_note(uint64_t vs, uint64_t fs) {
+    uint64_t seq = submit_seq + 1;
+    if (prr_n) {
+        typeof(prr[0]) *e = &prr[(prr_n - 1) & (PRR_N - 1)];
+        if (e->seq == seq && e->vs == vs && e->fs == fs) { e->n++; return; }
+    }
+    prr[prr_n++ & (PRR_N - 1)] = (typeof(prr[0])){seq, vs, fs, 1};
+}
 void vk_builds_log(void);
 static void lost_report(uint64_t done) {
     static bool once;
@@ -197,6 +212,17 @@ static void lost_report(uint64_t done) {
             (unsigned long long)e->seq, e->seq > done ? " (unfinished)" : "", (unsigned long long)e->ms, (unsigned long long)e->draws,
             (unsigned long long)e->passes, (unsigned long long)e->dispatches, (unsigned long long)e->vs, (unsigned long long)e->fs,
             (unsigned long long)e->cs, e->w, e->h, e->ncolor, e->color0, e->depth);
+    }
+    {   // every pipeline the unfinished submissions draw with, in order (runs of one pair as one line)
+        unsigned lo = prr_n > PRR_N ? prr_n - PRR_N : 0, shown = 0;
+        LOG("[vk] pipelines in the unfinished submissions, in order (submission: vs fs x draws):\n");
+        for (unsigned k = lo; k < prr_n && shown < 200; k++) {
+            const typeof(prr[0]) *e = &prr[k & (PRR_N - 1)];
+            if (e->seq <= done) continue;
+            LOG("[vk]   %llu: vs %llx fs %llx x%u\n", (unsigned long long)e->seq, (unsigned long long)e->vs,
+                (unsigned long long)e->fs, e->n);
+            shown++;
+        }
     }
     vk_log_memory("device lost");
     vk_builds_log();
@@ -8749,6 +8775,7 @@ static void draw_(CmdRec *r, bool indexed) {
     stat_draws++;
     cum_draws++;
     subr_now.draws++, subr_now.vs = pr->hash[0], subr_now.fs = pr->hash[1];
+    prr_note(pr->hash[0], pr->hash[1]);
     if (g_gpuprof_frame && gp_n) {
         if (!gp_draws[gp_n - 1]) {  // first draw of the row: its fragment shader hash
             size_t l = strlen(gp_label[gp_n - 1]);

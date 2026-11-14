@@ -1268,13 +1268,13 @@ static void tab_online(void) {
     (void)peers;
     // Mystery Gift without Nintendo's servers (runtime/services/bcat.c, mystery_gift_cards.c, hle/mystery_gift.c)
     opt_section(TR("Mystery Gift", "Presente Misterioso"));
-    opt_toggle(TR("Get via Internet", "Receber pela internet"), &g_settings.mystery_gift, true,
+    opt_toggle(TR("Get via Internet", "Receber pela internet"), &g_settings.mystery_gift, false,
                TR("Link Play > Mystery Gift > Get via Internet lists every gift in Project Pokémon's EventsGallery, past "
                   "and present, downloaded to this PC (cache/mystery_gift); nothing goes to Nintendo. Off: the game sees "
-                  "no internet connection.",
+                  "no internet connection (as before).",
                   "Modo Conexão > Presente Misterioso > Receber pela internet lista todos os presentes do EventsGallery "
                   "do Project Pokémon, antigos e atuais, baixados neste PC (cache/mystery_gift); nada vai para a "
-                  "Nintendo. Desligado: o jogo não vê conexão com a internet."));
+                  "Nintendo. Desligado: o jogo não vê conexão com a internet (como antes)."));
     opt_end();
 }
 

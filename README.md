@@ -323,7 +323,8 @@ you receive them in the game as on a console (the gift, its ribbons and IDs are 
 - **Spewpa** (16 Vivillon patterns, one gift): one pattern is picked for you, as the real distribution did.
 - **Your own cards:** any file in `mystery_gift/bcat/normal/` (wonder cards back to back, 0x2C8 bytes each) is listed
   too.
-- **Turn it off:** **F1 > Online > Mystery Gift**. Off, the game sees no internet connection, as before.
+- **Turn it on:** **F1 > Online > Mystery Gift** (off by default). Off, the game sees no internet connection, as
+  before, and nothing is downloaded.
 - **Needs** game version **2.0.2**. Typed codes (Get with Code/Password) aren't supported: their gifts are in the list.
 - **Multiplayer isn't affected:** Link Play with Nearby Players and F1 > Online use the emulated local wireless, not
   this.

@@ -229,6 +229,68 @@ static bool keeps_game_step(uint32_t channel) {
     return channel < 64 && (mask >> channel & 1);
 }
 extern bool g_za_mode_dyn;  // (rt_za_frame_cfg, below)
+static uint32_t g_ch0_world;     // (frame_step: this frame's world ticks - channel 1's step + 1)
+static bool g_ch0_smooth;        // (frame_step: channel 0 gets ch0_duration this frame)
+static bool g_ch0_restart = true;  // (a frame without it: the next starts afresh)
+static bool g_ch_set_hooked;     // (ch_set_install: the clock's set function is ch_set_hook)
+static GuestFn g_ch_set_orig;
+
+// Channel 0's duration this frame (LARECOMP_DYN_CH0=6, see frame_step): the world's time averaged over the last frames,
+// plus a fifth of what it is still owed - over time exactly the world's time, never jumping by a whole tick
+static uint64_t ch0_duration(uint32_t world_ticks) {
+    const double tick = 16666667.0;  // (the game's own table: 16,666,667 ns a tick)
+    static double ema = tick, owed;
+    static uint64_t frames;
+    static double t_ch0, t_world;
+    if (g_ch0_restart) g_ch0_restart = false, ema = tick, owed = 0;  // (just turned on: nothing carried over)
+    frames++;
+    double world = world_ticks * tick;
+    ema = ema * 0.9 + world * 0.1;
+    owed += world;
+    if (owed > 6 * tick) owed = 6 * tick;  // (a load: the world far ahead - not caught up at length afterwards)
+    double d = ema + (owed - ema) * 0.2;
+    if (d < 0.5 * tick) d = 0.5 * tick;
+    if (d > 4.2 * tick) d = 4.2 * tick;
+    owed -= d;
+    t_ch0 += d, t_world += world;
+    if (frames % 3600 == 0)
+        LOG("[pace] channel 0 smooth: %.1f s (world %.1f s), owed %.1f ms\n", t_ch0 / 1e9, t_world / 1e9, owed / 1e6);
+    return (uint64_t)(d + 0.5);
+}
+// The clock's set function (x0 the clock's channels, w1 the channel, w2 the step): channel 0 is stored the smooth
+// duration through the channels' own store (vtable +0x10), every other channel goes through the game's code
+static void ch_set_hook(Cpu *c) {
+    if ((uint32_t)c->x[1] != 0 || !g_ch0_smooth) { g_ch_set_orig(c); return; }
+    uint64_t store = *(const uint64_t *)(uintptr_t)(*(const uint64_t *)(uintptr_t)c->x[0] + 0x10);
+    c->x[2] = ch0_duration(g_ch0_world);
+    guest_call(c, store);
+}
+// Found from the clock's loop itself (rt_za_frame_step runs just before its call: x0 the channels, x8 the function their
+// vtable +8 holds), and checked against the code it must be - adrp x8 / add x8 / ldr x2, [x8, w2, sxtw #3] / ldr x8, [x0]
+// / ldr x3, [x8, #0x10] / br x3 (2.0.0, 2.0.2) - so another build's code is never overridden blindly
+static void ch_set_install(void) {
+    static bool tried;
+    if (tried) return;
+    tried = true;
+    Cpu *c = kernel_current_cpu();
+    uint64_t fn = c ? c->x[8] : 0, chans = c ? c->x[0] : 0;
+    bool ok = fn >= 0x7000000000ull && fn < 0x7800000000ull && !(fn & 3) && chans >= 0x7000000000ull && chans < 0x7800000000ull;
+    if (ok) {
+        const uint32_t *w = (const uint32_t *)(uintptr_t)fn;
+        uint64_t vt = *(const uint64_t *)(uintptr_t)chans;
+        ok = (w[0] & 0x9F00001Fu) == 0x90000008u && (w[1] & 0xFFC003FFu) == 0x91000108u && w[2] == 0xF862D902u &&
+             w[3] == 0xF9400008u && w[4] == 0xF9400903u && w[5] == 0xD61F0060u && vt >= 0x7000000000ull &&
+             vt < 0x7800000000ull && *(const uint64_t *)(uintptr_t)(vt + 8) == fn;
+    }
+    if (ok) ok = (g_ch_set_orig = dispatch_lookup(fn)) != NULL;
+    if (!ok) {
+        LOG("[pace] clock set function not recognised (%llx): channel 0 in runs\n", (unsigned long long)fn);
+        return;
+    }
+    hle_override(fn, ch_set_hook, "za_clock_set");
+    g_ch_set_hooked = true;
+    LOG("[pace] channel 0: smooth duration (clock set function %llx)\n", (unsigned long long)fn);
+}
 static uint32_t frame_step(uint32_t game_step, uint32_t channel, bool on) {
     // The per-frame mode (rt_za_frame_cfg, below) brought the stuck-after-a-roll back: the player's code takes the
     // game's frame mode a frame late, so the first frame run in the 30 fps mode after a 60 fps one handed channel 0 two
@@ -250,11 +312,28 @@ static uint32_t frame_step(uint32_t game_step, uint32_t channel, bool on) {
     // the world is under LARECOMP_DYN_CH0_RUN (4) ticks ahead of it, then two a frame until it has caught up - the
     // world's ticks over time (2324 of 2326 on the replay), its step changing ~5 times a second instead of every frame
     // or two. Runs bisected on the replay: a change every frame or two (run 1) stuck, 2 / 4 / 8 never.
-    // LARECOMP_DYN_CH0=5 that (default); =3 the previous frame's mode (v0.1.21-v0.1.22); =2 v0.1.20's (one tick on the
+    // Runs still got the player stuck at a steady 37 and 32 fps (#224: a Xeon at ~37 fps; testes' trava37-1 / trava32-2,
+    // recorded with LARECOMP_TEST_FPS_CAP, stuck every time). A step is only a duration: the clock's set function (the
+    // channels' vtable +8: f_70029f43d4 in 2.0.0, f_70029f4214 in 2.0.2) reads 16.7 / 33.3 / 50 / 66.7 / 83.3 ms from a
+    // table by the step and stores it in the channel (vtable +0x10). So (=6, the default) channel 0 gets no step at all
+    // but a smooth duration: the world's time averaged (ema_step below), with what it is owed paid back gradually - the
+    // world's time over any few frames, the same 16,666,667 ns a frame at 60 fps as before, ~27 ms every frame at 37 fps
+    // instead of 16.7 and 33.3 by turns. All three recorded cases (trava37-1, trava32-2, rolagem2) roll and walk on
+    // where every runs / mode rule got one of them stuck: the player's roll ends by its animation on channel 0, and its
+    // end is missed when that channel's time jumps between one tick and two. Without the set function's override (code
+    // not matching the pattern: ch_set_install) channel 0 goes back to runs.
+    // LARECOMP_DYN_CH0=6 that (default); =5 runs (v0.1.23); =3 the previous frame's mode (v0.1.21-v0.1.22); =2 v0.1.20's (one tick on the
     // way in only); =0: two ticks on the way in; =1: one tick on every frame in the 30 fps mode
     static int ch0 = -1;
-    if (ch0 < 0) ch0 = ENV("LARECOMP_DYN_CH0") ? atoi(ENV("LARECOMP_DYN_CH0")) : 5;
-    if (on && g_settings.frame_dt && channel == 0 && keeps_game_step(0) && g_za_mode_dyn && ch0 == 5) {
+    if (ch0 < 0) ch0 = ENV("LARECOMP_DYN_CH0") ? atoi(ENV("LARECOMP_DYN_CH0")) : 6;
+    bool dyn0 = on && g_settings.frame_dt && channel == 0 && keeps_game_step(0) && g_za_mode_dyn;
+    if (channel == 0) {
+        g_ch0_world = (za_step_n > game_step ? za_step_n : game_step) + 1;
+        g_ch0_smooth = dyn0 && ch0 == 6 && g_ch_set_hooked;
+        if (!g_ch0_smooth) g_ch0_restart = true;
+        if (g_ch0_smooth) return g_ch0_world - 1;  // (the set function's override hands channel 0 its duration instead)
+    }
+    if (dyn0 && (ch0 == 5 || ch0 == 6)) {
         static int run = -1;
         if (run < 0) run = ENV("LARECOMP_DYN_CH0_RUN") ? atoi(ENV("LARECOMP_DYN_CH0_RUN")) : 4;
         static int owed;    // (the world's ticks channel 0 has yet to get; below 0: ahead by that)
@@ -287,6 +366,7 @@ uint32_t rt_za_frame_step(uint32_t game_step, uint32_t channel) {
     static bool counted;
     if (!counted && channel == 0 && last_channel > 0) counted = true, LOG("[pace] clock channels: %u\n", last_channel + 1);
     last_channel = channel;
+    if (channel == 0 && on && g_settings.frame_dt) ch_set_install();  // (once: channel 0's smooth duration)
     uint32_t r = frame_step(game_step, channel, on);
     {   // ticks handed to channel 0 and channel 1 (the world's speed), logged once a minute of channel-0 calls: with
         // the per-frame mode they must stay equal, or channel 0 runs slower than the world (see frame_step)

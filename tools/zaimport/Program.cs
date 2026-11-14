@@ -188,7 +188,9 @@ static int Run(string[] args)
     }
 
     Nca? base_ = null, upd = null;
+    string baseName = "the base game", updName = "the update";  // (the package each came from: an integrity failure names it)
     var dlcs = new List<Nca>();
+    var dlcNames = new Dictionary<Nca, string>();
     foreach (var (nca, name) in ncas)
     {
         ulong tid = nca.Header.TitleId;
@@ -197,12 +199,13 @@ static int Run(string[] args)
         if (nca.Header.ContentType == NcaContentType.Program)
         {
             // (the update's program NCA carries the base title id too: its data section is a patch)
-            if (IsPatch(nca)) upd = nca;
-            else if (tid == ZaBase) base_ = nca;
+            if (IsPatch(nca)) { upd = nca; updName = name; }
+            else if (tid == ZaBase) { base_ = nca; baseName = name; }
         }
         else if (nca.Header.ContentType == NcaContentType.PublicData)
         {
             dlcs.Add(nca);
+            dlcNames[nca] = name;
         }
     }
     bool useNup = nupBase != null || nupUpdate != null;
@@ -278,18 +281,18 @@ static int Run(string[] args)
         PrepareNcaOutput(outDir);
         var code = upd ?? base_;
         long exefsBytes = 0;
-        using (var exefs = code!.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.None))
+        using (var exefs = code!.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid))
         {
             foreach (var e in exefs.EnumerateEntries("/", "*")) exefsBytes += checked((long)e.Size);
         }
         var images = new List<(IStorage st, string path)>
         {
-            (upd != null ? base_!.OpenStorageWithPatch(upd, NcaSectionType.Data, IntegrityCheckLevel.None)
-                         : base_!.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.None),
+            (upd != null ? base_!.OpenStorageWithPatch(upd, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid)
+                         : base_!.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid),
              Path.Combine(outDir, "romfs.bin"))
         };
         foreach (var d in dlcs)
-            images.Add((d.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.None),
+            images.Add((d.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid),
                         Path.Combine(outDir, "aoc", $"{d.Header.TitleId:x16}.bin")));
         long total = exefsBytes;
         var imageSizes = new long[images.Count];
@@ -302,7 +305,7 @@ static int Run(string[] args)
         foreach (var (_, layout) in nupAddonImages) total += checked((long)layout.ImageSize);
         progress = new ImportProgress(total);
 
-        using (var exefs = code.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.None))
+        using (var exefs = code.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid))
         {
             foreach (var e in exefs.EnumerateEntries("/", "*"))
             {
@@ -325,7 +328,22 @@ static int Run(string[] args)
             for (long off = 0; off < imageSizes[i]; off += buf.Length)
             {
                 int n = (int)Math.Min(buf.Length, imageSizes[i] - off);
-                st.Read(off, buf.AsSpan(0, n)).ThrowIfFailure();
+                Result r;
+                try { r = st.Read(off, buf.AsSpan(0, n)); }
+                catch (HorizonResultException e) { r = e.ResultValue; }  // (LibHac's integrity layer throws its failures)
+                if (r.IsFailure() && IsDataDamaged(r))
+                {
+                    f.Close();
+                    File.Delete(path + ".part");
+                    // (the RomFS with the update applied reads both packages: the base alone tells which one it is)
+                    string who = i > 0 ? dlcNames[dlcs[i - 1]]
+                               : upd == null || !DataVerifies(base_!.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid)) ? baseName
+                               : updName;
+                    return Fail($"{who} is damaged: part of its game data doesn't match the package's own checksums " +
+                                $"(at {off:x} of the {(i > 0 ? "DLC" : "game")} data). The game would crash or freeze where it " +
+                                "reads it. Copy or dump that package from your Switch again, then choose the folder again");
+                }
+                r.ThrowIfFailure();
                 f.Write(buf, 0, n);
                 progress.Add(n);
             }
@@ -339,6 +357,29 @@ static int Run(string[] args)
     int addons = nupAddonImages.Count + dlcs.Count;
     Console.WriteLine($"done: update {(upd != null || nupUpdate != null ? "applied" : "none")}, {addons} add-on(s)");
     return 0;
+}
+
+// A read that failed its integrity check: the data doesn't match the NCA's hash tree (LibHac's "data corrupted" range,
+// fs 2002-4000..4999, e.g. ResultFsNonRealDataVerificationFailed 2002-4604). #173: players crashed leaving the lab with
+// "OODLE ERROR : LZ corruption" on one 71548-byte block of data.trpfs whose bytes, on their disk, differ from the game's
+// (the 1.5 MB read around it hashed differently from a clean 2.0.2 import; their other 22 reads matched) - the import
+// copied damaged package data without checking it (IntegrityCheckLevel.None until then). Every block is checked now:
+// the clean 2.0.2 base + update import took 14 s with the checks, and one flipped byte in the update stopped it.
+static bool IsDataDamaged(Result r) => r.Module == 2 && r.Description >= 4000 && r.Description < 5000;
+
+// Whether a whole storage reads back without an integrity failure (only after one: it reads all of it)
+static bool DataVerifies(IStorage st)
+{
+    st.GetSize(out long size).ThrowIfFailure();
+    var buf = new byte[8 << 20];
+    for (long off = 0; off < size; off += buf.Length)
+    {
+        Result r;
+        try { r = st.Read(off, buf.AsSpan(0, (int)Math.Min(buf.Length, size - off))); }
+        catch (HorizonResultException e) { r = e.ResultValue; }
+        if (r.IsFailure()) return !IsDataDamaged(r);
+    }
+    return true;
 }
 
 static bool IsPatch(Nca nca)
@@ -431,7 +472,7 @@ static List<(IStorage St, string Path)> OpenDlcImages(List<Nca> dlcs, string out
     if (dlcs.Count > 0) Directory.CreateDirectory(Path.Combine(outDir, "aoc"));
     foreach (var d in dlcs)
     {
-        var st = d.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.None);
+        var st = d.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
         st.GetSize(out long size).ThrowIfFailure();
         images.Add((st, Path.Combine(outDir, "aoc", $"{d.Header.TitleId:x16}.bin")));
         bytes += size;

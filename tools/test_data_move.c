@@ -20,6 +20,7 @@
 // (the platform file's crash handling, never reached here)
 void rt_crash_explain(char *out, size_t n, const char *log_path) { (void)log_path; if (n) out[0] = 0; }
 bool rt_fault_watch(uint64_t a, uint64_t pc) { (void)a, (void)pc; return false; }
+bool rt_null_getter_recover(uint64_t pc, uint64_t fa) { (void)pc, (void)fa; return false; }  // (Windows: #274's recovery)
 uint64_t g_fault_lr;  // (dispatch.c's: the platform handler stores the faulting link register here)
 void rt_fault_report(const char *what, uint64_t a, uint64_t pc, uint64_t lr) {
     (void)a, (void)pc, (void)lr;

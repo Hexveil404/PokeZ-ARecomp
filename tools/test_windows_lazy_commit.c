@@ -13,6 +13,7 @@ int g_watch_write;
 // The rest of the runtime, which the code under test doesn't reach
 void rt_crash_explain(char *out, size_t n, const char *log_path) { (void)out; (void)n; (void)log_path; abort(); }
 bool rt_fault_watch(uint64_t fault_addr, uint64_t host_pc) { (void)fault_addr; (void)host_pc; abort(); }
+bool rt_null_getter_recover(uint64_t pc, uint64_t fa) { (void)pc; (void)fa; return false; }  // (#274's recovery: never here)
 void rt_fault_report(const char *what, uint64_t fault_addr, uint64_t host_pc, uint64_t host_lr) {
     (void)what; (void)fault_addr; (void)host_pc; (void)host_lr; abort();
 }

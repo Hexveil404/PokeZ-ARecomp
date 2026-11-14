@@ -167,6 +167,17 @@ static void dbg_scan(uint64_t frame) { (void)frame; }
 // x0 as a pointer is logged, and the first one outside that object is watched (who sets / clears the slot)
 static uint64_t slot_at[8], slot_val[8];
 static void slot_monitor(uint64_t frame) {  // (each frame after the scan: a slot's value when it changes)
+    {   // LARECOMP_SLOT_DUMP=<from>:<to> (#224): the object slot 0 points to, 0x400 bytes, each frame -> build/st_<frame>.bin
+        static long a0 = -2, a1;
+        if (a0 == -2) { a0 = -1; const char *e = getenv("LARECOMP_SLOT_DUMP"); if (e) sscanf(e, "%ld:%ld", &a0, &a1); }
+        uint64_t o = slot_at[0] ? *(volatile uint64_t *)(uintptr_t)slot_at[0] : 0;
+        if (a0 >= 0 && (long)frame >= a0 && (long)frame <= a1 && o >= 0x7000000000ull && o < 0x7800000000ull) {
+            char path[64];
+            snprintf(path, sizeof path, "build/st_%llu.bin", (unsigned long long)frame);
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite(&o, 8, 1, f); fwrite((const void *)(uintptr_t)o, 1, 0x400, f); fclose(f); }
+        }
+    }
     for (int i = 0; i < 8 && slot_at[i]; i++) {
         uint64_t v = *(volatile uint64_t *)(uintptr_t)slot_at[i];
         if (v != slot_val[i]) {
@@ -178,6 +189,24 @@ static void slot_monitor(uint64_t frame) {  // (each frame after the scan: a slo
 }
 static void slot_scan(uint64_t frame) {
     slot_monitor(frame);
+    {   // LARECOMP_COMP_WATCH=<frame> (#224): the BT function's x0 is an entity whose components are the pointer
+        // vector [x0+0x60, x0+0x68); each component's +0x60 (its running sub-object) monitored from that frame
+        static long cw = -2;
+        if (cw == -2) cw = getenv("LARECOMP_COMP_WATCH") ? atol(getenv("LARECOMP_COMP_WATCH")) : -1;
+        if (cw >= 0 && (long)frame >= cw && g_bt_first_x0) {
+            cw = -1;
+            uint64_t b = *(uint64_t *)(uintptr_t)(g_bt_first_x0 + 0x60), e = *(uint64_t *)(uintptr_t)(g_bt_first_x0 + 0x68);
+            int k = 0;
+            LOG("[comp] frame %llu: entity %llx, components %llx-%llx\n", (unsigned long long)frame,
+                (unsigned long long)g_bt_first_x0, (unsigned long long)b, (unsigned long long)e);
+            for (uint64_t p = b; p < e && k < 8; p += 8, k++) {
+                uint64_t comp = *(uint64_t *)(uintptr_t)p;
+                slot_at[k] = comp + 0x60, slot_val[k] = *(uint64_t *)(uintptr_t)(comp + 0x60);
+                LOG("[comp] frame %llu: component %d at %llx (vtable %llx), +0x60 = %llx\n", (unsigned long long)frame, k,
+                    (unsigned long long)comp, (unsigned long long)*(uint64_t *)(uintptr_t)comp, (unsigned long long)slot_val[k]);
+            }
+        }
+    }
     static long at = -2;
     if (at == -2) at = getenv("LARECOMP_SLOT_SCAN") ? atol(getenv("LARECOMP_SLOT_SCAN")) : -1;
     if (at < 0 || (long)frame != at || !g_bt_first_x0) return;

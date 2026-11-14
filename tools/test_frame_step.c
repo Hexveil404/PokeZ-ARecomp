@@ -8,6 +8,7 @@
 //  - game code without the per-channel hook never runs the per-frame mode (1.0.0 / 2.0.0 before the recompile).
 // Built by tools/test_frame_step.py; no game data.
 #include <assert.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +25,11 @@ Settings g_settings;
 uint64_t renderer_present_count(void) { return 0; }
 uint64_t renderer_shader_builds(void) { return 0; }
 void menu_notice(const char *text, int seconds) { (void)text; (void)seconds; }
+// (the clock set function's override: no guest here - cases 1-3 run channel 0 in runs, case 4 drives ch0_duration)
+Cpu *kernel_current_cpu(void) { return NULL; }
+GuestFn dispatch_lookup(uint64_t addr) { (void)addr; return NULL; }
+void hle_override(uint64_t guest_addr, HostFn fn, const char *name) { (void)guest_addr; (void)fn; (void)name; }
+void guest_call(Cpu *c, uint64_t addr) { (void)c; (void)addr; }
 
 static int frames_30;  // (frames run in the game's 30 fps mode)
 // One game frame of ms milliseconds: the frame clock's three calls; ticks[] += what each channel was handed (+1: a
@@ -64,6 +70,24 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 600; i++) frame(22.2, false, t);
         printf("no hook, ~45 fps: %d of 600 frames in the 30 fps mode\n", frames_30);
         assert(frames_30 <= 2);  // (the first frames, before the hook's absence is known)
+    } else if (which == 4 || which == 5) {  // channel 0's smooth duration (#224): ~45 fps / 60 fps
+        g_ch_set_hooked = true;  // (as if the set function had been recognised)
+        double ms = which == 4 ? 22.2 : 16.6667, sum = 0, world = 0, prev = 0, jump = 0;
+        int n = which == 4 ? 3000 : 600, exact = 0;
+        for (int i = 0; i < n; i++) {
+            frame(ms, true, t);
+            assert(g_ch0_smooth);
+            double d = (double)ch0_duration(g_ch0_world);
+            sum += d, world += g_ch0_world * 16666667.0;
+            if (i > 30 && fabs(d - prev) > jump) jump = fabs(d - prev);
+            exact += d == 16666667.0;
+            prev = d;
+        }
+        printf("smooth channel 0, %.1f ms frames: %.3f s (world %.3f s), largest change between frames %.2f ms, "
+               "%d of %d frames exactly one tick\n", ms, sum / 1e9, world / 1e9, jump / 1e6, exact, n);
+        assert(fabs(sum - world) < 0.1e9);  // (the world's time, within what is still owed)
+        if (which == 4) assert(jump < 0.5 * 16666667.0);  // (never a whole tick from one frame to the next)
+        else assert(exact == n);  // (60 fps: the game's own 16,666,667 ns every frame, as before)
     } else if (which == 3) {  // 60 fps: nothing changes - one tick a frame everywhere, never the 30 fps mode
         for (int i = 0; i < 600; i++) frame(16.6667, true, t);
         printf("hook, 60 fps: %d frames in the 30 fps mode; ticks channel 0 %llu, channel 1 %llu\n", frames_30,

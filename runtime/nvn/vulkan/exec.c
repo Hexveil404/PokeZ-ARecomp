@@ -2601,7 +2601,8 @@ static void note_code(const NvnShaderStage *s, uint64_t fp, const char *stage) {
 
 // ================================================================== prepared objects (shader_prep.h)
 // Built before the game from the shipped variant list; found by content (code hashes + keys) at first use, as code
-// addresses differ from run to run. Kept for the whole process (reboots included). prep_lock guards the tables.
+// addresses differ from run to run. Kept for the whole process (reboots included), or let go once built on a PC with
+// little RAM (prep_release). prep_lock guards the tables.
 static pthread_mutex_t prep_lock = PTHREAD_MUTEX_INITIALIZER;
 typedef struct { uint64_t key; void *obj; } PrepEnt;
 static PrepEnt *prep_progs, *prep_pipes, *prep_cs;  // program / pipeline / compute content key -> Prog / Pipe / CsProg
@@ -7097,6 +7098,8 @@ bool renderer_prepare_begin(void) { return g_vk.dev != VK_NULL_HANDLE && (gwin()
 int renderer_prepare_pending(void) { return prep_pending; }
 static void gpl_probe(void);
 static void gpl_probe_note(Pipe *pp);
+static bool prep_release_on(void);
+static void prep_release(void);
 void renderer_prepare_end(void) {
     vk_pipeline_cache_save();  // (otherwise only kept at exit)
     static bool logged;        // (the counts: once per process, the background preparation runs once)
@@ -7109,6 +7112,50 @@ void renderer_prepare_end(void) {
             g_vk.vids ? "dynamic" : "in each pipeline");
         if (g_vk.gpl_probe) gpl_probe();
     }
+    if (prep_release_on()) prep_release();
+}
+
+// Under 12 GB of RAM the prepared programs and pipelines are let go once built (#222: an 8 GB laptop, the game at
+// 9.1 GB, Windows paging it out - stalls of 1-7 s in battles). Kept, they cost ~2.3 GB of process memory (4261 pipelines
+// from 4404 programs, most of it the driver's: Lumiose walk, RTX 2080 Ti, 9.7 -> 7.4 GB) for the ~240 one area uses.
+// Their builds stay in the pipeline cache (saved just before) and the driver's own: the game makes what it uses again
+// at first use, a cache hit each (entering Lumiose: 314 in about a second, one 98 ms frame). Graphics only - the few
+// compute programs stay. Only while no game runs (the preparation's own rule, shader_prep.h): nothing has taken one yet.
+// LARECOMP_SHADER_PREP_KEEP=1 keeps them, =0 lets them go on any PC; F1 > Compatibility > Prepare shaders at start: On
+// keeps them too.
+static bool prep_release_on(void) {
+    const char *e = ENV("LARECOMP_SHADER_PREP_KEEP");
+    if (e && *e) return atoi(e) == 0;
+    return g_settings.gpu_compat[GPU_SHADER_PREP] != GPU_ON && SDL_GetSystemRAM() < 12 * 1024;
+}
+static void prep_release(void) {
+    pthread_mutex_lock(&prep_lock);
+    size_t np = 0, ng = 0;
+    for (size_t i = 0; i < prep_pipes_cap; i++) {
+        Pipe *p = prep_pipes[i].obj;
+        if (!prep_pipes[i].key || !p) continue;
+        if (p->pipe) vkDestroyPipeline(g_vk.dev, p->pipe, NULL);
+        free(p), np++;
+    }
+    for (size_t i = 0; i < prep_progs_cap; i++) {
+        Prog *p = prep_progs[i].obj;
+        if (!prep_progs[i].key || !p) continue;
+        VkShaderModule m[3] = {p->vs, p->fs, p->fs_late};
+        for (int j = 0; j < 3; j++) if (m[j]) vkDestroyShaderModule(g_vk.dev, m[j], NULL);
+        if (p->layout) vkDestroyPipelineLayout(g_vk.dev, p->layout, NULL);
+        for (int j = 0; j < 2; j++)  // ([2]: the shared heap chunk set's, gmem_chunk_layout)
+            if (p->set_layout[j]) vkDestroyDescriptorSetLayout(g_vk.dev, p->set_layout[j], NULL);
+        maxwell_free(p->vi);
+        maxwell_free(p->fi);
+        free(p), ng++;
+    }
+    free(prep_pipes), free(prep_progs);
+    prep_pipes = prep_progs = NULL;
+    prep_pipes_cap = prep_progs_cap = prep_pipes_n = prep_progs_n = 0;
+    pthread_mutex_unlock(&prep_lock);
+    LOG("[vk] prepared shaders let go (%d MB RAM%s): %zu pipelines, %zu programs - the game builds what it uses from the "
+        "warm caches\n", SDL_GetSystemRAM(), ENV("LARECOMP_SHADER_PREP_KEEP") ? ", LARECOMP_SHADER_PREP_KEEP=0" : ", under 12 GB",
+        np, ng);
 }
 
 typedef struct { Pipe *pp; ShaderRec r; } PrepPipe;

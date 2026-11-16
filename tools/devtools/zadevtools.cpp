@@ -1114,15 +1114,58 @@ static void panel_memory() {
 }
 
 // ------------------------------------------------------------------ Repros: a bug, taken back to
+// A player's bug report (the start screen's "Record for a bug report", runtime/bugrec.c): its zip is a repro's folder,
+// unpacked into repros\<zip name> (Windows' own tar reads zips). The repro it became, or NULL.
+static const Repro *open_bug_report(const std::string &zip) {
+    std::string name = zip.substr(zip.find_last_of("\\/") + 1);
+    if (name.size() > 4 && !_stricmp(name.c_str() + name.size() - 4, ".zip")) name.resize(name.size() - 4);
+    std::string d = g_root + "repros\\" + name;
+    if (GetFileAttributesA(d.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        // (Windows' own tar by its path: a Git / MSYS tar first in PATH can't read zips and takes "E:" for a host)
+        run_hidden("mkdir \"" + d + "\\save\" && %SystemRoot%\\System32\\tar.exe -xf \"" + zip + "\" -C \"" + d + "\"");
+        // (no F8 pressed: replayed to its end - a mark past any recording)
+        if (GetFileAttributesA((d + "\\mark.txt").c_str()) == INVALID_FILE_ATTRIBUTES)
+            write_text(d + "\\mark.txt", "read 999999999999 frame 0 key 999999999999\n");
+    }
+    load_repros();
+    for (const Repro &r : g_repros)
+        if (r.name == name) {
+            std::lock_guard<std::mutex> lk(g_lock);
+            add_line(g_log.empty() ? 0 : g_log.back().t, "[tool] bug report opened: " + r.dir);
+            return &r;
+        }
+    return NULL;
+}
+static std::mutex g_pick_lock;
+static std::string g_picked_zip;  // (the file dialog's answer, from its own thread)
+static void picked_zip(void *, const char *const *list, int) {
+    if (!list || !list[0]) return;
+    std::lock_guard<std::mutex> lk(g_pick_lock);
+    g_picked_zip = list[0];
+}
+
 static void panel_repros() {
     static bool loaded;
     if (!loaded) loaded = true, load_repros();
+    {
+        std::string z;
+        {
+            std::lock_guard<std::mutex> lk(g_pick_lock);
+            z.swap(g_picked_zip);
+        }
+        if (!z.empty()) open_bug_report(z);
+    }
     ImGui::TextWrapped("Every Start records the session (the save at the start, the clock, the pad read by read). When the "
                        "bug is on screen click \"Mark bug here\" (top bar): the session up to that moment is kept here, with an F9 "
                        "capture of that frame. \"Replay to the bug\" starts a fresh copy of that save, plays the recording up to "
                        "the mark and gives you the controls there.");
     ImGui::TextDisabled("(replays can drift a little over long runs: NPCs and the camera are not always identical)");
     if (ImGui::Button("Refresh")) load_repros();
+    ImGui::SameLine();
+    if (ImGui::Button("Open bug report...")) {  // (a player's zip: tools/za/bug-replay.sh does the same from a shell)
+        static const SDL_DialogFileFilter zip_f[] = {{"Bug report", "zip"}};
+        SDL_ShowOpenFileDialog(picked_zip, NULL, SDL_GetKeyboardFocus(), zip_f, 1, NULL, false);
+    }
     if (!g_replaying.empty()) { ImGui::SameLine(); ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1), "replaying %s", g_replaying.c_str()); }
     if (ImGui::BeginTable("##repros", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV)) {
         ImGui::TableSetupColumn("repro", ImGuiTableColumnFlags_WidthFixed, 130);
@@ -1191,6 +1234,9 @@ int main(int argc, char **argv) {
             load_repros();
             for (const Repro &r : g_repros)
                 if (r.dir.size() >= strlen(argv[i + 1]) && r.dir.compare(r.dir.size() - strlen(argv[i + 1]), std::string::npos, argv[i + 1]) == 0) { replay_repro(r); break; }
+        }
+        else if (!strcmp(argv[i], "--bug-report")) {  // --bug-report <zip>: a player's bug report, replayed to its mark
+            if (const Repro *r = open_bug_report(argv[i + 1])) replay_repro(*r);
         }
     float split = 0.62f, split_y = 0.66f;
     for (bool run = true; run;) {

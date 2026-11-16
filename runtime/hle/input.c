@@ -6,6 +6,7 @@
 #include <SDL3/SDL.h>
 #include <ctype.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -553,6 +554,11 @@ void input_handle_event(const SDL_Event *e) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
         if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) g_debug_frame_request = 1;
         if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F10 && !e->key.repeat) g_shot_request = 1;
+        if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F8 && !e->key.repeat) {
+            extern bool bugrec_active(void);
+            extern void bugrec_mark(void);
+            if (bugrec_active()) bugrec_mark();  // (recording for a bug report: runtime/bugrec.c)
+        }
         if (e->key.scancode < SDL_SCANCODE_COUNT) keys_down[e->key.scancode] = e->type == SDL_EVENT_KEY_DOWN;
         uint64_t before = key_buttons;
         recompute_keyboard();
@@ -951,9 +957,16 @@ uint64_t g_replay_key;
 bool g_replay_handed;      // (the replay reached LARECOMP_REPLAY_UNTIL: live input again)
 typedef struct { uint64_t read; Settings s; } RecSettings;
 static int hexval(int ch) { return ch <= '9' ? ch - '0' : (ch | 32) - 'a' + 10; }
+static FILE *rec;  // (recording: LARECOMP_RECORD's file; under rec_lock - input_record_stop closes it from another thread)
+static pthread_mutex_t rec_lock = PTHREAD_MUTEX_INITIALIZER;
+// The recording ends here (runtime/bugrec.c: before it packs the file) - closed, nothing written after
+void input_record_stop(void) {
+    pthread_mutex_lock(&rec_lock);
+    if (rec) fclose(rec), rec = NULL;
+    pthread_mutex_unlock(&rec_lock);
+}
 static void record_state(uint64_t read, uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
     static int mode = -1;  // 0 off, 1 record, 2 replay
-    static FILE *rec;
     static RecState *tab, last = {.read = ~0ull};
     static size_t n, at;
     static RecSettings *stab, slast;
@@ -1015,6 +1028,8 @@ static void record_state(uint64_t read, uint64_t *b, int32_t *lx, int32_t *ly, i
         }
     }
     if (mode == 1) {
+        pthread_mutex_lock(&rec_lock);
+        if (!rec) { mode = 0; pthread_mutex_unlock(&rec_lock); return; }  // (input_record_stop)
         static bool first_s = true;
         if (first_s || memcmp(&g_settings, &slast.s, sizeof g_settings)) {
             first_s = false;
@@ -1029,6 +1044,7 @@ static void record_state(uint64_t read, uint64_t *b, int32_t *lx, int32_t *ly, i
             fprintf(rec, "%llu %llx %d %d %d %d\n", (unsigned long long)key, (unsigned long long)*b, *lx, *ly, *rx, *ry);
             fflush(rec);  // (the game may be closed any way: every change is on disk)
         }
+        pthread_mutex_unlock(&rec_lock);
     } else if (mode == 2) {
         for (; sat < sn && stab[sat].read <= key; sat++) {
             if (getenv("LARECOMP_REPLAY_ONLY_FPS")) g_settings.fps60 = stab[sat].s.fps60;  // (the rest: this run's own)

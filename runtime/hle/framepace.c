@@ -11,6 +11,7 @@
 //   LARECOMP_FRAMEPACE=1     hand the timer the vsyncs elapsed (default: the game's own value)
 //   LARECOMP_FRAME_STEPS_MAX maximum steps per frame (default 4: after a long stall the game doesn't jump ahead)
 //   LARECOMP_FORCE_STEPS=<n> (test) always n
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -146,6 +147,14 @@ static void pace_init(void) {
         snprintf(path, sizeof path, "%s.pace", r);
         if ((pace_rec = fopen(path, "wb"))) pace_mode = 1;
     }
+}
+static pthread_mutex_t pace_lock = PTHREAD_MUTEX_INITIALIZER;  // (pace_rec: pace_record_stop closes it from another thread)
+// The pacing's recording ends here (runtime/bugrec.c: before it packs the file)
+void pace_record_stop(void) {
+    pthread_mutex_lock(&pace_lock);
+    if (pace_rec) fclose(pace_rec), pace_rec = NULL;
+    if (pace_mode == 1) pace_mode = 0;
+    pthread_mutex_unlock(&pace_lock);
 }
 static const PaceRec *pace_replayed(void) {
     pace_init();
@@ -456,8 +465,12 @@ int32_t rt_za_frame_cfg(int32_t cfg) {
         last = now;
         g_game_vsyncs += step;
         if (pace_mode == 1) {
-            fprintf(pace_rec, "%u %u %u\n", za_step_n, on ? 1u : 0u, (unsigned)step);
-            fflush(pace_rec);  // (the game may be closed any way)
+            pthread_mutex_lock(&pace_lock);
+            if (pace_rec) {
+                fprintf(pace_rec, "%u %u %u\n", za_step_n, on ? 1u : 0u, (unsigned)step);
+                fflush(pace_rec);  // (the game may be closed any way)
+            }
+            pthread_mutex_unlock(&pace_lock);
         } else if (pace_mode == 2 && pace_at < pace_n && ++pace_at == pace_n)
             LOG("[replay] end of the recorded pacing (frame %zu): this PC's clock from here\n", pace_n);
     }

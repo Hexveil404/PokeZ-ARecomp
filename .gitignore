@@ -36,3 +36,6 @@ __pycache__/
 /tools/hdtools/
 # Claude Code: machine-specific notes
 CLAUDE.local.md
+
+# players' bug recordings (runtime/bugrec.c): their saves
+bug-reports/

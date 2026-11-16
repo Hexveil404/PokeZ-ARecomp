@@ -6,6 +6,7 @@
 
 #include "game_addresses.h"
 #include "gamelib.h"
+#include "bugrec.h"
 #include "paths.h"
 #include "settings.h"
 #include "hle.h"
@@ -186,7 +187,7 @@ void backend_quit(void);              // quitting: the render thread stopped, th
 static void reboot_idle(void) {  // (main thread, while guest threads stop) keep the window alive
     SDL_Event e;
     while (SDL_PollEvent(&e))
-        if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); backend_quit(); exit(0); }
+        if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); backend_quit(); bugrec_finish(); exit(0); }
 }
 
 static void teardown(void) {
@@ -326,6 +327,8 @@ int main(int argc, char **argv) {
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
     launcher_log_open();
+    bugrec_pack_pending();  // (a bug recording whose session crashed: before the log rotation below moves its log)
+    bugrec_check_replay();  // (a bug report from another version: refused before anything starts)
     if (build_mod[0]) {
         char mp[1100], dll[1100], why[512] = "";
         snprintf(mp, sizeof mp, "%s/exefs/main", root);
@@ -380,9 +383,11 @@ int main(int argc, char **argv) {
             exit(3);
         }
         if (title) {  // start screen (runtime/ui/launcher.mm): game files setup, seed choice, settings
+            bugrec_finish();  // (back to the title while recording: that session is the report - runtime/bugrec.c)
             extern void launcher_run(const char *root);
             launcher_run(root);
         }
+        bugrec_start(root);  // ("Record for a bug report": before the game reads its save, input or clock)
         boot(root);
         int kind = ui_run();  // window and input on the main thread; returns when a reboot is requested
         teardown();

@@ -73,16 +73,18 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 600; i++) frame(22.2, false, t);
         printf("no hook, ~45 fps: %d of 600 frames in the 30 fps mode\n", frames_30);
         assert(frames_30 <= 2);  // (the first frames, before the hook's absence is known)
-    } else if (which == 4 || which == 5) {  // channel 0's smooth duration (#224): ~45 fps / 60 fps
+    } else if (which == 4 || which == 5) {  // channel 0's smooth duration (#224): ~33 fps / 60 fps (=6, smooth always)
         g_ch_set_hooked = true;  // (as if the set function had been recognised)
-        double ms = which == 4 ? 22.2 : 16.6667, sum = 0, world = 0, prev = 0, jump = 0;
+        if (which == 5) setenv("LARECOMP_DYN_CH0", "6", 1);  // (by default 60 fps goes in runs: one tick, the same)
+        double ms = which == 4 ? 30.0 : 16.6667, sum = 0, world = 0, prev = 0, jump = 0;
         int n = which == 4 ? 3000 : 600, exact = 0;
         for (int i = 0; i < n; i++) {
             frame(ms, true, t);
-            assert(g_ch0_smooth);
+            assert(g_ch0_smooth || i < 200);  // (=7: smooth once the average says below ~40 fps)
+            if (!g_ch0_smooth) continue;      // (not yet: the frames before don't count)
             double d = (double)ch0_duration(g_ch0_world);
             sum += d, world += g_ch0_world * 16666667.0;
-            if (i > 30 && fabs(d - prev) > jump) jump = fabs(d - prev);
+            if (i > 230 && fabs(d - prev) > jump) jump = fabs(d - prev);  // (after the switch to smooth: =7)
             exact += d == 16666667.0;
             prev = d;
         }
@@ -96,6 +98,16 @@ int main(int argc, char **argv) {
         printf("hook, 60 fps: %d frames in the 30 fps mode; ticks channel 0 %llu, channel 1 %llu\n", frames_30,
                (unsigned long long)t[0], (unsigned long long)t[1]);
         assert(frames_30 <= 5 && t[0] == t[1]);
+    } else if (which == 7) {  // ~50 fps (#309): channel 0 in whole ticks, in runs - a ladder's top is never missed
+        g_ch_set_hooked = true;
+        int smooth = 0;
+        for (int i = 0; i < 3000; i++) frame(20.0, true, t), smooth += g_ch0_smooth;
+        double drift = (double)t[0] / (double)t[1];
+        printf("hook, ~50 fps: %d of 3000 frames smooth; ticks channel 0 %llu, channel 1 %llu (%.3f); channel 0's step "
+               "changed on %d frames\n", smooth, (unsigned long long)t[0], (unsigned long long)t[1], drift, ch0_changes);
+        assert(smooth == 0);                   // (v0.1.24: every frame - stuck at the top of a ladder)
+        assert(drift > 0.97 && drift < 1.03);  // (the world's pace)
+        assert(ch0_changes < 3000 / 6);        // (runs, #237)
     }
     printf("ok\n");
     return 0;

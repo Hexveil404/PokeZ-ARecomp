@@ -100,6 +100,8 @@ jobs:
           build/test-bcat
       - name: Draw distance generator (synthetic scene parts)
         run: python3 tools/test_draw_dist.py
+      - name: Content generator (synthetic item, shop and evolution tables)
+        run: python3 tools/test_content_mod.py
       - name: Controller light colours
         run: |
           clang -std=gnu11 -O1 tools/test_led.c -lm -o build/test-led
@@ -217,6 +219,8 @@ jobs:
           build/test-bcat.exe
       - name: Draw distance generator (synthetic scene parts)
         run: python tools/test_draw_dist.py
+      - name: Content generator (synthetic item, shop and evolution tables)
+        run: python tools/test_content_mod.py
       - name: Controller in use (two virtual gamepads, #455)
         run: |
           clang -std=gnu11 -O2 $(pkg-config --cflags sdl3) tools/test_active_pad.c $(pkg-config --libs sdl3) -o build/test-active-pad.exe

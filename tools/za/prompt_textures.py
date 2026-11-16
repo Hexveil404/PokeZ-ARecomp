@@ -44,6 +44,8 @@ ap.add_argument('--party-icons', metavar='DIR', help="the Pokémon box icons int
 ap.add_argument('--maxlod', metavar='DIR', help='DIR/romfs: every model at its full detail (lod_mod.py; then make nothing else)')
 ap.add_argument('--drawdist', metavar='DIR', help='DIR/romfs: the scene parts with draw distances x --factor (draw_dist.py)')
 ap.add_argument('--factor', type=float, default=2, help='with --drawdist: the distances times this')
+ap.add_argument('--content', metavar='DIR', help='DIR/romfs: the tables F1 > Content changes (content_mod.py)')
+ap.add_argument('--content-what', default='stones,tradeevo', help='with --content: stones, tradeevo or both')
 ap.add_argument('--shader-code', metavar='FILE', help="the code of the shaders --shader-need names, from the game's packs, "
                                                        'into FILE (then make nothing else)')
 ap.add_argument('--shader-need', metavar='FILE', help='with --shader-code: the shaders wanted, one hex code hash a line')
@@ -282,6 +284,31 @@ if args.drawdist:
     if not files: sys.exit(1)
     with open(os.path.join(new, '.made'), 'w') as f: f.write('%d %d\n' % (len(trpfs), round(args.factor * 100)))
     sys.exit(0)  # (DIR.new: taken in by the game at its next start, runtime/services/fs.c cache_take_new - #266)
+
+# F1 > Content (runtime/ui/launcher.mm launcher_content_kick): tools/za/content_mod.py, the ranked Mega Stones in the
+# Mega Shard exchange and the trade evolutions without a trade, into DIR.new (.made: data.trpfs's size and what was
+# asked for, checked by runtime/services/fs.c)
+if args.content:
+    import shutil, content_mod
+    trpfs, trpfd = open_game(args.romfs[0])
+    new = args.content.rstrip('/\\') + '.new'
+    shutil.rmtree(new, ignore_errors=True)
+    what = sorted(set(args.content_what.split(',')) & {'stones', 'tradeevo'})
+    paths = ([content_mod.P_ITEM, content_mod.P_LINEUP] if 'stones' in what else []) + \
+            ([content_mod.P_PERSONAL, content_mod.P_PLIB] if 'tradeevo' in what else [])
+    got = content_mod.game_files(trpfs, trpfd, unpack, paths)
+    if len(got) != len(paths):
+        print('not in the game files:', sorted(set(paths) - set(got)), flush=True)
+        sys.exit(1)
+    try:
+        files = content_mod.make(got.__getitem__, new, 'stones' in what, 'tradeevo' in what,
+                                 log=lambda *a: print(*a, flush=True))
+    except (ValueError, StopIteration, KeyError, IndexError, struct.error) as e:
+        print('tables not as expected (another game version?):', repr(e), flush=True)
+        sys.exit(1)
+    if not files: sys.exit(1)
+    with open(os.path.join(new, '.made'), 'w') as f: f.write('%d %s\n' % (len(trpfs), '+'.join(what)))
+    sys.exit(0)
 
 if args.maxlod:
     import shutil, lod_mod

@@ -364,6 +364,37 @@ static void drawdist_layer(void) {
     LOG("[fs] draw distance: %d%% (cache/drawdist)\n", pct);
 }
 
+// F1 > Content: cache/content/romfs, the item, shop and evolution tables with the Ranked Battle Mega Stones on sale for
+// Mega Shards and the trade evolutions that need no trade (tools/za/content_mod.py via zaprompts --content,
+// runtime/ui/launcher.mm launcher_content_kick). After the player's mods: a mod with the same table wins. Only for the
+// game and the choices it was made from (cache/content/.made: data.trpfs's size, "stones+tradeevo").
+const char *content_want(void) {
+    return g_settings.content_stones && g_settings.content_trade ? "stones+tradeevo"
+         : g_settings.content_stones ? "stones" : g_settings.content_trade ? "tradeevo" : "";
+}
+bool g_content_on;  // (this session serves cache/content: F1 says so)
+static void content_layer(void) {
+    if (!*content_want()) return;
+    cache_take_new("cache/content");
+    unsigned long long made = 0;
+    char what[32] = "";
+    FILE *f = fopen("cache/content/.made", "rb");
+    if (!f) { LOG("[fs] content (%s): not made yet (cache/content.log)\n", content_want()); return; }
+    if (fscanf(f, "%llu %31s", &made, what) != 2) made = 0;
+    fclose(f);
+    RomFile *pack = NULL;
+    for (int i = 0; i < rom_nfiles && !pack; i++)
+        if (!strcmp(rom_files[i].path, "arc/data.trpfs")) pack = &rom_files[i];
+    if (!pack || pack->size != made || strcmp(what, content_want())) {
+        LOG("[fs] content (%s): made for another game version or choice (%llu, %s): off until made again\n",
+            content_want(), made, what);
+        return;
+    }
+    strlcpy(layer_root[nlayers++], "cache/content/romfs", sizeof *layer_root);
+    g_content_on = true;
+    LOG("[fs] content: %s (cache/content)\n", what);
+}
+
 bool g_maxlod_on;  // (this session serves cache/maxlod: F1 says so)
 static void maxlod_layer(void) {
     if (!g_settings.full_detail) return;
@@ -412,7 +443,7 @@ static void layer_init(void) {
     const char *seed = rando_seed_dir();
     if (seed) snprintf(layer_root[nlayers++], sizeof *layer_root, "%s/romfs", seed);
     DIR *d = opendir("mods");
-    if (!d) { maxlod_layer(); drawdist_layer(); return; }  // (no mods folder: ours still)
+    if (!d) { maxlod_layer(); drawdist_layer(); content_layer(); return; }  // (no mods folder: ours still)
     char names[15][256];
     int n = 0;
     settings_load();  // (the start screen's Mods page: mods_off, mods_order)
@@ -436,6 +467,7 @@ static void layer_init(void) {
     }
     maxlod_layer();
     drawdist_layer();
+    content_layer();
 }
 
 static bool layer_file(const char *path, char *out, size_t cap) {

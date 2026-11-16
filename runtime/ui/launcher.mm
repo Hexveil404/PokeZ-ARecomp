@@ -924,6 +924,46 @@ extern "C" void launcher_drawdist_kick(void) {
                     g_drawdist_proc ? "being made (cache/drawdist.log)" : "zaprompts didn't start");
 }
 
+// F1 > Content: cache/content made by zaprompts --content (tools/za/content_mod.py: the item, shop and evolution
+// tables, a second or two) when a choice is on and none was made for this data and choice (cache/content.src).
+// Log: cache/content.log.
+extern "C" const char *content_want(void);  // (runtime/services/fs.c: "stones+tradeevo", "stones", "tradeevo" or "")
+static PlatProc g_content_proc;
+extern "C" int launcher_content_state(void) {  // 0 nothing to do / not made, 1 being made, 2 ready for the choice
+    if (g_content_proc) {
+        if (plat_proc_wait(g_content_proc, false) < 0) return 1;
+        g_content_proc = 0;
+    }
+    unsigned long long made = 0;
+    char what[32] = "";
+    FILE *f = fopen("cache/content.new/.made", "rb");  // (made, not taken in yet: runtime/services/fs.c cache_take_new)
+    if (!f) f = fopen("cache/content/.made", "rb");
+    if (f) { if (fscanf(f, "%llu %31s", &made, what) != 2) what[0] = 0; fclose(f); }
+    return *content_want() && !strcmp(what, content_want()) ? 2 : 0;
+}
+extern "C" void launcher_content_kick(void) {
+    char tool[1100], what[32];
+    if (!*content_want() || g_root.empty() || g_content_proc) return;
+    std::string romfs = file_exists(g_root + "/romfs.bin") ? g_root + "/romfs.bin" : g_root + "/romfs";
+    std::string data = romfs + (is_dir(romfs) ? "/arc/data.trpfs" : "");
+    char src[96] = "", had[96] = "";
+    struct stat sb;
+    if (stat(data.c_str(), &sb)) return;
+    snprintf(src, sizeof src, "%lld %lld %s", (long long)sb.st_size, (long long)sb.st_mtime, content_want());
+    if (FILE *f = fopen("cache/content.src", "rb")) { size_t n = fread(had, 1, sizeof had - 1, f); had[n] = 0; fclose(f); }
+    if (!strcmp(src, had) && launcher_content_state() == 2) return;
+    if (!rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool))
+        return;
+    mkdir("cache", 0755);
+    if (FILE *f = fopen("cache/content.src", "wb")) fputs(src, f), fclose(f);
+    snprintf(what, sizeof what, "%s", content_want());
+    for (char *p = what; *p; p++) if (*p == '+') *p = ',';
+    const char *argv[] = {tool, "--romfs", romfs.c_str(), "--content", "cache/content", "--content-what", what, NULL};
+    g_content_proc = plat_spawn(argv, "cache/content.log", false);
+    rt_launcher_log("[launcher] content (%s): %s\n", content_want(),
+                    g_content_proc ? "being made (cache/content.log)" : "zaprompts didn't start");
+}
+
 // runtime/main.c, a set-up copy booting straight into the game: the icons made in the background if they never were,
 // or were made for other bindings
 extern "C" void launcher_prompts_kick(const char *root) {
@@ -933,6 +973,7 @@ extern "C" void launcher_prompts_kick(const char *root) {
     if (prompts_wanted()) make_prompts(false);
     launcher_maxlod_kick();
     launcher_drawdist_kick();
+    launcher_content_kick();
 }
 // runtime/ui/controls_ui.mm, a binding changed (larecomp.ini saved): the icons made again for it, from the next start
 extern "C" void launcher_prompts_refresh(void) {
@@ -2561,6 +2602,7 @@ extern "C" void launcher_run(const char *root) {
     lang_update();
     launcher_maxlod_kick();  // (F1 > Full-detail models on and none made for this game yet: made now, in the background)
     launcher_drawdist_kick();  // (F1 > Draw distance: the same)
+    launcher_content_kick();   // (F1 > Content: the same)
     static bool update_checked;  // (once per launch, not again after a "Title screen" reboot)
     if (!update_checked && !getenv("LARECOMP_NO_UPDATE_CHECK")) {
         update_checked = true;

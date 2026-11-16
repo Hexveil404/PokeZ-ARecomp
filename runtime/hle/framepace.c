@@ -332,18 +332,31 @@ static uint32_t frame_step(uint32_t game_step, uint32_t channel, bool on) {
     // where every runs / mode rule got one of them stuck: the player's roll ends by its animation on channel 0, and its
     // end is missed when that channel's time jumps between one tick and two. Without the set function's override (code
     // not matching the pattern: ch_set_install) channel 0 goes back to runs.
-    // LARECOMP_DYN_CH0=6 that (default); =5 runs (v0.1.23); =3 the previous frame's mode (v0.1.21-v0.1.22); =2 v0.1.20's (one tick on the
+    // The smooth duration left the player stuck at the top of a ladder at ~50 fps (#309: climbing, then never over the
+    // edge - or only after holding up for seconds; a ladder on a 50 fps cap: stuck with =6, over at once with runs and
+    // with Constant game speed off): a climb's end is caught when channel 0's time lands on whole ticks, and ~20 ms a
+    // frame seldom does. So (=7, the default) channel 0 goes in runs - whole ticks - while the world takes under ~1.5
+    // ticks a frame (above ~40 fps, where runs never got stuck: #237 at ~45 fps), and smooth below (#224's 32 / 37 fps),
+    // with a margin so it doesn't flip back and forth (LARECOMP_DYN_CH0_SMOOTH_TICKS=<ticks a frame>, default 1.5).
+    // LARECOMP_DYN_CH0=7 that (default); =6 smooth always (v0.1.24); =5 runs (v0.1.23); =3 the previous frame's mode (v0.1.21-v0.1.22); =2 v0.1.20's (one tick on the
     // way in only); =0: two ticks on the way in; =1: one tick on every frame in the 30 fps mode
     static int ch0 = -1;
-    if (ch0 < 0) ch0 = ENV("LARECOMP_DYN_CH0") ? atoi(ENV("LARECOMP_DYN_CH0")) : 6;
+    if (ch0 < 0) ch0 = ENV("LARECOMP_DYN_CH0") ? atoi(ENV("LARECOMP_DYN_CH0")) : 7;
     bool dyn0 = on && g_settings.frame_dt && channel == 0 && keeps_game_step(0) && g_za_mode_dyn;
     if (channel == 0) {
         g_ch0_world = (za_step_n > game_step ? za_step_n : game_step) + 1;
-        g_ch0_smooth = dyn0 && ch0 == 6 && g_ch_set_hooked;
+        static double ticks = 1, at = -1;  // (the world's ticks a frame, averaged; =7 smooth from `at`)
+        static bool slow;
+        if (at < 0) at = ENV("LARECOMP_DYN_CH0_SMOOTH_TICKS") ? atof(ENV("LARECOMP_DYN_CH0_SMOOTH_TICKS")) : 1.5;
+        if (dyn0) {
+            ticks = ticks * 0.97 + g_ch0_world * 0.03;
+            slow = ticks > at + (slow ? -0.05 : 0.05);
+        }
+        g_ch0_smooth = dyn0 && (ch0 == 6 || (ch0 == 7 && slow)) && g_ch_set_hooked;
         if (!g_ch0_smooth) g_ch0_restart = true;
         if (g_ch0_smooth) return g_ch0_world - 1;  // (the set function's override hands channel 0 its duration instead)
     }
-    if (dyn0 && (ch0 == 5 || ch0 == 6)) {
+    if (dyn0 && ch0 >= 5 && ch0 <= 7) {
         static int run = -1;
         if (run < 0) run = ENV("LARECOMP_DYN_CH0_RUN") ? atoi(ENV("LARECOMP_DYN_CH0_RUN")) : 4;
         static int owed;    // (the world's ticks channel 0 has yet to get; below 0: ahead by that)

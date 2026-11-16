@@ -20,6 +20,7 @@
 #endif
 #include <dirent.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,8 +28,9 @@
 
 #include "shader.h"
 
-uint64_t maxwell_gmem_base, maxwell_gmem_size;
-uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
+// (these four: per thread - each translation sets its own; the shader preparation translates on several threads)
+__thread uint64_t maxwell_gmem_base, maxwell_gmem_size;
+__thread uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 bool maxwell_gmem_lazy;
 bool maxwell_flat_default = true;
 bool maxwell_quad_ops;  // (vk_exec_init: the device has quad subgroup operations in fragment shaders)
@@ -44,7 +46,7 @@ bool maxwell_output_layer = true;
 // gmir: an area past the copy of the guest window, read back and logged as "[guard]")
 uint32_t maxwell_guard_word;
 bool maxwell_gmem_fs_miss;
-uint32_t maxwell_shared_bytes;
+__thread uint32_t maxwell_shared_bytes;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
 int maxwell_dbg_reg;
@@ -709,8 +711,8 @@ static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, 
 
 // Integer texel coordinates in guest units -> the (possibly larger) allocation of texture slot `slot`.
 static const char *RSC2(Ctx *c, int slot, const char *fmt, ...) {
-    static char bufs[4][1024];
-    static int bi;
+    static __thread char bufs[4][1024];  // (per thread, as the globals above)
+    static __thread int bi;
     char *o = bufs[bi++ & 3];
     char inner[700];
     va_list ap;
@@ -3406,7 +3408,7 @@ void maxwell_disassemble(const uint8_t *code, size_t max_size, int stage, void *
 // jump table is read from past the code) or a header past max_size, and the debug switches, go uncached. On when the
 // runtime sets maxwell_disk_cache (not in the tools and tests); LARECOMP_NO_TRANSLATE_CACHE=1: off (and with
 // LARECOMP_SHADER_FLAT set, which changes the translations without changing the key).
-// (called under the runtime's translate lock, as the translator itself)
+// (called on several threads at once by the shader preparation: vulkan/exec.c prep_translate)
 bool maxwell_disk_cache;
 #ifdef SHADER_TRANSLATOR_ID
 static const char cache_build[] = SHADER_TRANSLATOR_ID;
@@ -3440,14 +3442,18 @@ static void cache_open(void) {
     if ((f = fopen("cache/maxwell/build", "wb"))) { fwrite(cache_build, 1, sizeof cache_build, f); fclose(f); }
 }
 
+static bool cache_on;
+static void cache_init(void) {
+    cache_on = maxwell_disk_cache && !getenv("LARECOMP_NO_TRANSLATE_CACHE") && !getenv("LARECOMP_NO_DISCARD") &&
+               !getenv("LARECOMP_LANE_COMPUTE_ONLY") && !getenv("LARECOMP_BRX_ALL_LABELS") && !getenv("LARECOMP_SAVE_MSL");
+    if (cache_on) cache_open();
+}
 static uint64_t cache_key(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key) {
-    static int on = -1;
-    if (on < 0) {
-        on = maxwell_disk_cache && !getenv("LARECOMP_NO_TRANSLATE_CACHE") && !getenv("LARECOMP_NO_DISCARD") &&
-             !getenv("LARECOMP_LANE_COMPUTE_ONLY") && !getenv("LARECOMP_BRX_ALL_LABELS") && !getenv("LARECOMP_SAVE_MSL");
-        if (on) cache_open();
-    }
-    if (!on || !key || maxwell_dbg_code || maxwell_dbg_vs) return 0;
+    // (once, before any translation stores: the preparation's first translations run on several threads at once, and
+    // one emptying the folder while the others store lost their translations)
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, cache_init);
+    if (!cache_on || !key || maxwell_dbg_code || maxwell_dbg_vs) return 0;
     const uint8_t *code = code_start(blob, stage);
     if (max_size <= (size_t)(code - blob)) return 0;
     size_t end = code_end(blob, code, max_size);

@@ -57,8 +57,9 @@ static bool sync_shaders(void) {
     return v;
 }
 
-// Shader translation: one dedicated thread (the translator isn't re-entrant - translate.c's RSC2 string ring - and
-// translating on the game thread cost up to ~90 ms per frame on entering an area). Compiles go on to the workers.
+// Shader translation: one dedicated thread (translating on the game thread cost up to ~90 ms per frame on entering an
+// area). Compiles go on to the workers. (The shader preparation translates on the workers: the translator's state is
+// per thread - exec.c prep_translate.)
 static pthread_mutex_t translate_lock = PTHREAD_MUTEX_INITIALIZER;  // (compute shaders translate on the game thread)
 static Job *tjobs_head, *tjobs_tail;
 static pthread_mutex_t tjobs_lock = PTHREAD_MUTEX_INITIALIZER;

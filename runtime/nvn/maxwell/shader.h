@@ -109,7 +109,7 @@ typedef struct {
 #define XFB_BUFFER_INDEX 22
 #define GMAP_MAX 16  // ranges in the table (GMap { uvec4 gmap[GMAP_MAX + 1]; }: [i] = addr lo, addr hi, size, word offset;
                      // [GMAP_MAX].x = count)
-extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
+extern __thread uint64_t maxwell_gmem_base, maxwell_gmem_size;
 // (GLSL / Vulkan) The heap reaches shaders in chunks of 1 << maxwell_gmem_chunk_shift bytes in two cases:
 // - windows of one import where a storage buffer can't span the heap (issue #8) and lazy chunks aren't possible (or
 //   LARECOMP_VK_GMEM_LAZY=0): one binding per window (GMEM_CHUNK_BINDING + k in set GMEM_CHUNK_SET) and plain
@@ -121,11 +121,11 @@ extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 //   (A per-access switch over constant descriptors, tried first, took the NVIDIA driver ~40 s to compile for the
 //   chain chomps' compute shader with 87 access sites, and Intel ran it as a loop over the wave.)
 // 0: one buffer.
-extern uint32_t maxwell_gmem_chunk_shift;
+extern __thread uint32_t maxwell_gmem_chunk_shift;
 extern bool maxwell_gmem_lazy;
 // (compute) The workgroup's shared memory in bytes (the control section's +0x754), set before translating: LDS / STS
 // use `shared uint smem[]` of that size, addresses clamped to it. 0: unknown, a shader using it fails to translate.
-extern uint32_t maxwell_shared_bytes;
+extern __thread uint32_t maxwell_shared_bytes;
 // The straight-line form of forward-only branches (glsl_flatten) unless LARECOMP_SHADER_FLAT says otherwise: the
 // runtime sets it before the first translation (Vulkan: off on AMD GPUs, exec.c vk_exec_init).
 extern bool maxwell_flat_default;

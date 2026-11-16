@@ -2338,6 +2338,7 @@ typedef struct {
     struct PipeMemo *pmemo;     // (render thread) draw_'s pipeline key memo for this program
     bool reuse;                 // set reuse (stage_set): some uniform buffers are dynamic, sets are kept while their contents repeat
     struct SetCache *scache[2]; // (render thread) stage_set's last set per set index
+    struct PrepPipe *prep_wait; // (shader preparation, under prep_lock) its records' pipelines, queued once it is built
 } Prog;
 static void fullcap_draw(Prog *pr, CmdRec *r, bool indexed, uint32_t inst, int ndraw, bool gpu_params);  // (full capture)
 static void fullcap_before(void);  // (full capture: the targets just before a draw)
@@ -2520,13 +2521,16 @@ static inline const GWin *gwin(void) {
 static uint64_t gwin_want(void) { return gwin()->phys ? gwin_.max : kernel_heap_size(); }
 
 static void gmem_window_get(uint64_t *lo, uint64_t *len);  // (the guest-heap import window, below)
-// Translates both stages (false: failed, logged). Holds the translator for the whole program.
-static bool translate_program_now(Prog *p) {
+// The translator's window for this thread's next translations (translate.c: per thread)
+static void translate_globals_set(void) {
     uint64_t wl, wn;
     gmem_window_get(&wl, &wn);
-    pthread_mutex_lock(&translate_lock);  // (the globals too: the render thread translates as well - run_queued_now)
     maxwell_gmem_base = gwin_base + wl, maxwell_gmem_size = wn;
     maxwell_gmem_chunk_shift = gmem_chunk_shift();
+}
+// Translates both stages (false: failed, logged)
+static bool translate_program_now(Prog *p) {
+    translate_globals_set();
     p->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], STAGE_VERTEX, &p->vkey);
     if (p->vi->msl) {
         p->fkey.vs_out_mask = p->vi->out_mask;
@@ -2549,7 +2553,6 @@ static bool translate_program_now(Prog *p) {
             }
         }
     }
-    pthread_mutex_unlock(&translate_lock);
     if (!p->vi->msl) {
         LOG("[shader] VS translate failed: %s (code %llx)\n", p->vi->error, (unsigned long long)p->code[0]);
         atomic_store(&p->state, 2);
@@ -2566,7 +2569,10 @@ static bool translate_program_now(Prog *p) {
 
 static void translate_program(void *arg) {
     Prog *p = arg;
-    if (!translate_program_now(p)) return;
+    pthread_mutex_lock(&translate_lock);  // (the render thread translates as well - run_queued_now)
+    bool ok = translate_program_now(p);
+    pthread_mutex_unlock(&translate_lock);
+    if (!ok) return;
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
     run_job(compile_program, p, &p->state);
@@ -6978,13 +6984,10 @@ static uint64_t cs_content_key(uint64_t code_hash, const uint32_t local[3], uint
 }
 
 static bool translate_compute(CsProg *cp, const uint8_t *code, size_t max, uint64_t addr) {
-    uint64_t wl, wn;
-    gmem_window_get(&wl, &wn);
     ShaderKey k = {0};
     k.glsl = 1;
     pthread_mutex_lock(&translate_lock);  // (the globals too: the render thread translates as well - run_queued_now)
-    maxwell_gmem_base = gwin_base + wl, maxwell_gmem_size = wn;
-    maxwell_gmem_chunk_shift = gmem_chunk_shift();
+    translate_globals_set();
     // (unknown: a record from before the size was kept - the most the hardware has, 48 KB, or what this GPU allows)
     uint32_t smax = g_vk.props.limits.maxComputeSharedMemorySize;
     maxwell_shared_bytes = cp->shared ? cp->shared : smax < 0xC000 ? smax : 0xC000;
@@ -7070,8 +7073,8 @@ static CsProg *compute_program(NvnProgram *np) {
 }
 
 // ================================================================== shader preparation (shader_prep.h)
-// Each record: translated here (one thread, the translator isn't re-entrant), compiled and built on the worker
-// threads (run_job), kept in the prep_* tables for the game.
+// Each record: translated (graphics: prep_translate; compute here), compiled and built on the worker threads (run_job),
+// kept in the prep_* tables for the game.
 typedef struct { void (*fn)(void *); void *arg; } PrepJob;
 static void prep_job_run(void *a) {
     PrepJob *j = a;
@@ -7089,6 +7092,7 @@ static void prep_job(void (*fn)(void *), void *arg) {
 }
 
 static _Atomic int prep_pipe_dups;  // records whose pipeline another record already made
+static _Atomic int prep_tr_failed;  // programs whose translation failed (prep_translate)
 // (Pokémon Z-A: only once the game has set up its physical memory window - the translations bake its base and size
 // in, and before that it's Link's Awakening's heap: the start screen's preparation would have made every program with
 // the wrong one. Z-A's runs at its start instead, shader_prep.c shader_prep_boot)
@@ -7105,19 +7109,17 @@ void renderer_prepare_end(void) {
         pthread_mutex_lock(&prep_lock);
         size_t n = prep_pipes_n;
         pthread_mutex_unlock(&prep_lock);
-        LOG("[vk] prepared %zu pipelines (%d records shared one, vertex input %s)\n", n, atomic_load(&prep_pipe_dups),
-            g_vk.vids ? "dynamic" : "in each pipeline");
+        LOG("[vk] prepared %zu pipelines (%d records shared one, vertex input %s; %d programs failed to translate)\n", n,
+            atomic_load(&prep_pipe_dups), g_vk.vids ? "dynamic" : "in each pipeline", atomic_load(&prep_tr_failed));
         if (g_vk.gpl_probe) gpl_probe();
     }
 }
 
-typedef struct { Pipe *pp; ShaderRec r; } PrepPipe;
+typedef struct PrepPipe { Pipe *pp; ShaderRec r; struct PrepPipe *next; } PrepPipe;
 static void prep_pipeline(void *arg) {
     PrepPipe *a = arg;
     Prog *pr = a->pp->k.prog;
-    // its program's compile was queued before (the queue is first in, first out): wait for it to finish
-    while (atomic_load(&pr->state) == 0) { struct timespec ts = {0, 1000000}; nanosleep(&ts, NULL); }
-    if (atomic_load(&pr->state) != 1) { atomic_store(&a->pp->state, 2); free(a); return; }
+    if (atomic_load(&pr->state) != 1) { free(a->pp); free(a); return; }  // (its program failed: queued only once built)
     const ShaderRec *r = &a->r;
     // the pass's attachment formats as begin_pass makes them for these targets
     VkFormat color[8] = {0}, depth = VK_FORMAT_UNDEFINED, stencil = VK_FORMAT_UNDEFINED;
@@ -7152,6 +7154,23 @@ static void prep_pipeline(void *arg) {
     free(a);
 }
 
+// A prepared program translated and compiled on a worker - on the preparing thread alone, a first start after a
+// translator update took 100-124 s behind the logos (#297 #298; 18.0 -> 7.1 s on an i7-9700K). Its records' pipelines
+// wait on it (prep_wait) and are queued once it is built: a worker waiting for it held up the translations.
+static void prep_translate(void *arg) {
+    Prog *p = arg;
+    bool ok = translate_program_now(p);
+    free((void *)(uintptr_t)p->code[0]), free((void *)(uintptr_t)p->code[1]);
+    p->code[0] = p->code[1] = 0;
+    if (ok) compile_program(p);
+    else atomic_fetch_add(&prep_tr_failed, 1);
+    pthread_mutex_lock(&prep_lock);  // (its state is set: renderer_prepare queues later records itself)
+    PrepPipe *w = p->prep_wait;
+    p->prep_wait = NULL;
+    pthread_mutex_unlock(&prep_lock);
+    for (PrepPipe *n; w; w = n) n = w->next, prep_job(prep_pipeline, w);  // (a failed program's: freed there)
+}
+
 bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlob *fsb) {
     if (r->kind == 'C') {
         uint64_t ck = cs_content_key(r->vs, r->local, r->shared);
@@ -7178,26 +7197,32 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
     Prog *p = PREP_GET(prep_progs, ck);
     if (!p) {
         p = calloc(1, sizeof *p);
-        p->code[0] = (uintptr_t)vsb->code;
-        p->code[1] = (uintptr_t)fsb->code;
         p->cmax[0] = vsb->const_offset ? vsb->const_offset : 0x10000;
         p->cmax[1] = fsb->const_offset ? fsb->const_offset : 0x10000;
         p->vkey = vkey;
         p->fkey = fkey;
         p->prep_vh = r->vs, p->prep_fh = r->fs;
         p->hash[0] = r->vs, p->hash[1] = r->fs;
-        bool ok = translate_program_now(p);
-        p->code[0] = p->code[1] = 0;  // (the game files' copies are gone after this call)
+        // (the game files' copies are gone after this call: the job gets its own, with blob_read's zero padding)
+        for (int s = 0; s < 2; s++) {
+            const ShaderBlob *b = s ? fsb : vsb;
+            void *d = b->code ? malloc(b->size + 0x100) : NULL;
+            if (d) p->code[s] = (uintptr_t)memcpy(d, b->code, b->size + 0x100);
+        }
         PREP_PUT(prep_progs, ck, p);  // (failed ones too: the game then skips them as it would its own)
-        if (!ok) return false;
-        prep_job(compile_program, p);
+        prep_job(prep_translate, p);
     }
+    // (a translation that fails later counts as prepared here: renderer_prepare_end logs those)
     if (atomic_load(&p->state) == 2) return false;
     PrepPipe *a = calloc(1, sizeof *a);
     a->pp = calloc(1, sizeof *a->pp);
     a->pp->k.prog = p;
     a->r = *r;
-    prep_job(prep_pipeline, a);
+    pthread_mutex_lock(&prep_lock);
+    bool wait = atomic_load(&p->state) == 0;  // (still translating or compiling: prep_translate queues it)
+    if (wait) a->next = p->prep_wait, p->prep_wait = a;
+    pthread_mutex_unlock(&prep_lock);
+    if (!wait) prep_job(prep_pipeline, a);
     return true;
 }
 

@@ -114,6 +114,10 @@ jobs:
         run: |
           clang -std=gnu11 -O2 -I"$HOME/sdl3/include" tools/test_active_pad.c -L"$HOME/sdl3/lib" -Wl,-rpath,"$HOME/sdl3/lib" -lSDL3 -lm -o build/test-active-pad
           build/test-active-pad
+      - name: Battle moves by position, not while throwing a ball (#224)
+        run: |
+          clang -std=gnu11 -O2 -I"$HOME/sdl3/include" tools/test_battle_by_pos.c -L"$HOME/sdl3/lib" -Wl,-rpath,"$HOME/sdl3/lib" -lSDL3 -lm -o build/test-battle-by-pos
+          build/test-battle-by-pos
       - name: First start with an Xbox / PlayStation pad (virtual gamepads, #241)
         run: |
           clang -std=gnu11 -O2 -Iruntime -I"$HOME/sdl3/include" tools/test_first_start_pad.c -L"$HOME/sdl3/lib" -Wl,-rpath,"$HOME/sdl3/lib" -lSDL3 -lm -o build/test-first-start-pad
@@ -225,6 +229,10 @@ jobs:
         run: |
           clang -std=gnu11 -O2 $(pkg-config --cflags sdl3) tools/test_active_pad.c $(pkg-config --libs sdl3) -o build/test-active-pad.exe
           build/test-active-pad.exe
+      - name: Battle moves by position, not while throwing a ball (#224)
+        run: |
+          clang -std=gnu11 -O2 $(pkg-config --cflags sdl3) tools/test_battle_by_pos.c $(pkg-config --libs sdl3) -o build/test-battle-by-pos.exe
+          build/test-battle-by-pos.exe
       - name: First start with an Xbox / PlayStation pad (virtual gamepads, #241)
         run: |
           clang -std=gnu11 -O2 -Iruntime $(pkg-config --cflags sdl3) tools/test_first_start_pad.c $(pkg-config --libs sdl3) -o build/test-first-start-pad.exe

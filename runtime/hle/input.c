@@ -208,8 +208,13 @@ static void recompute_pad(void) {
     // battle_abxy_position: Pokémon Z-A's moves are used only with ZL held and sit where the Switch's A/B/X/Y are,
     // so with A/B/X/Y bound by letter (Xbox A = the Switch's A) they read swapped. While ZL is held those four go by
     // position, as in the defaults; the rest of the game keeps the player's bindings (#26).
-    int zl = g_bind_pad[BIND_ZL];
-    bool by_pos = pad_by_pos = g_settings.battle_abxy_position && zl >= 0 && zl < PADB_HOST_COUNT && (host >> zl & 1);
+    // Not with ZR held too: ZL aims at a Pokémon and ZR holds the ball ready to throw, outside battles - cancelling
+    // that throw (the Switch's B) then sat on the wrong button, B doing nothing and A cancelling (#224: B cancelled
+    // with RT alone and not with LT + RT). Moves are never used with ZR held.
+    int zl = g_bind_pad[BIND_ZL], zr = g_bind_pad[BIND_ZR];
+    bool zr_held = zr >= 0 && zr < PADB_HOST_COUNT && (host >> zr & 1);
+    bool by_pos = pad_by_pos = g_settings.battle_abxy_position && zl >= 0 && zl < PADB_HOST_COUNT && (host >> zl & 1) &&
+                               !zr_held;
     uint64_t b = 0;
     for (int i = 0; i < BIND_PAD_COUNT; i++) {
         int h = pad_host(i, by_pos);

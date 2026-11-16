@@ -179,12 +179,19 @@ SERVICE("aoc:u", aoc_u) {
     uint64_t ids[64];
     int n = aoc_ids(ids, 64);
     uint64_t base = n ? ids[0] & ~0xFFFull : 0x01006BB00C6F1000ull;
+    // Pokémon Z-A 1.0.0 (main 7222e13ecf6adb32) with the Mega Dimension DLC's file: the DLC needs the 2.0.0 update (the
+    // console makes you install it), and 1.0.0 offered it stopped the game at its own check, 2002-6065, when a DLC
+    // Pokémon spawned (#304: Honedge). Not offered to 1.0.0; its file stays where it is for an update.
+    extern uint8_t g_main_build_id[8];
+    static const uint8_t za100[8] = {0x72, 0x22, 0xe1, 0x3e, 0xcf, 0x6a, 0xdb, 0x32};
+    bool hidden = n && !memcmp(g_main_build_id, za100, 8);
     static int logged;
     if (!logged++) {
         LOG("[aoc] %d add-on content(s) installed", n);
         for (int i = 0; i < n; i++) LOG(" %016llx", (unsigned long long)ids[i]);
-        LOG("\n");
+        LOG(hidden ? " - not offered: game 1.0.0, the DLC needs the 2.0.0 or 2.0.2 update (#304)\n" : "\n");
     }
+    if (hidden) n = 0;
     switch (req->cmd) {
     case 2: OUT(uint32_t, 0) = (uint32_t)n; resp_size(resp, 4); break;  // CountAddOnContent
     case 3: {  // ListAddOnContent(offset, count) -> their indices

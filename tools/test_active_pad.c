@@ -36,6 +36,8 @@ int bind_mouse_from_sdl(int b) { return -1; }
 int bind_pad_default(int slot) { return g_bind_pad[slot]; }
 bool menu_input_captured(void) { return false; }
 bool menu_cursor_needed(void) { return false; }
+bool bugrec_active(void) { return false; }  // (bug-report recording: F8 marks only while recording)
+void bugrec_mark(void) { abort(); }
 
 static SDL_JoystickID attach(const char *name) {
     SDL_VirtualJoystickDesc d;

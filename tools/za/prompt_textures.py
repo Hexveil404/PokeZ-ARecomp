@@ -46,6 +46,8 @@ ap.add_argument('--drawdist', metavar='DIR', help='DIR/romfs: the scene parts wi
 ap.add_argument('--factor', type=float, default=2, help='with --drawdist: the distances times this')
 ap.add_argument('--content', metavar='DIR', help='DIR/romfs: the tables F1 > Content changes (content_mod.py)')
 ap.add_argument('--content-what', default='stones,tradeevo', help='with --content: stones, tradeevo or both')
+ap.add_argument('--verify', metavar='FILE', help="data.trpfs checked pack by pack against the known good copies "
+                                                  '(verify_files.py): the result into FILE (then make nothing else)')
 ap.add_argument('--shader-code', metavar='FILE', help="the code of the shaders --shader-need names, from the game's packs, "
                                                        'into FILE (then make nothing else)')
 ap.add_argument('--shader-need', metavar='FILE', help='with --shader-code: the shaders wanted, one hex code hash a line')
@@ -308,6 +310,19 @@ if args.content:
         sys.exit(1)
     if not files: sys.exit(1)
     with open(os.path.join(new, '.made'), 'w') as f: f.write('%d %s\n' % (len(trpfs), '+'.join(what)))
+    sys.exit(0)
+
+# The start screen's one check of the game files (runtime/ui/launcher.mm launcher_verify_kick, #294 #301): FILE's first
+# line "ok <version>", "damaged <version> <packs>" (then the packs' names, one a line) or "unknown"
+if args.verify:
+    import verify_files, lod_mod
+    trpfs, trpfd = open_game(args.romfs[0])
+    version, bad = verify_files.check(trpfs, lod_mod.pack_names(trpfd), log=lambda *a: print(*a, flush=True))
+    head = 'unknown' if not version else 'damaged %s %d' % (version, len(bad)) if bad else 'ok ' + version
+    lines = [head] + [n for _, n in bad]
+    print(*lines, sep='\n', flush=True)
+    with open(args.verify + '.tmp', 'w', newline='\n') as f: f.write('\n'.join(lines) + '\n')
+    os.replace(args.verify + '.tmp', args.verify)
     sys.exit(0)
 
 if args.maxlod:

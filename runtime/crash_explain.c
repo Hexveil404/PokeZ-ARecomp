@@ -92,13 +92,27 @@ bool rt_compile_crash_at(uint64_t pc) {
     return in_gpu_driver(pc) || getenv("LARECOMP_TEST_COMPILE_CRASH") || getenv("LARECOMP_TEST_COMPILE_CRASH_URGENT");
 }
 
+// The start screen's check of the game files (runtime/ui/launcher.mm launcher_verify_kick, tools/za/verify_files.py):
+// cache/verify.txt "damaged <version> <packs>" - a damaged download of the 2.0.2 update went around (Scraggy's model
+// pack), and the game crashed wherever it first loaded it (#173 #223 #233 #294 #301)
+static bool game_files_damaged(char *version, size_t n) {
+    char line[128] = "", v[32] = "";
+    FILE *f = fopen("cache/verify.txt", "rb");
+    if (!f) return false;
+    if (!fgets(line, sizeof line, f)) line[0] = 0;
+    fclose(f);
+    if (sscanf(line, "damaged %31s", v) != 1) return false;
+    snprintf(version, n, "%s", v);
+    return true;
+}
+
 void rt_crash_explain(char *out, size_t n, const char *log_path) {
     static const char *const report = "Please report it as a GitHub issue and attach the log file below. "
                                       "Your progress up to your last save or autosave is safe.";
     // (g_game_is_la is Link's Awakening's until the game's files are read: a crash on the start screen or while the
     // GPU starts said "LAS Recomp stopped", #159)
     const char *app = g_game_is_la && rt_romfs_files >= 0 ? "LAS Recomp" : "ZA Recomp";
-    char head[160], what[600];
+    char head[160], what[600], dmg[32];
     extern void vk_compile_crash_note(void) __attribute__((weak));  // (Vulkan: was this thread compiling a pipeline?)
     if (vk_compile_crash_note && g_pc && rt_compile_crash_at(g_pc)) vk_compile_crash_note();
     // (the file count is Link's Awakening's: Pokémon Z-A's RomFS has its own, and every crash read as missing files)
@@ -141,6 +155,12 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
                  : "%s will now build shaders without the driver's optimizer and skip the few effects that first appeared "
                    "just before it (one may be missing). Start the game again: it may run slower until you update your "
                    "graphics driver.", app);
+    } else if (!g_game_is_la && game_files_damaged(dmg, sizeof dmg)) {  // (any crash in the game: the likeliest cause)
+        snprintf(head, sizeof head, "Your game files are damaged");
+        snprintf(what, sizeof what, "The start screen found parts of your game files that differ from a good copy of "
+                 "version %s: the download they came from was damaged, and the game crashes when it loads them. Get the "
+                 "update (and the base game) again, then Settings > Delete game files on the start screen and set them "
+                 "up again: the setup checks every package now.", dmg);
     } else if (has("svcBreak") && rt_game_data_bad) {  // (the same spot every time: nothing another start would change, #89)
         snprintf(head, sizeof head, "Damaged game data");
         snprintf(what, sizeof what, "The game read data from its files that can't be unpacked, so it stopped. %s"

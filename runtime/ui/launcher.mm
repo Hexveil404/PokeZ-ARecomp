@@ -887,6 +887,93 @@ extern "C" void launcher_maxlod_kick(void) {
     rt_launcher_log("[launcher] full-detail models: %s\n", g_maxlod_proc ? "being made (cache/maxlod.log)" : "zaprompts didn't start");
 }
 
+// The game files checked once, pack by pack, against the known good copies (zaprompts --verify,
+// tools/za/verify_files.py: ~5 s on an SSD) for each data.trpfs (cache/verify.src: its size and time). A damaged
+// download of the 2.0.2 update went around: Scraggy's model pack is broken, and the game crashes where it first loads
+// Scraggy (#173 #223 #233 #294 #301 - zaimport has checked the packages since v0.1.24, files set up before never were).
+// Result in cache/verify.txt ("ok <version>", "damaged <version> <n>" + the packs, "unknown"); log cache/verify.log.
+static PlatProc g_verify_proc;
+static std::string g_damaged;  // (the start screen's notice: the damaged packs, said once per visit)
+static bool g_damaged_looked;
+extern "C" int launcher_verify_state(void) {  // 0 nothing / not checked, 1 checking, 2 ok, 3 damaged
+    if (g_verify_proc) {
+        if (plat_proc_wait(g_verify_proc, false) < 0) return 1;
+        g_verify_proc = 0;
+    }
+    char head[64] = "";
+    FILE *f = fopen("cache/verify.txt", "rb");
+    if (!f) return 0;
+    if (!fgets(head, sizeof head, f)) head[0] = 0;
+    fclose(f);
+    return !strncmp(head, "damaged", 7) ? 3 : !strncmp(head, "ok", 2) ? 2 : 0;
+}
+static void launcher_verify_kick(void) {
+    char tool[1100];
+    if (g_root.empty() || g_verify_proc || getenv("LARECOMP_NO_VERIFY")) return;
+    std::string romfs = file_exists(g_root + "/romfs.bin") ? g_root + "/romfs.bin" : g_root + "/romfs";
+    std::string data = romfs + (is_dir(romfs) ? "/arc/data.trpfs" : "");
+    char src[64] = "", had[64] = "";
+    struct stat sb;
+    if (stat(data.c_str(), &sb)) return;
+    snprintf(src, sizeof src, "%lld %lld", (long long)sb.st_size, (long long)sb.st_mtime);
+    if (FILE *f = fopen("cache/verify.src", "rb")) { size_t n = fread(had, 1, sizeof had - 1, f); had[n] = 0; fclose(f); }
+    if (!strcmp(src, had) && file_exists("cache/verify.txt")) return;
+    if (!rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool))
+        return;
+    mkdir("cache", 0755);
+    remove("cache/verify.txt");
+    if (FILE *f = fopen("cache/verify.src", "wb")) fputs(src, f), fclose(f);
+    const char *argv[] = {tool, "--romfs", romfs.c_str(), "--verify", "cache/verify.txt", NULL};
+    g_verify_proc = plat_spawn(argv, "cache/verify.log", false);
+    rt_launcher_log("[launcher] game files: %s\n", g_verify_proc ? "being checked (cache/verify.log)" : "zaprompts didn't start");
+}
+static bool begin_question(const char *id, float s);  // (below)
+// (the Play page, each frame) a finished check that found damaged packs: said once per visit, with what to do
+static void damaged_prompt(float s) {
+    if (!g_damaged_looked && launcher_verify_state() == 3) {
+        g_damaged_looked = true;
+        g_damaged.clear();
+        if (FILE *f = fopen("cache/verify.txt", "rb")) {
+            char line[512];
+            int n = 0;
+            while (fgets(line, sizeof line, f)) {
+                line[strcspn(line, "\r\n")] = 0;
+                if (n++ == 0) { rt_launcher_log("[launcher] game files: %s (cache/verify.txt)\n", line); continue; }
+                if (n <= 6) g_damaged += std::string(n > 2 ? "\n" : "") + line;
+                else if (n == 7) g_damaged += "\n...";
+            }
+            fclose(f);
+        }
+        ImGui::OpenPopup("##damaged");
+    }
+    if (!begin_question("##damaged", s)) return;
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "%s", TR("Your game files are damaged", "Seus arquivos do jogo estão danificados"));
+    ImGui::Spacing();
+    ImGui::TextUnformatted(TR("Part of them differs from a good copy of this version: the download they came from was "
+                              "damaged. The game crashes when it loads these parts (with Scraggy's model: leaving the lab, "
+                              "the sewers, Acris's battle...).",
+                              "Uma parte deles é diferente de uma cópia boa desta versão: o download de onde vieram estava "
+                              "danificado. O jogo fecha quando carrega essas partes (com o modelo do Scraggy: saindo do "
+                              "laboratório, nos esgotos, na batalha da Acris...)."));
+    ImGui::Spacing();
+    ImGui::TextUnformatted(TR("To fix it: get the update (and the base game) again from your own Switch or a new download, "
+                              "then Settings > Delete game files and choose the folder again. The setup checks every package "
+                              "now and names a damaged one.",
+                              "Para corrigir: pegue a atualização (e o jogo base) de novo do seu próprio Switch ou de um "
+                              "download novo, depois Configurações > Apagar arquivos do jogo e escolha a pasta de novo. A "
+                              "preparação agora confere cada pacote e diz qual está danificado."));
+    ImGui::Spacing();
+    ImGui::TextDisabled("%s", g_damaged.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0, 14 * s));
+    ImGui::SetItemDefaultFocus();
+    if (ImGui::Button("OK", ImVec2(300 * s, 44 * s)) || ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
+        ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))
+        ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 // F1 > Draw distance (#190): cache/drawdist made by zaprompts --drawdist (tools/za/draw_dist.py: the world's LOD /
 // culling tables, ~15 s) when the setting isn't the game's and none was made for this data and distance
 // (cache/drawdist.src). Log: cache/drawdist.log.
@@ -975,6 +1062,7 @@ extern "C" void launcher_prompts_kick(const char *root) {
     launcher_maxlod_kick();
     launcher_drawdist_kick();
     launcher_content_kick();
+    launcher_verify_kick();
 }
 // runtime/ui/controls_ui.mm, a binding changed (larecomp.ini saved): the icons made again for it, from the next start
 extern "C" void launcher_prompts_refresh(void) {
@@ -2646,6 +2734,8 @@ extern "C" void launcher_run(const char *root) {
     launcher_maxlod_kick();  // (F1 > Full-detail models on and none made for this game yet: made now, in the background)
     launcher_drawdist_kick();  // (F1 > Draw distance: the same)
     launcher_content_kick();   // (F1 > Content: the same)
+    launcher_verify_kick();    // (the game files checked once for each copy: damaged_prompt)
+    g_damaged_looked = false;
     static bool update_checked;  // (once per launch, not again after a "Title screen" reboot)
     if (!update_checked && !getenv("LARECOMP_NO_UPDATE_CHECK")) {
         update_checked = true;
@@ -3220,6 +3310,7 @@ extern "C" void launcher_run(const char *root) {
                         }
                         bugreport_prompt(s);
                     }
+                    damaged_prompt(s);  // (the game files' check found damaged packs: launcher_verify_kick)
                     if (g_tip_test) ImGui::OpenPopup(g_settings.aspect_asked ? "##menutip" : "##aspect"), g_tip_test = false;
                     if (g_video_test && g_video_rec.known) ImGui::OpenPopup("##videorec"), g_video_test = false;
                     if (video_prompt(s)) {

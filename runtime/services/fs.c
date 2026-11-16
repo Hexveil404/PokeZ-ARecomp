@@ -435,10 +435,24 @@ static int mod_cmp(const void *a, const void *b) {
     return ra != rb ? (ra < rb ? -1 : 1) : name_cmp(a, b);
 }
 
+// The start screen's check of the game files (runtime/ui/launcher.mm launcher_verify_kick): its result in the log, so
+// a crash report says at once whether the player's files are a damaged download (#294 #301)
+static void verify_log(void) {
+    FILE *f = fopen("cache/verify.txt", "rb");
+    if (!f) { LOG("[fs] game files: not checked yet (the start screen checks them once)\n"); return; }
+    char line[256];
+    for (int n = 0; n < 6 && fgets(line, sizeof line, f); n++) {
+        line[strcspn(line, "\r\n")] = 0;
+        LOG("[fs] game files%s %s\n", n ? ", damaged pack:" : ":", line);
+    }
+    fclose(f);
+}
+
 static void layer_init(void) {
     if (nlayers >= 0) return;
     nlayers = 0;
     settings_load();
+    if (!g_game_is_la) verify_log();
     if (xbox_layer_prepare()) strlcpy(layer_root[nlayers++], XBOX_ATTACK_ROOT, sizeof *layer_root);
     const char *seed = rando_seed_dir();
     if (seed) snprintf(layer_root[nlayers++], sizeof *layer_root, "%s/romfs", seed);

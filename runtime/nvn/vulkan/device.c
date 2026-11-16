@@ -583,13 +583,26 @@ static _Atomic int nbad_sh;
 static pthread_mutex_t bad_sh_lock = PTHREAD_MUTEX_INITIALIZER;
 static void bad_shaders_load(void) {
     FILE *f = fopen(BAD_SHADERS_FILE, "r");
-    if (!f) return;
     unsigned drv;
     unsigned long long v, s;
     int n = 0;
-    while (n < BAD_SHADERS_MAX && fscanf(f, "%u %llx %llx", &drv, &v, &s) == 3)
+    while (f && n < BAD_SHADERS_MAX && fscanf(f, "%u %llx %llx", &drv, &v, &s) == 3)
         if (drv == g_vk.props.driverVersion) bad_sh[n].vs = v, bad_sh[n++].fs = s;
-    fclose(f);
+    if (f) fclose(f);
+    // Known to every driver so far on NVIDIA's RTX 50 cards (Blackwell, device ids from 0x2b00): Houndoom's Snarl
+    // particle - the compiler crashed on it (#93, RTX 5060 Ti, Windows), the GPU ran an invalid instruction (#180, RTX
+    // 5060 Ti) or never finished the submission (#284, RTX 5080, Linux 620.70.06: skipped by hand, Snarl played without a
+    // hang twice and looked the same as on a Steam Deck). Ada and older, AMD and Intel build and run it fine. Skipped on
+    // those cards from the start, whatever the driver; LARECOMP_VK_SNARL_SKIP=0 builds it, =1 skips it on any GPU.
+    const char *e = getenv("LARECOMP_VK_SNARL_SKIP");
+    bool rtx50 = g_vk.props.vendorID == 0x10de && g_vk.props.deviceID >= 0x2b00;
+    if ((e && *e ? atoi(e) != 0 : rtx50) && n < BAD_SHADERS_MAX) {
+        bool have = false;
+        for (int i = 0; i < n; i++) have |= bad_sh[i].vs == 0x3ed672471eddbfd1ull && bad_sh[i].fs == 0xf830589dced6fa18ull;
+        if (!have) bad_sh[n].vs = 0x3ed672471eddbfd1ull, bad_sh[n++].fs = 0xf830589dced6fa18ull;
+        LOG("[vk] Snarl's particle pipeline skipped (vs 3ed672471eddbfd1 fs f830589dced6fa18: RTX 50 drivers hang or "
+            "crash on it, #284; LARECOMP_VK_SNARL_SKIP=0 builds it)\n");
+    }
     nbad_sh = n;
     if (n) LOG("[vk] %d pipeline(s) skipped: this driver's compiler crashes on them, or gave the GPU bad code near them (%s)\n", n,
                BAD_SHADERS_FILE);

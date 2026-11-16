@@ -153,6 +153,10 @@ typedef struct {
     int draw_dist;    // Pokémon Z-A: the world's LOD / culling distances in percent (100: the game's; 150, 200, 300):
                       // cache/drawdist, made from the player's files by zaprompts --drawdist (runtime/ui/launcher.mm
                       // launcher_drawdist_kick), layered by runtime/services/fs.c. From the next start. #190
+    bool content_stones;  // Pokémon Z-A, F1 > Content: the Ranked Battle Mega Stones in the Mega Shard exchange, and
+    bool content_trade;   // trade evolutions without a trade (cache/content, made from the player's files by zaprompts
+                          // --content: runtime/ui/launcher.mm launcher_content_kick; layered by runtime/services/fs.c).
+                          // Off by default; from the next start
     int ui_lang;      // UI_LANG_*: the start screen's language (runtime/ui/launcher.mm); auto = the system's
     // mods/ folders (runtime/services/fs.c layers them): '|' between names. order: first wins where two replace the
     // same file (folders not listed come after, by name); off: not loaded. Edited on the start screen's Mods page.

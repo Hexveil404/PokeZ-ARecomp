@@ -23,6 +23,9 @@ extern "C" bool g_maxlod_on;  // runtime/services/fs.c
 extern "C" void launcher_drawdist_kick(void);  // F1 > Draw distance (#190)
 extern "C" int launcher_drawdist_state(void);
 extern "C" bool g_drawdist_on;
+extern "C" void launcher_content_kick(void);  // F1 > Content
+extern "C" int launcher_content_state(void);
+extern "C" bool g_content_on;
 #ifdef __APPLE__
 #include "imgui_impl_metal.h"
 #else
@@ -1280,6 +1283,41 @@ static void tab_online(void) {
     opt_end();
 }
 
+// Content the console only hands out through Nintendo's servers, made available in the game itself
+// (tools/za/content_mod.py on the player's own files: runtime/ui/launcher.mm launcher_content_kick, runtime/services/fs.c)
+static void tab_content(bool in_game) {
+    opt_begin("##content", ImGui::GetFontSize() / 34);
+    bool stones = g_settings.content_stones, trade = g_settings.content_trade;
+    opt_section(TR("Online-only content", "Conteúdo só online"));
+    opt_toggle(TR("Ranked Mega Stones in the shop", "Megapedras das ranqueadas na loja"), &g_settings.content_stones, false,
+               TR("Greninjite, Delphoxite, Chesnaughtite, Baxcalibrite, Sceptilite, Swampertite and Blazikenite are only "
+                  "given as Ranked Battle rewards, which need Nintendo's servers. On: Quasartico Inc.'s Mega Shard "
+                  "exchange sells them from the day it opens, 360 Mega Shards each. Made from your own game files; "
+                  "applies from the next start.",
+                  "Greninjite, Delphoxite, Chesnaughtite, Baxcalibrite, Sceptilite, Swampertite e Blazikenite só são "
+                  "dadas como recompensa das Batalhas Ranqueadas, que precisam dos servidores da Nintendo. Ligado: a "
+                  "troca de Megafragmentos da Quasartico Inc. vende todas desde que abre, por 360 Megafragmentos cada. "
+                  "Feito a partir dos seus arquivos do jogo; vale a partir da próxima abertura."));
+    opt_toggle(TR("Trade evolutions without trading", "Evoluções por troca sem trocar"), &g_settings.content_trade, false,
+               TR("Pokémon that evolve when traded (Kadabra, Haunter, Machoke, Phantump, Pumpkaboo...) also evolve at "
+                  "level 40; those that evolve when traded holding an item (Onix and Scyther with a Metal Coat, "
+                  "Slowpoke with a King's Rock...) can evolve while holding it: the evolve icon appears, day or night. "
+                  "After the \"No More Trade Evolutions\" mod's rules. Trading still works. Made from your own game "
+                  "files; applies from the next start.",
+                  "Pokémon que evoluem por troca (Kadabra, Haunter, Machoke, Phantump, Pumpkaboo...) também evoluem no "
+                  "nível 40; os que evoluem por troca segurando um item (Onix e Scyther com Revestimento Metálico, "
+                  "Slowpoke com Pedra do Rei...) podem evoluir segurando o item: o ícone de evolução aparece, de dia ou "
+                  "de noite. Segue as regras do mod \"No More Trade Evolutions\". A troca continua funcionando. Feito "
+                  "a partir dos seus arquivos do jogo; vale a partir da próxima abertura."));
+    if (stones != g_settings.content_stones || trade != g_settings.content_trade) settings_save(), launcher_content_kick();
+    int st = launcher_content_state();
+    if ((g_settings.content_stones || g_settings.content_trade) && st == 1)
+        ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s", TR("Preparing...", "Preparando..."));
+    else if ((g_settings.content_stones || g_settings.content_trade) && st == 2 && in_game && !g_content_on)
+        ImGui::TextDisabled("%s", TR("Ready: applies from the next start.", "Pronto: vale a partir da próxima abertura."));
+    opt_end();
+}
+
 static void tab_game(void) {
     opt_begin("##game", ImGui::GetFontSize() / 34);
     opt_section(TR("Game", "Jogo"));  // (its button icons: the Controls tab, with the rest of the controller)
@@ -1479,9 +1517,9 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     if (prelaunch) tabs[ntabs++] = {TR("Files", "Arquivos"), -1, true};
     if (!menu_la_tabs) {
         const char *names[] = {TR("Controls", "Controles"), TR("Video", "Vídeo"), TR("Audio", "Áudio"), TR("Game", "Jogo"),
-                               "Online", TR("Quit", "Sair")};
-        static const int ids[] = {8, 0, 1, 10, 11, 9};
-        for (int i = 0; i < 6; i++)
+                               TR("Content", "Conteúdo"), "Online", TR("Quit", "Sair")};
+        static const int ids[] = {8, 0, 1, 10, 12, 11, 9};
+        for (int i = 0; i < 7; i++)
             if ((ids[i] != 9 || !prelaunch) && (ids[i] != 11 || in_game)) tabs[ntabs++] = {names[i], ids[i], true};
     } else {
         static const char *names[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Gameplay",
@@ -1647,6 +1685,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 case 9: tab_quit(scale, in_game); break;
                 case 10: tab_game(); break;
                 case 11: tab_online(); break;
+                case 12: tab_content(in_game); break;
                 }
                 static const char *scroll_test = getenv("LARECOMP_MENU_SCROLL");  // test hook: page scroll, 0..1
                 if (scroll_test) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(scroll_test));

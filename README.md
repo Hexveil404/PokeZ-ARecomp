@@ -37,6 +37,7 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 - [Mods](#mods)
 - [Multiplayer (test)](#multiplayer-test)
 - [Mystery Gift](#mystery-gift)
+- [Online-only content](#online-only-content)
 - [Troubleshooting](#troubleshooting)
 - [Building from source](#building-from-source)
 - [Developer tools](#developer-tools)
@@ -328,6 +329,24 @@ you receive them in the game as on a console (the gift, its ribbons and IDs are 
 - **Needs** game version **2.0.2**. Typed codes (Get with Code/Password) aren't supported: their gifts are in the list.
 - **Multiplayer isn't affected:** Link Play with Nearby Players and F1 > Online use the emulated local wireless, not
   this.
+
+
+## Online-only content
+
+Some of the game's content is only handed out through Nintendo's servers. **F1 > Content** makes it available in the
+game itself; both options are off by default and apply from the next start.
+
+- **Ranked Mega Stones in the shop:** Greninjite, Delphoxite, Chesnaughtite, Baxcalibrite, Sceptilite, Swampertite and
+  Blazikenite are Ranked Battle rewards on the console (and there is no ranked mode here, see
+  [above](#why-it-works-this-way-and-why-theres-no-ranked-mode)). On, Quasartico Inc.'s Mega Shard exchange sells them
+  from the day it opens, 360 Mega Shards each.
+- **Trade evolutions without trading:** Pokémon that evolve when traded also evolve at level 40, and those that evolve
+  when traded holding an item can evolve while holding it (the evolve icon appears, day or night). The rules are those
+  of the "No More Trade Evolutions" mod; unlike a mod's files, the tables are made from your own game version's. Link
+  trades still work as before.
+- **How:** the item, shop and evolution tables are made from your own game files into `cache/content/` (a second or
+  two, in the background; `cache/content.log`). No game data is in this repository, and your save is not touched: you
+  buy the stones and evolve the Pokémon in the game. A mod that replaces the same table wins over it.
 
 ## DirectX 12
 

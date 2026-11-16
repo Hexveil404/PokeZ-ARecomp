@@ -673,6 +673,30 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
 // (at the game's GPU device setup) Pokémon Z-A: always - the start screen can't prepare its shaders (vulkan/exec.c
 // renderer_prepare_begin), and here, during its logos, the ones its earlier runs kept (shader_seen_code) take well
 // under a second with warm caches. LARECOMP_SHADER_PREP=0: not; =1: Link's Awakening too (tests).
+// The preparation's progress on screen (a black frame with a notice line: vulkan/device.c backend_notice_frame), once
+// it has taken over 1.5 s - with warm caches it is done in well under a second and nothing shows. After a driver or
+// ZA Recomp update it can take minutes on a slow driver (#291: 338 s on an Intel HD 520) with the window black, and
+// players closed it as a hang (#291 #297). Ten frames a second at most.
+static bool boot_shown;
+static void boot_progress(int done, int total) {
+    extern void backend_notice_frame(void) __attribute__((weak));  // (Vulkan only: Metal shows nothing)
+    extern void menu_notice(const char *text, int seconds);
+    static double t0, last;
+    double now = ms_now();
+    if (!t0) t0 = now;
+    static double after = -1;  // (LARECOMP_PREP_NOTICE_MS: from how long; 0 at once, tests)
+    if (after < 0) after = getenv("LARECOMP_PREP_NOTICE_MS") ? atof(getenv("LARECOMP_PREP_NOTICE_MS")) : 1500;
+    if (!backend_notice_frame || now - t0 < after || now - last < 100) return;
+    last = now, boot_shown = true;
+    char s[200];
+    int pct = total > 0 ? (int)(100.0 * (done < 0 ? 0 : done) / total) : 0;
+    snprintf(s, sizeof s, UI_TR("Preparing the game's shaders: %d%% (after an update or a new graphics driver: it can take "
+                                "a few minutes, please wait)", "Preparando os shaders do jogo: %d%% (depois de uma atualização ou de um driver de vídeo "
+                                "novo: pode levar alguns minutos, aguarde)"), pct > 100 ? 100 : pct);
+    menu_notice(s, 2);
+    backend_notice_frame();
+}
+
 void shader_prep_boot(const char *romfs) {
     extern int g_game_is_la;  // (runtime/rt.h)
     // (Pokémon Z-A only; F1 > Compatibility)
@@ -680,5 +704,9 @@ void shader_prep_boot(const char *romfs) {
         const char *e = getenv("LARECOMP_SHADER_PREP");
         if (!(e && atoi(e))) return;  // (=1 still forces it, Link's Awakening included)
     }
-    shader_prep_run(romfs, NULL, NULL);
+    shader_prep_run(romfs, boot_progress, NULL);
+    if (boot_shown) {
+        extern void menu_notice(const char *text, int seconds);
+        menu_notice(UI_TR("Shaders ready.", "Shaders prontos."), 2);
+    }
 }

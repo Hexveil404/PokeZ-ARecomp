@@ -2687,6 +2687,18 @@ void backend_clear_window(void) {
     static const float black[4] = {0, 0, 0, 1};
     if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
 }
+// A black frame with the overlay's notice line (menu_notice) on it, before the game shows any frame of its own: the
+// shader preparation at the game's GPU setup (shader_prep.c boot_progress) - minutes on a slow driver after an update,
+// a black window the players took for a hang and closed (#291 #297). On the game thread, which is in the preparation:
+// nothing else presents. LARECOMP_PREP_SHOT=<n>: the n-th such frame into build/prep.png (tests).
+void backend_notice_frame(void) {
+    static const float black[4] = {0, 0, 0, 1};
+    static long n, shot = -1;
+    if (shot < 0) shot = getenv("LARECOMP_PREP_SHOT") ? atol(getenv("LARECOMP_PREP_SHOT")) : 0;
+    if (!g_vk.dev || rq_stopping() || !vk_frame_begin(black)) return;
+    menu_render((void *)vk_cmd(), g_vk.sc_extent.width, g_vk.sc_extent.height);
+    vk_frame_end(shot && ++n == shot ? "build/prep.png" : NULL);
+}
 
 // [window]: what happens to the window (focus, minimised, covered, display) - #15: a window that stops responding
 static void window_event_log(const SDL_Event *e) {

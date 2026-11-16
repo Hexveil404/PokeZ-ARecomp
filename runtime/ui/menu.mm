@@ -42,6 +42,7 @@ extern "C" int vk_gpu_names(const char **names, int max);  // device.c: the Vulk
 extern "C" {
 #include "../hle.h"
 #include "../settings.h"
+#include "../bugrec.h"
 extern int g_game_is_la;  // runtime/kernel.c: Link's Awakening (its own tabs: randomizer, warp, cheats...)
 #include "menu.h"
 void input_reset(void);
@@ -1332,6 +1333,13 @@ static void tab_game(void) {
                       "Start Screen, then Play. (A translation mod, like a PT-BR one, goes in Mods on the start screen.)",
                       "O idioma dos textos do jogo, como a configuração do próprio sistema. Vale quando o jogo reinicia: "
                       "Sair > Tela inicial, depois Jogar. (Um mod de tradução, como o PT-BR, vai em Mods na tela inicial.)"));
+    }
+    if (bugrec_active()) {  // (recording for a bug report, runtime/bugrec.c: F8's mark for controller players)
+        opt_section(TR("Bug report", "Relatar um bug"));
+        if (opt_button(TR("Mark the bug now", "Marcar o bug agora"),
+                       TR("The replay stops here (F8 does the same). Then close the game: the zip is in the bug-reports folder.",
+                          "A reprodução para aqui (F8 faz o mesmo). Depois feche o jogo: o zip fica na pasta bug-reports.")))
+            bugrec_mark();
     }
     opt_section(TR("This menu", "Este menu"));
     opt_button(TR("Shortcuts", "Atalhos"),

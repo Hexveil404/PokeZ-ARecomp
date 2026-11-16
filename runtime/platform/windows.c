@@ -1511,6 +1511,18 @@ void rt_log_moved(const char *path) {
     ReleaseMutex(g_log_mutex);
 }
 
+// This session's log file (runtime/bugrec.c packs it): the session file, or wherever stderr was sent (a tool's
+// redirect); "" when it is a console or a pipe
+const char *rt_log_file(void) {
+    static char path[MAX_PATH * 3];
+    if (g_log_path[0]) return g_log_path;
+    HANDLE h = (HANDLE)_get_osfhandle(_fileno(stderr));
+    wchar_t w[MAX_PATH];
+    DWORD n = h != INVALID_HANDLE_VALUE && GetFileType(h) == FILE_TYPE_DISK ? GetFinalPathNameByHandleW(h, w, MAX_PATH, 0) : 0;
+    if (!n || n >= MAX_PATH || !WideCharToMultiByte(CP_UTF8, 0, w, -1, path, sizeof path, NULL, NULL)) return "";
+    return !strncmp(path, "\\\\?\\", 4) ? path + 4 : path;
+}
+
 // stderr still the console (no redirect: started by a double click) - main.c then logs to a file
 int rt_stderr_is_console(void) {
     DWORD t = GetFileType(GetStdHandle(STD_ERROR_HANDLE));

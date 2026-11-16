@@ -29,6 +29,16 @@
 
 void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
 
+// This session's log file (runtime/bugrec.c packs it): wherever stderr goes when that is a file - the app's session
+// file or a tool's redirect; "" for a terminal or a pipe
+#include <fcntl.h>
+const char *rt_log_file(void) {
+    static char path[PATH_MAX];
+    struct stat st;
+    if (fstat(STDERR_FILENO, &st) != 0 || !S_ISREG(st.st_mode) || fcntl(STDERR_FILENO, F_GETPATH, path) != 0) return "";
+    return path;
+}
+
 static mach_timebase_info_data_t tb;
 
 // Started as the app (Finder, Dock: no terminal): stdout / stderr go to lasrecomp.log in the data folder, with five

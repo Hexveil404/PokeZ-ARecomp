@@ -34,6 +34,7 @@
 #include "imgui_impl_sdl3.h"
 
 extern "C" {
+#include "bugrec.h"
 #include "platform.h"
 #include "paths.h"
 #include "gamebuild.h"
@@ -2155,6 +2156,28 @@ static void reveal_folder(const std::string &dir) {
 // fonts (import / back to the substitute)
 static SDL_Window *g_launcher_win;
 static bool g_files_deleted;  // set here: the start screen goes back to setting the game files up
+// ---- a bug recording was packed (runtime/bugrec.c writes bug-reports/new.txt at the window's close or, after a crash,
+// at this start): where its zip is, once
+static std::string g_bug_zip;
+static bool g_bug_looked;  // (bug-reports/new.txt read on this visit to the start screen)
+static void bugreport_prompt(float s) {
+    if (!begin_question("##bugreport", s)) return;
+    ImGui::PushTextWrapPos(0);
+    ImGui::Text(TR("Bug report saved: %s", "Relatório salvo: %s"), g_bug_zip.c_str());
+    ImGui::Spacing();
+    ImGui::TextDisabled("%s", TR("Attach it to your GitHub issue.", "Anexe na sua issue do GitHub."));
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0, 14 * s));
+    if (ImGui::Button(TR("Open the folder", "Abrir a pasta"), ImVec2(300 * s, 44 * s)))
+        reveal_folder(std::string(rt_data_root()) + "/bug-reports");
+    ImGui::SameLine(0, 20 * s);
+    ImGui::SetItemDefaultFocus();
+    if (ImGui::Button("OK", ImVec2(300 * s, 44 * s)) || ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
+        ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))
+        ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 static void prelaunch_tab(float sc) {
     const ImVec4 gold(0.95f, 0.71f, 0.27f, 1);
     auto heading = [&](const char *t) {
@@ -2164,6 +2187,25 @@ static void prelaunch_tab(float sc) {
         ImGui::Separator();
         ImGui::Spacing();
     };
+    // "Record for a bug report" (runtime/bugrec.c): this Play only - the save copied, what is pressed and the pacing
+    // recorded, packed into bug-reports/<time>.zip at the window's close. Only the first Play of a run of ZA Recomp
+    // (bugrec_can_start): the recorder and the clock read their settings once, so a later Play couldn't be replayed.
+    heading(TR("Bug report", "Relatar um bug"));
+    bool can = bugrec_can_start();
+    if (!can) ImGui::BeginDisabled();
+    ImGui::Checkbox(TR("Record for a bug report", "Gravar para relatar um bug"), &g_bugrec_want);
+    if (!can) ImGui::EndDisabled();
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextDisabled("%s", !can ? TR("The game already ran once: restart ZA Recomp to record.", "O jogo já rodou uma vez: reinicie o ZA Recomp para gravar.")
+        : TR("Records this session so the developers can replay it: a copy of your save (with your trainer name), your "
+             "settings and what you press. Keep it short: start, show the bug (press F8), close the game. The zip goes "
+             "in the bug-reports folder.",
+             "Grava esta sessão para os desenvolvedores reproduzirem: uma cópia do seu save (com seu nome de treinador), "
+             "suas configurações e o que você aperta. Seja breve: comece, mostre o bug (aperte F8), feche o jogo. O zip "
+             "vai para a pasta bug-reports."));
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    ImGui::Spacing();
     heading(TR("Game files", "Arquivos do jogo"));
     static double gb = -1;
     if (gb < 0) gb = rt_game_files_size(g_root.c_str()) / 1e9;
@@ -2598,6 +2640,7 @@ static float party_panel(ImDrawList *dl, float x, float y, float w) {
 extern "C" void launcher_run(const char *root) {
     g_root = root;
     g_start_screen = 1;
+    g_bug_looked = false;  // (each visit: a recording packed on the way back to the title is said here)
     settings_load();
     lang_update();
     launcher_maxlod_kick();  // (F1 > Full-detail models on and none made for this game yet: made now, in the background)
@@ -3162,6 +3205,20 @@ extern "C" void launcher_run(const char *root) {
                         if (offer_video) ImGui::OpenPopup("##videorec");
                         else if (!g_settings.menu_tip_seen) ImGui::OpenPopup("##menutip");
                         else play = true;
+                    }
+                    {   // a bug report packed since the last look (runtime/bugrec.c): said once
+                        if (!g_bug_looked) {
+                            g_bug_looked = true;
+                            char z[300] = "";
+                            if (FILE *f = fopen("bug-reports/new.txt", "rb")) {
+                                if (!fgets(z, sizeof z, f)) z[0] = 0;
+                                fclose(f);
+                                remove("bug-reports/new.txt");
+                            }
+                            z[strcspn(z, "\r\n")] = 0;
+                            if (z[0]) g_bug_zip = z, ImGui::OpenPopup("##bugreport");
+                        }
+                        bugreport_prompt(s);
                     }
                     if (g_tip_test) ImGui::OpenPopup(g_settings.aspect_asked ? "##menutip" : "##aspect"), g_tip_test = false;
                     if (g_video_test && g_video_rec.known) ImGui::OpenPopup("##videorec"), g_video_test = false;

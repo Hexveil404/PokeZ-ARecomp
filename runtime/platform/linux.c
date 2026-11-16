@@ -213,6 +213,18 @@ static void log_to_file_without_terminal(void) {
     session_log_open(dir, g_log_path, sizeof g_log_path);
 }
 
+// This session's log file (runtime/bugrec.c packs it): wherever stderr goes when that is a file - the session file
+// above or a tool's redirect; "" for a terminal or a pipe
+const char *rt_log_file(void) {
+    static char path[1024];
+    struct stat st;
+    if (fstat(STDERR_FILENO, &st) != 0 || !S_ISREG(st.st_mode)) return "";
+    ssize_t n = readlink("/proc/self/fd/2", path, sizeof path - 1);
+    if (n <= 0) return "";
+    path[n] = 0;
+    return path;
+}
+
 #if defined(__x86_64__)
 // The recompiled game code is built for x86-64-v3 (Makefile GENARCH: AVX2, FMA, BMI2), or on the player's machine for
 // x86-64-v2 when the CPU is older (gamelib_old_cpu): say so instead of crashing with an illegal instruction on a CPU

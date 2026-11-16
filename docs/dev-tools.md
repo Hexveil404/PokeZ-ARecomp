@@ -85,6 +85,23 @@ Keep these limits in mind:
 - Replays use the recorded settings. Without `fps60 = 1` in them, the game runs at 30 fps.
 - Don't keep a shell inside `replays/<name>/run`: it blocks the cleanup at the next replay.
 
+## Players' bug reports
+
+Players can record a session themselves: start screen > Settings > Files > **Record for a bug report**, then Play,
+press **F8** (or F1 > Mark the bug now) when the bug is on screen, and close the game. The zip lands in
+`bug-reports/` next to the game; a session that crashed is packed at the next start, with its log. It holds a copy of
+the save from before the session, the settings, the input with its pacing, the marks, `info.txt` (version, game build)
+and the log, in the layout above (`runtime/bugrec.c`). Replay one up to its first mark:
+
+```bash
+bash tools/za/bug-replay.sh issue-222.zip 300            # same EXE / GAME / WORK as above
+MARK=2 bash tools/za/bug-replay.sh issue-222.zip         # the second mark; MARK=none: to the end
+```
+
+A zip only replays on the version that recorded it: another refuses with both versions in the log
+(`LARECOMP_REPLAY_ANY_VERSION=1` tries anyway). Keep old releases' `lasrecomp.exe` for that.
+`LARECOMP_BUG_RECORD=1` records a scripted test run the same way.
+
 ## Frame captures
 
 | How | Output |

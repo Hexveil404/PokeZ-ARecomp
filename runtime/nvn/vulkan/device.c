@@ -2714,6 +2714,8 @@ int ui_run(void) {
                 input_led_stop();
                 LOG("window closed\n");
                 backend_quit();  // (before exit(): see there)
+                extern void bugrec_finish(void);
+                bugrec_finish();  // (a bug recording: packed - runtime/bugrec.c)
                 exit(0);
             }
             extern bool input_user_blocked(const SDL_Event *e);

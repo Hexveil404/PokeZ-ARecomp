@@ -596,11 +596,13 @@ static void tab_display(bool in_game) {
                 g_settings.fps60_lock = !fall;
             ImGui::EndDisabled();
             opt_toggle(TR("Constant game speed", "Velocidade constante"), &g_settings.frame_dt, true,
-                       TR("The world runs at the same speed at any frame rate: the game's step comes from the time that "
-                          "really passed, so 50 fps plays at full speed, not in slow motion. Off: the game's own step - "
-                          "below the chosen rate everything moves in slow motion. Applies from the next frame.",
-                          "O mundo roda na mesma velocidade em qualquer taxa de quadros: o passo do jogo vem do tempo que "
-                          "realmente passou, então 50 fps joga em velocidade normal, não em câmera lenta. Desligado: o "
+                       TR("The world runs at the same speed from 30 to 60 fps: the game's step comes from the time that "
+                          "really passed, so 50 fps plays at full speed, not in slow motion. Below 30 fps it slows down, "
+                          "as on the Switch (bigger steps make dash moves miss). Off: the game's own step - below the "
+                          "chosen rate everything moves in slow motion. Applies from the next frame.",
+                          "O mundo roda na mesma velocidade de 30 a 60 fps: o passo do jogo vem do tempo que realmente "
+                          "passou, então 50 fps joga em velocidade normal, não em câmera lenta. Abaixo de 30 fps fica "
+                          "mais lento, como no Switch (passos maiores fazem golpes de investida errarem). Desligado: o "
                           "passo do próprio jogo - abaixo da taxa escolhida tudo fica em câmera lenta. Vale a partir do "
                           "próximo quadro."));
             opt_toggle(TR("Smooth distant animation", "Animação suave à distância"), &g_settings.smooth_anim, true,

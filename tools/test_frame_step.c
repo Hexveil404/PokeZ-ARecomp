@@ -96,6 +96,19 @@ int main(int argc, char **argv) {
         printf("hook, 60 fps: %d frames in the 30 fps mode; ticks channel 0 %llu, channel 1 %llu\n", frames_30,
                (unsigned long long)t[0], (unsigned long long)t[1]);
         assert(frames_30 <= 5 && t[0] == t[1]);
+    } else if (which == 6) {  // below 30 fps (#222): never more than two ticks a frame - a dash passed through its target
+        setenv("LARECOMP_FPS", "30", 1);
+        g_settings.fps60 = false;
+        uint64_t most = 0;
+        for (int i = 0; i < 600; i++) {
+            now_ns += i % 50 == 49 ? 300000000ull : 0;  // (now and then a stall, as on a laptop paging memory)
+            uint64_t before[11];
+            memcpy(before, t, sizeof before);
+            frame(i % 2 ? 50.0 : 40.9, true, t);  // (~22 fps: steps 1 and 2 by turns before the cap)
+            for (int ch = 0; ch < 11; ch++) if (t[ch] - before[ch] > most) most = t[ch] - before[ch];
+        }
+        printf("hook, ~22 fps in the 30 fps mode: at most %llu ticks a frame on any channel\n", (unsigned long long)most);
+        assert(most == 2);  // (the game's own 30 fps frame; v0.1.24's catch-up handed up to 5)
     }
     printf("ok\n");
     return 0;

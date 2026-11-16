@@ -178,7 +178,15 @@ uint64_t rt_za_frame_dt(uint64_t real_ns) {
         // The subsystems' step is this value + 1 (their "0" is one tick: the 30 fps mode's configured 1 gives two), so
         // the vsyncs owed less one: 60 fps -> 0 (one tick), 40 fps -> 0, 1, 0, 1 (1.5: full speed), 30 fps -> 1
         n = owed ? owed - 1 : 0;
-        if (n > 4) n = 4;  // (the game's own most: a hitch steps at most 4)
+        // At most 1 (two ticks, the 30 fps frame): a battle move's hit is checked once a frame, and a dash moved further
+        // than that passed through its target - Flame Wheel did no damage at ~22 fps, steps 1 and 2 by turns (#222: 10 of
+        // 10 hits with the game's own step, most missed with the catch-up; ~45 ms on every frame missed them all; speed
+        // mods on emulators break it the same way). Below 30 fps the world slows down, as on the Switch.
+        // LARECOMP_ZA_MAX_STEP=<n> (up to 4, the game's own most) the catch-up below 30 fps as before v0.1.25
+        static int max_step = -1;
+        if (max_step < 0) max_step = ENV("LARECOMP_ZA_MAX_STEP") ? atoi(ENV("LARECOMP_ZA_MAX_STEP")) : 1;
+        if (n > (uint64_t)max_step) n = (uint64_t)max_step;
+        if (n > 4) n = 4;
         const PaceRec *pr = pace_replayed();
         if (pr) n = pr->n > 4 ? 4 : pr->n;  // (a replay: the recorded play's step)
     }

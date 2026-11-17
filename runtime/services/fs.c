@@ -130,7 +130,16 @@ static void base_open(void) {
         // scene, a 6 GiB list read from data, on any GPU: a folder extracted elsewhere, maybe from another version.
         // 2.0.0's is 9877520 bytes)
         snprintf(path, sizeof path, "%s/arc/data.trpfd", g_romfs_dir);
-        if (stat(path, &sb) == 0) LOG("[fs] romfs: arc/data.trpfd %lld bytes (a folder extracted by another tool)\n", (long long)sb.st_size);
+        if (stat(path, &sb) == 0) {
+            LOG("[fs] romfs: arc/data.trpfd %lld bytes (a folder extracted by another tool)\n", (long long)sb.st_size);
+            // (#311: a folder with Pokémon Z-A's index but not its packs - the game read null as it started. The start
+            // screen says so too: runtime/ui/launcher.mm launcher_verify_kick)
+            snprintf(path, sizeof path, "%s/arc/data.trpfs", g_romfs_dir);
+            bool none = stat(path, &sb) != 0;
+            if (none || sb.st_size < (1 << 20))
+                FATAL("the game files are incomplete: %s/arc/data.trpfs is %s (the game's packs, about 4.7 GB)\n",
+                      g_romfs_dir, none ? "missing" : "almost empty");
+        }
     } else {
         snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // (an older version's image)
         if (stat(path, &sb) == 0) LOG("[fs] romfs: %s.bin, %lld bytes\n", g_romfs_dir, (long long)sb.st_size);

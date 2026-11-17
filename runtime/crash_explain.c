@@ -121,6 +121,11 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
         snprintf(what, sizeof what, "%s found %d of the game's %d files, and the game stopped when it needed "
                  "one that's missing. Copy your game files again so none are missing, then set them up again on the "
                  "start screen (Game Files).", app, rt_romfs_files, (int)ROMFS_FILES);
+    } else if (has("the game files are incomplete")) {  // (runtime/services/fs.c: no arc/data.trpfs in the folder, #311)
+        snprintf(head, sizeof head, "Your game files are incomplete");
+        snprintf(what, sizeof what, "arc/data.trpfs, the file with the game's models, maps and texts (about 4.7 GB), "
+                 "is missing from the game files' folder (extracted/romfs). On the start screen: Settings > Delete game "
+                 "files, then choose your .xci / .nsp files again - the setup extracts everything itself.");
     } else if (has("doesn't fit its language")) {
         snprintf(head, sizeof head, "Your game files' text has been changed");
         snprintf(what, sizeof what, "The game's text for this language comes from another language (a translation "

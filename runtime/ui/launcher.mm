@@ -895,7 +895,7 @@ extern "C" void launcher_maxlod_kick(void) {
 static PlatProc g_verify_proc;
 static std::string g_damaged;  // (the start screen's notice: the damaged packs, said once per visit)
 static bool g_damaged_looked;
-extern "C" int launcher_verify_state(void) {  // 0 nothing / not checked, 1 checking, 2 ok, 3 damaged
+extern "C" int launcher_verify_state(void) {  // 0 nothing / not checked, 1 checking, 2 ok, 3 damaged, 4 incomplete
     if (g_verify_proc) {
         if (plat_proc_wait(g_verify_proc, false) < 0) return 1;
         g_verify_proc = 0;
@@ -905,7 +905,7 @@ extern "C" int launcher_verify_state(void) {  // 0 nothing / not checked, 1 chec
     if (!f) return 0;
     if (!fgets(head, sizeof head, f)) head[0] = 0;
     fclose(f);
-    return !strncmp(head, "damaged", 7) ? 3 : !strncmp(head, "ok", 2) ? 2 : 0;
+    return !strncmp(head, "damaged", 7) ? 3 : !strncmp(head, "missing", 7) ? 4 : !strncmp(head, "ok", 2) ? 2 : 0;
 }
 static void launcher_verify_kick(void) {
     char tool[1100];
@@ -914,6 +914,15 @@ static void launcher_verify_kick(void) {
     std::string data = romfs + (is_dir(romfs) ? "/arc/data.trpfs" : "");
     char src[64] = "", had[64] = "";
     struct stat sb;
+    if (is_dir(romfs) && (stat(data.c_str(), &sb) || sb.st_size < (1 << 20)) && file_exists(romfs + "/arc/data.trpfd")) {
+        // (#311: a folder extracted by another tool, with the index but not the packs: the game crashes as it starts.
+        // runtime/services/fs.c stops there too, with the same words)
+        mkdir("cache", 0755);
+        remove("cache/verify.src");
+        if (FILE *f = fopen("cache/verify.txt", "wb")) fprintf(f, "missing arc/data.trpfs\n"), fclose(f);
+        rt_launcher_log("[launcher] game files: %s/arc/data.trpfs is missing (incomplete game files)\n", romfs.c_str());
+        return;
+    }
     if (stat(data.c_str(), &sb)) return;
     snprintf(src, sizeof src, "%lld %lld", (long long)sb.st_size, (long long)sb.st_mtime);
     if (FILE *f = fopen("cache/verify.src", "rb")) { size_t n = fread(had, 1, sizeof had - 1, f); had[n] = 0; fclose(f); }
@@ -930,8 +939,10 @@ static void launcher_verify_kick(void) {
 static bool begin_question(const char *id, float s);  // (below)
 // (the Play page, each frame) a finished check that found damaged packs: said once per visit, with what to do
 static void damaged_prompt(float s) {
-    if (!g_damaged_looked && launcher_verify_state() == 3) {
+    static bool missing;  // (state 4: arc/data.trpfs not in the folder, #311)
+    if (!g_damaged_looked && launcher_verify_state() >= 3) {
         g_damaged_looked = true;
+        missing = launcher_verify_state() == 4;
         g_damaged.clear();
         if (FILE *f = fopen("cache/verify.txt", "rb")) {
             char line[512];
@@ -948,6 +959,21 @@ static void damaged_prompt(float s) {
     }
     if (!begin_question("##damaged", s)) return;
     ImGui::PushTextWrapPos(0);
+    if (missing) {
+        ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "%s", TR("Your game files are incomplete", "Seus arquivos do jogo estão incompletos"));
+        ImGui::Spacing();
+        ImGui::TextUnformatted(TR("arc/data.trpfs, the file with the game's models, maps and texts (about 4.7 GB), is "
+                                  "missing from the game files' folder (extracted/romfs). The game closes as soon as it "
+                                  "starts without it.",
+                                  "Falta o arc/data.trpfs, o arquivo com os modelos, mapas e textos do jogo (cerca de "
+                                  "4,7 GB), na pasta dos arquivos do jogo (extracted/romfs). Sem ele o jogo fecha assim "
+                                  "que começa."));
+        ImGui::Spacing();
+        ImGui::TextUnformatted(TR("To fix it: Settings > Delete game files, then choose your .xci / .nsp files again - "
+                                  "the setup extracts everything itself.",
+                                  "Para corrigir: Configurações > Apagar arquivos do jogo e escolha seus arquivos .xci / "
+                                  ".nsp de novo - a preparação extrai tudo sozinha."));
+    } else {
     ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "%s", TR("Your game files are damaged", "Seus arquivos do jogo estão danificados"));
     ImGui::Spacing();
     ImGui::TextUnformatted(TR("Part of them differs from a good copy of this version: the download they came from was "
@@ -965,6 +991,7 @@ static void damaged_prompt(float s) {
                               "preparação agora confere cada pacote e diz qual está danificado."));
     ImGui::Spacing();
     ImGui::TextDisabled("%s", g_damaged.c_str());
+    }
     ImGui::PopTextWrapPos();
     ImGui::Dummy(ImVec2(0, 14 * s));
     ImGui::SetItemDefaultFocus();

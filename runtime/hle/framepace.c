@@ -318,7 +318,7 @@ static bool cam_site(uint64_t lr) {
     static __thread struct { uint64_t lr; bool yes; } memo[16];  // (per thread: no lock on a call made ~1M times a minute)
     unsigned i = (unsigned)(lr >> 2) & 15;
     if (memo[i].lr == lr) return memo[i].yes;
-    bool yes = lr >= 0x7000000010ull && lr < 0x7800000000ull && !(lr & 3);
+    bool yes = lr >= 0x7000000000ull + 16 && lr < 0x7800000000ull && !(lr & 3);
     if (yes) {
         const uint32_t *w = (const uint32_t *)(uintptr_t)(lr - 16);
         yes = w[0] == 0xB9412661u && w[1] == 0xF9400008u && w[2] == 0xF9400108u && w[3] == 0xD63F0100u;

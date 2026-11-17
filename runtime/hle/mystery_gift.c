@@ -12,35 +12,55 @@
 // gone wrong. We aren't able to retrieve that gift right now."). Here it is the PC's clock, like the user clock
 // (services/time.c): the SDK's answer is logged once, then replaced with the host time and success.
 //
-// Addresses by the main module's build ID. Another version has no login hook, and going online without it crashes the
-// game at the login step (#316, 2.0.0): there Mystery Gift stays off whatever the setting says (mystery_gift_supported,
-// asked by misc.c nifm_online), so the game sees no connection, as it does with the setting off.
+// The login request's update is found by its code, on any game version (mg_login_find): the same function in 1.0.0
+// (main+0x17d93f4) and 2.0.2 (main+0x191f284), instruction for instruction but for addresses. A version where it isn't
+// found exactly once has no hook, and going online without it crashes the game at the login step (#316): there
+// Mystery Gift stays off whatever the setting says (mystery_gift_supported, asked by misc.c nifm_online), so the
+// game sees no connection, as it does with the setting off.
 #include <string.h>
 #include <time.h>
 
-#include "../game_addresses.h"
 #include "../hle.h"
 
-typedef struct {
-    uint8_t id[8];
-    uint64_t npln_login_update;  // the login request's update (vtable main+0x3c13..., state at +0x50: 2 = done, success)
-} MgAddrs;
-
-static const MgAddrs k_mg[] = {
-    {{0xB1, 0xF1, 0x2F, 0xD9, 0x19, 0xEA, 0xE8, 0x6A}, 0x191f284},  // 2.0.2
-};
-
-static const MgAddrs *g_mg;
 static GuestFn g_login_orig;
 
-static const MgAddrs *mg_addrs(void) {
-    for (size_t i = 0; i < sizeof k_mg / sizeof *k_mg; i++)
-        if (!memcmp(g_main_build_id, k_mg[i].id, 8)) return &k_mg[i];
-    return NULL;
+// The login request's update, by its first 24 instructions with the addresses masked out (branch targets, adrp pages,
+// load and store offsets, the frame size). Kept whole: ldr w8, [x19, #0x50]; cmp w8, #3; cmp w8, #2 - the state field
+// and its values, which the hook relies on. 0 unless exactly one function matches.
+static uint64_t mg_login_find(void) {
+    static const uint32_t code[24] = {
+        0xd10003ff, 0xa9087bfd, 0xf90003f5, 0xa90a4ff4, 0x910003fd, 0x90000008,
+        0xaa0103f4, 0xf9400108, 0xb9400108, 0xd50339bf, 0x34000008, 0xaa0003f3,
+        0x90000000, 0xf9400000, 0x94000000, 0x37000000, 0xb9405268, 0x71000d1f,
+        0x54000000, 0x7100091f, 0x54000000, 0x35000008, 0x91000275, 0x94000000};
+    static const uint32_t mask[24] = {
+        0xffc003ff, 0xffffffff, 0xffc003ff, 0xffffffff, 0xffc003ff, 0x9f00001f,
+        0xffffffff, 0xffc003ff, 0xffc003ff, 0xffffffff, 0xff00001f, 0xffffffff,
+        0x9f00001f, 0xffc003ff, 0xfc000000, 0xfff8001f, 0xffffffff, 0xffffffff,
+        0xff00001f, 0xffffffff, 0xff00001f, 0xff00001f, 0xffc003ff, 0xfc000000};
+    static uint64_t found;
+    static int tried;
+    if (tried || !g_nmodules) return found;
+    tried = 1;
+    const Module *m = &g_modules[0];
+    const uint32_t *t = (const uint32_t *)(uintptr_t)(m->base + m->text_off);
+    uint64_t n = m->text_size / 4, at = 0;
+    int nat = 0;
+    for (uint64_t i = 0; i + 24 <= n; i++) {
+        if ((t[i] & mask[0]) != code[0] || (t[i + 1] & mask[1]) != code[1]) continue;
+        int k = 2;
+        while (k < 24 && (t[i + k] & mask[k]) == code[k]) k++;
+        if (k == 24) at = i, nat++;
+    }
+    if (nat == 1) found = m->base + m->text_off + at * 4;
+    LOG("[mystery-gift] login update: %d match%s in the game's code%s\n", nat, nat == 1 ? "" : "es",
+        nat == 1 ? "" : " (not this version: Mystery Gift stays off)");
+    return found;
 }
 
-// Whether this build of the game can go online for Mystery Gift (the login hook has its address).
-bool mystery_gift_supported(void) { return mg_addrs() != NULL; }
+// Whether this build of the game can go online for Mystery Gift: 1 yes, 0 no, -1 not known yet (no game loaded).
+int mystery_gift_support(void) { return !g_nmodules ? -1 : mg_login_find() != 0; }
+bool mystery_gift_supported(void) { return mystery_gift_support() == 1; }
 
 static void mg_login_update(Cpu *c) {
     uint64_t self = c->x[0];
@@ -98,9 +118,8 @@ void mystery_gift_hooks_install(void) {
         *slot = hle_register("mystery_gift_network_clock", mg_network_clock_now);
         LOG("[mystery-gift] network clock: the PC's clock (import slot %llx)\n", (unsigned long long)(uintptr_t)slot);
     }
-    g_mg = mg_addrs();
-    if (!g_mg || !g_nmodules) return;  // (not reached on another version: nifm_online is false there)
-    uint64_t addr = g_modules[0].base + g_mg->npln_login_update;
+    uint64_t addr = mg_login_find();
+    if (!addr) return;  // (not reached on such a version: nifm_online is false there)
     g_login_orig = dispatch_lookup(addr);
     if (!g_login_orig) { LOG("[mystery-gift] login update not found at %llx\n", (unsigned long long)addr); return; }
     hle_override(addr, mg_login_update, "mystery_gift_login");

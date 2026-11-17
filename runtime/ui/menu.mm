@@ -22,8 +22,7 @@ extern "C" int launcher_maxlod_state(void);
 extern "C" bool g_maxlod_on;  // runtime/services/fs.c
 extern "C" void launcher_drawdist_kick(void);  // F1 > Draw distance (#190)
 extern "C" int launcher_drawdist_state(void);
-extern "C" bool mystery_gift_supported(void);  // runtime/hle/mystery_gift.c: this game version has the login hook
-extern "C" uint8_t g_main_build_id[8];         // runtime/game_addresses.c
+extern "C" int mystery_gift_support(void);  // runtime/hle/mystery_gift.c: 1 this game version can, 0 it cannot, -1 no game loaded
 extern "C" bool g_drawdist_on;
 extern "C" void launcher_content_kick(void);  // F1 > Content
 extern "C" int launcher_content_state(void);
@@ -1276,16 +1275,12 @@ static void tab_online(void) {
     (void)peers;
     // Mystery Gift without Nintendo's servers (runtime/services/bcat.c, mystery_gift_cards.c, hle/mystery_gift.c)
     opt_section(TR("Mystery Gift", "Presente Misterioso"));
-    bool mg_known = false;  // (no game chosen yet: nothing to say about its version)
-    for (int i = 0; i < 8; i++) mg_known |= g_main_build_id[i] != 0;
-    if (mg_known && !mystery_gift_supported()) {  // (#316: another version would crash at the login step)
+    if (mystery_gift_support() == 0) {  // (#316: a version whose login step isn't found would crash there)
         opt_disable_next();
         bool off = false;
         opt_toggle(TR("Get via Internet", "Receber pela internet"), &off, false,
-                   TR("Not available for this version of the game yet: it works on 2.0.2. The game sees no internet "
-                      "connection (as before).",
-                      "Ainda não disponível nesta versão do jogo: funciona na 2.0.2. O jogo não vê conexão com a "
-                      "internet (como antes)."));
+                   TR("Not available for this version of the game yet. The game sees no internet connection (as before).",
+                      "Ainda não disponível nesta versão do jogo. O jogo não vê conexão com a internet (como antes)."));
     } else {
         opt_toggle(TR("Get via Internet", "Receber pela internet"), &g_settings.mystery_gift, false,
                    TR("Link Play > Mystery Gift > Get via Internet lists every gift in Project Pokémon's EventsGallery, past "

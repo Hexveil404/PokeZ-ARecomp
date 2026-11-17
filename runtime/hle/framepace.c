@@ -12,6 +12,7 @@
 //   LARECOMP_FRAME_STEPS_MAX maximum steps per frame (default 4: after a long stall the game doesn't jump ahead)
 //   LARECOMP_FORCE_STEPS=<n> (test) always n
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -284,6 +285,86 @@ static void ch_set_hook(Cpu *c) {
     c->x[2] = ch0_duration(g_ch0_world);
     guest_call(c, store);
 }
+// The camera judders on any frame rate between 30 and 60 (#224: turning it with the stick, ~15 px a frame and ~30 on
+// every frame the world took two ticks - 15 15 15 30 at 48 fps, measured from a replay's frames): the camera's turn
+// is the stick times channel 1's time (the world's), whole ticks of 16.7 / 33.3 ms by turns, while the picture comes
+// at an even ~21 ms. Channel 1 is read by ~35 places a frame (LARECOMP_CLOCK_GET_LOG=1), and two of them rewrite it
+// scaled (f_700013b2e4 / 7001b53f78 in 2.0.2: time scale and pause per channel); bisected on the replay, the reader
+// that judders is the camera's update (f_7000370e20 in 2.0.2: its channel at +0x124, the time to seconds through
+// 0x7003308200), one of five like sites in its class. Channel 1 itself stays in whole ticks - the world's code
+// catches its moments on them (#309's ladder, on channel 0) and #179's banner went wrong on a changed world step -
+// and only those sites get a copy of its record with a smooth duration (the same rule as channel 0's: the world's
+// time averaged, what it is owed paid back gradually, so over any few frames it is the world's time).
+// The sites are found by their code, not their addresses (any build): ldr w1, [x19, #0x124] / ldr x8, [x0] /
+// ldr x8, [x8] / blr x8 just before the return address (a "[pace] camera" line logs each one found).
+// LARECOMP_CAM_SMOOTH=0 off
+static uint64_t g_cam_dur;  // (0: none this frame)
+static bool g_cam_on;
+static uint64_t cam_duration(uint32_t world_ticks, bool restart) {
+    const double tick = 16666667.0;
+    static double ema = 16666667.0, owed;
+    if (restart) ema = tick, owed = 0;
+    double world = world_ticks * tick;
+    ema = ema * 0.9 + world * 0.1;
+    owed += world;
+    if (owed > 6 * tick) owed = 6 * tick;
+    double d = ema + (owed - ema) * 0.2;
+    if (d < 0.5 * tick) d = 0.5 * tick;
+    if (d > 4.2 * tick) d = 4.2 * tick;
+    owed -= d;
+    return (uint64_t)(d + 0.5);
+}
+static bool cam_site(uint64_t lr) {
+    static __thread struct { uint64_t lr; bool yes; } memo[16];  // (per thread: no lock on a call made ~1M times a minute)
+    unsigned i = (unsigned)(lr >> 2) & 15;
+    if (memo[i].lr == lr) return memo[i].yes;
+    bool yes = lr >= 0x7000000010ull && lr < 0x7800000000ull && !(lr & 3);
+    if (yes) {
+        const uint32_t *w = (const uint32_t *)(uintptr_t)(lr - 16);
+        yes = w[0] == 0xB9412661u && w[1] == 0xF9400008u && w[2] == 0xF9400108u && w[3] == 0xD63F0100u;
+    }
+    if (yes) {
+        static _Atomic int logged;
+        if (atomic_fetch_add(&logged, 1) < 8) LOG("[pace] camera: channel 1 smooth at %llx\n", (unsigned long long)lr);
+    }
+    memo[i].lr = lr, memo[i].yes = yes;
+    return yes;
+}
+static void cam_record(Cpu *c, uint32_t ch, uint64_t lr) {
+    uint64_t d = g_cam_dur;
+    if (ch != 1 || !d || !cam_site(lr)) return;
+    static __thread uint64_t rec[2];  // (the record's first word as it is, its duration the smooth one)
+    rec[0] = ((const uint64_t *)(uintptr_t)c->x[0])[0], rec[1] = d;
+    c->x[0] = (uint64_t)(uintptr_t)rec;
+}
+// The channels' getter (vtable +0: x0 + 16 * channel + 8, the channel's record; its duration at +8)
+static void clock_get_hook(Cpu *c) {
+    uint32_t ch = (uint32_t)c->x[1];
+    c->x[0] = c->x[0] + ((uint64_t)(int64_t)(int32_t)ch << 4) + 8;
+    cam_record(c, ch, c->x[30]);
+}
+// (diagnostics, LARECOMP_CLOCK_GET_LOG=1) who reads which channel: the getter (vtable +0, x0 + 16 * channel + 8)
+static struct { uint64_t lr; uint32_t ch; uint64_t n; } g_get_tab[256];
+static pthread_mutex_t g_get_lock = PTHREAD_MUTEX_INITIALIZER;
+static void clock_get_log(Cpu *c) {
+    uint32_t ch = (uint32_t)c->x[1];
+    uint64_t lr = c->x[30];
+    pthread_mutex_lock(&g_get_lock);
+    for (int i = 0; i < 256; i++) {
+        if (g_get_tab[i].lr == lr && g_get_tab[i].ch == ch) { g_get_tab[i].n++; break; }
+        if (!g_get_tab[i].lr) { g_get_tab[i].lr = lr, g_get_tab[i].ch = ch, g_get_tab[i].n = 1; break; }
+    }
+    static uint64_t calls;
+    if (++calls % 200000 == 0) {
+        LOG("[clockget] after %llu calls:", (unsigned long long)calls);
+        for (int i = 0; i < 256 && g_get_tab[i].lr; i++)
+            LOG(" %llx/%u:%llu", (unsigned long long)g_get_tab[i].lr, g_get_tab[i].ch, (unsigned long long)g_get_tab[i].n);
+        LOG("\n");
+    }
+    pthread_mutex_unlock(&g_get_lock);
+    c->x[0] = c->x[0] + ((uint64_t)(int64_t)(int32_t)ch << 4) + 8;
+    cam_record(c, ch, lr);
+}
 // Found from the clock's loop itself (rt_za_frame_step runs just before its call: x0 the channels, x8 the function their
 // vtable +8 holds), and checked against the code it must be - adrp x8 / add x8 / ldr x2, [x8, w2, sxtw #3] / ldr x8, [x0]
 // / ldr x3, [x8, #0x10] / br x3 (2.0.0, 2.0.2) - so another build's code is never overridden blindly
@@ -308,6 +389,21 @@ static void ch_set_install(void) {
     }
     hle_override(fn, ch_set_hook, "za_clock_set");
     g_ch_set_hooked = true;
+    {   // (the clock's vtable: where its channels' durations are stored and read - diagnostics)
+        const uint64_t *vt = (const uint64_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)chans;
+        const uint32_t *g = (const uint32_t *)(uintptr_t)vt[0];  // (add x8, x0, w1, sxtw #4 / add x0, x8, #8 / ret)
+        bool get_ok = vt[0] >= 0x7000000000ull && vt[0] < 0x7800000000ull && !(vt[0] & 3) && g[0] == 0x8B21D008u &&
+                      g[1] == 0x91002100u && g[2] == 0xD65F03C0u;
+        const char *cs = ENV("LARECOMP_CAM_SMOOTH");
+        g_cam_on = get_ok && !(cs && *cs == '0');
+        if (ENV("LARECOMP_CLOCK_GET_LOG")) hle_override(vt[0], clock_get_log, "za_clock_get_log");
+        else if (g_cam_on) hle_override(vt[0], clock_get_hook, "za_clock_get");
+        if (!get_ok) LOG("[pace] clock getter not recognised (%llx): camera on whole ticks\n", (unsigned long long)vt[0]);
+        LOG("[pace] clock at %llx, vtable %llx: %llx %llx %llx %llx %llx %llx %llx %llx\n", (unsigned long long)chans,
+            (unsigned long long)(uintptr_t)vt, (unsigned long long)vt[0], (unsigned long long)vt[1], (unsigned long long)vt[2],
+            (unsigned long long)vt[3], (unsigned long long)vt[4], (unsigned long long)vt[5], (unsigned long long)vt[6],
+            (unsigned long long)vt[7]);
+    }
     LOG("[pace] channel 0: smooth duration (clock set function %llx)\n", (unsigned long long)fn);
 }
 static uint32_t frame_step(uint32_t game_step, uint32_t channel, bool on) {
@@ -360,6 +456,12 @@ static uint32_t frame_step(uint32_t game_step, uint32_t channel, bool on) {
         if (dyn0) {
             ticks = ticks * 0.97 + g_ch0_world * 0.03;
             slow = ticks > at + (slow ? -0.05 : 0.05);
+        }
+        {   // (the camera's smooth channel 1, once a frame: see cam_record)
+            static bool was;
+            bool cam = g_cam_on && on && g_settings.frame_dt && g_za_mode_dyn && g_ch_set_hooked;
+            g_cam_dur = cam ? cam_duration(g_ch0_world, !was) : 0;
+            was = cam;
         }
         g_ch0_smooth = dyn0 && (ch0 == 6 || (ch0 == 7 && slow)) && g_ch_set_hooked;
         if (!g_ch0_smooth) g_ch0_restart = true;

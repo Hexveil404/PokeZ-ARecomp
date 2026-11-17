@@ -2,6 +2,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -22,6 +23,7 @@ static int hle_count;
 // Overrides of recompiled guest functions (by address)
 #define MAX_OVERRIDE 1024
 static struct { uint64_t addr; HostFn fn; const char *name; } overrides[MAX_OVERRIDE];
+static _Atomic unsigned g_dcache_gen;  // (bumped by hle_override: every thread's dispatch cache is dropped - rt_dispatch)
 static int override_count;
 
 // Host implementations registered by name (runtime/hle/*.c fill this via HLE_FUNC)
@@ -79,6 +81,7 @@ void hle_override(uint64_t addr, HostFn fn, const char *name) {
     overrides[override_count].fn = fn;
     overrides[override_count].name = name;
     override_count++;
+    atomic_fetch_add(&g_dcache_gen, 1);  // (every thread drops what it cached: rt_dispatch)
 }
 
 static __thread uint64_t unimpl_pc;
@@ -155,6 +158,11 @@ GuestFn dispatch_lookup(uint64_t addr) {
 // Small direct-mapped cache in front of the binary search
 #define DCACHE 4096
 static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
+// An override installed after a function's first call (the clock's channel getter, framepace.c: found from the game's
+// own frame loop, long after its first use) was never seen by a thread that had it cached. hle_override bumps the
+// generation, and a thread whose cache is older empties it at its next dispatch (one load of a line nothing writes
+// while playing).
+static __thread unsigned t_dcache_gen;  // (g_dcache_gen: with the overrides, above)
 
 // Guest setjmp sites of this thread (cpu.h RtJmp): one per guest jmp_buf, the oldest replaced when full
 #define NJMP 32
@@ -422,6 +430,10 @@ __attribute__((noinline)) static void dispatch_miss(Cpu *c) {
 
 // Always tail-calls, so chains of indirect jumps don't grow the host stack.
 void rt_dispatch(Cpu *c) {
+    if (__builtin_expect(atomic_load_explicit(&g_dcache_gen, memory_order_relaxed) != t_dcache_gen, 0)) {
+        memset(dcache, 0, sizeof dcache);
+        t_dcache_gen = atomic_load_explicit(&g_dcache_gen, memory_order_relaxed);
+    }
     unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);
     if (__builtin_expect(dcache[h].addr == c->pc, 1)) {
         GuestFn f = dcache[h].fn;

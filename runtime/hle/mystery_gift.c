@@ -17,6 +17,7 @@
 // found exactly once has no hook, and going online without it crashes the game at the login step (#316): there
 // Mystery Gift stays off whatever the setting says (mystery_gift_supported, asked by misc.c nifm_online), so the
 // game sees no connection, as it does with the setting off.
+#include <pthread.h>
 #include <string.h>
 #include <time.h>
 
@@ -27,7 +28,9 @@ static GuestFn g_login_orig;
 // The login request's update, by its first 24 instructions with the addresses masked out (branch targets, adrp pages,
 // load and store offsets, the frame size). Kept whole: ldr w8, [x19, #0x50]; cmp w8, #3; cmp w8, #2 - the state field
 // and its values, which the hook relies on. 0 unless exactly one function matches.
-static uint64_t mg_login_find(void) {
+static uint64_t g_login_found;
+
+static void mg_login_scan(void) {
     static const uint32_t code[24] = {
         0xd10003ff, 0xa9087bfd, 0xf90003f5, 0xa90a4ff4, 0x910003fd, 0x90000008,
         0xaa0103f4, 0xf9400108, 0xb9400108, 0xd50339bf, 0x34000008, 0xaa0003f3,
@@ -38,10 +41,6 @@ static uint64_t mg_login_find(void) {
         0xffffffff, 0xffc003ff, 0xffc003ff, 0xffffffff, 0xff00001f, 0xffffffff,
         0x9f00001f, 0xffc003ff, 0xfc000000, 0xfff8001f, 0xffffffff, 0xffffffff,
         0xff00001f, 0xffffffff, 0xff00001f, 0xff00001f, 0xffc003ff, 0xfc000000};
-    static uint64_t found;
-    static int tried;
-    if (tried || !g_nmodules) return found;
-    tried = 1;
     const Module *m = &g_modules[0];
     const uint32_t *t = (const uint32_t *)(uintptr_t)(m->base + m->text_off);
     uint64_t n = m->text_size / 4, at = 0;
@@ -52,10 +51,16 @@ static uint64_t mg_login_find(void) {
         while (k < 24 && (t[i + k] & mask[k]) == code[k]) k++;
         if (k == 24) at = i, nat++;
     }
-    if (nat == 1) found = m->base + m->text_off + at * 4;
+    if (nat == 1) g_login_found = m->base + m->text_off + at * 4;
     LOG("[mystery-gift] login update: %d match%s in the game's code%s\n", nat, nat == 1 ? "" : "es",
         nat == 1 ? "" : " (not this version: Mystery Gift stays off)");
-    return found;
+}
+
+static uint64_t mg_login_find(void) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    if (!g_nmodules) return 0;
+    pthread_once(&once, mg_login_scan);  // (the game's threads and the F1 menu ask at once: one scan, the others wait)
+    return g_login_found;
 }
 
 // Whether this build of the game can go online for Mystery Gift: 1 yes, 0 no, -1 not known yet (no game loaded).

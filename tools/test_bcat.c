@@ -27,6 +27,7 @@ Service *service_new(const char *name, ServiceHandler h, void *state) {
 void ipc_return_object(IpcResp *resp, Service *s) { resp->objects[resp->nobjects++] = s; }
 void mg_trace_mark(const char *what) { (void)what; }
 Settings g_settings;
+bool nifm_online(void) { return g_settings.mystery_gift; }  // (misc.c: also asks the game version, hle/mystery_gift.c)
 static char g_root[1024];
 const char *rt_data_root(void) { return g_root; }
 bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n) { (void)name; (void)dev_rel; (void)out; (void)n; return false; }

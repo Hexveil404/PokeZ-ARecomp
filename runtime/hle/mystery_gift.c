@@ -12,7 +12,9 @@
 // gone wrong. We aren't able to retrieve that gift right now."). Here it is the PC's clock, like the user clock
 // (services/time.c): the SDK's answer is logged once, then replaced with the host time and success.
 //
-// Addresses by the main module's build ID; another version gets no hooks (and the login fails as before, cleanly).
+// Addresses by the main module's build ID. Another version has no login hook, and going online without it crashes the
+// game at the login step (#316, 2.0.0): there Mystery Gift stays off whatever the setting says (mystery_gift_supported,
+// asked by misc.c nifm_online), so the game sees no connection, as it does with the setting off.
 #include <string.h>
 #include <time.h>
 
@@ -30,6 +32,15 @@ static const MgAddrs k_mg[] = {
 
 static const MgAddrs *g_mg;
 static GuestFn g_login_orig;
+
+static const MgAddrs *mg_addrs(void) {
+    for (size_t i = 0; i < sizeof k_mg / sizeof *k_mg; i++)
+        if (!memcmp(g_main_build_id, k_mg[i].id, 8)) return &k_mg[i];
+    return NULL;
+}
+
+// Whether this build of the game can go online for Mystery Gift (the login hook has its address).
+bool mystery_gift_supported(void) { return mg_addrs() != NULL; }
 
 static void mg_login_update(Cpu *c) {
     uint64_t self = c->x[0];
@@ -87,12 +98,8 @@ void mystery_gift_hooks_install(void) {
         *slot = hle_register("mystery_gift_network_clock", mg_network_clock_now);
         LOG("[mystery-gift] network clock: the PC's clock (import slot %llx)\n", (unsigned long long)(uintptr_t)slot);
     }
-    for (size_t i = 0; i < sizeof k_mg / sizeof *k_mg; i++)
-        if (!memcmp(g_main_build_id, k_mg[i].id, 8)) g_mg = &k_mg[i];
-    if (!g_mg || !g_nmodules) {
-        LOG("[mystery-gift] no hooks for this game version: the login to the game servers will fail\n");
-        return;
-    }
+    g_mg = mg_addrs();
+    if (!g_mg || !g_nmodules) return;  // (not reached on another version: nifm_online is false there)
     uint64_t addr = g_modules[0].base + g_mg->npln_login_update;
     g_login_orig = dispatch_lookup(addr);
     if (!g_login_orig) { LOG("[mystery-gift] login update not found at %llx\n", (unsigned long long)addr); return; }

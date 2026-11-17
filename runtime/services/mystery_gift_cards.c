@@ -244,7 +244,8 @@ static void *mg_thread(void *arg) {
 }
 
 void mystery_gift_cards_start(void) {  // (bcat.c: bcat:u's first use, and each sync request)
-    if (!g_settings.mystery_gift) return;
+    extern bool nifm_online(void);  // (misc.c: the setting, on a game version Mystery Gift supports)
+    if (!nifm_online()) return;
     pthread_mutex_lock(&g_mg_lock);
     bool go = g_mg_state == 0;
     if (go) g_mg_state = 1;

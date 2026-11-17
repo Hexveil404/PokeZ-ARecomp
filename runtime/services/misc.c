@@ -52,10 +52,17 @@ SERVICE("pctl:r", pctl_r) { pctl_root(s, req, resp); }
 // its downloads, which bcat.c serves from mystery_gift/. Nothing else reaches the PC's network from this: the game's
 // sockets stay the console's stubs (net.c / hle/net_socket.c), so anything that really needs a server fails as it would
 // on a console whose connection dropped.
+// Only on a build of the game whose login step has a hook (hle/mystery_gift.c): on another one the game would go on to
+// log in to its servers and crash there (#316), so it sees no connection, as with the setting off.
 bool nifm_online(void) {  // (acc.c: the account steps of going online)
+    extern bool mystery_gift_supported(void);
     static int env = -1;
     if (env < 0) env = getenv("LARECOMP_MYSTERY_GIFT") && atoi(getenv("LARECOMP_MYSTERY_GIFT")) ? 1 : 0;
-    return env || g_settings.mystery_gift;
+    if (!env && !g_settings.mystery_gift) return false;
+    if (mystery_gift_supported()) return true;
+    static int said;
+    if (!said++) LOG("[mystery-gift] off: this game version has no Mystery Gift support yet (2.0.2 has), so the game sees no connection\n");
+    return false;
 }
 
 static void nifm_request(Service *s, IpcReq *req, IpcResp *resp) {

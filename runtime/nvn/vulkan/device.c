@@ -2379,6 +2379,8 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             if (at == (long)frame) { g_gpuprof_frame = true; break; }
             if (*p == ',') p++; else break;
         }
+        extern bool vk_gpuprof_take_request(void);  // (exec.c: a slow frame the GPU held up asked for one)
+        if (!g_gpuprof_frame && vk_gpuprof_take_request()) g_gpuprof_frame = true;
     }
     if (g_debug_frame) LOG("===== debug frame %llu =====\n", (unsigned long long)frame);
     {   // LARECOMP_SHOT_AT=<frame>,<frame>,... (ascending): the game image at those frames -> build/frames/frame_N.png

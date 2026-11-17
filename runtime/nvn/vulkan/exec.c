@@ -667,13 +667,53 @@ static void gp_mark(VkCommandBuffer cb, const char *fmt, ...) {
     gp_draws[gp_n] = 0;
     gp_n++;
 }
+// A slow frame the GPU held up (slowframe.c asks): the frame after it is profiled as LARECOMP_GPUPROF_AT does, and only
+// its heaviest rows go to the log - which pass / dispatch / shader costs the time, on GPUs we can't test here (#299:
+// RX 6700 XT on Linux at 17 fps, #315: RX 580, one view at 18 fps even at 25% resolution). At most 3 a session, a minute
+// apart; one frame waits for its timestamps (a hitch of one frame). LARECOMP_GPUPROF_AUTO=0: off.
+static int gp_auto_want, gp_auto_n;
+static bool gp_auto;
+static uint64_t gp_auto_last;
+void vk_gpuprof_request(void) {
+    static int off = -1;
+    if (off < 0) off = ENV("LARECOMP_GPUPROF_AUTO") && !atoi(ENV("LARECOMP_GPUPROF_AUTO"));
+    uint64_t now = plat_now_ns();
+    if (off || gp_auto_n >= 3 || (gp_auto_last && now - gp_auto_last < 60000000000ull)) return;
+    gp_auto_last = now, gp_auto_n++;
+    __atomic_store_n(&gp_auto_want, 1, __ATOMIC_RELEASE);
+}
+bool vk_gpuprof_take_request(void) {  // (device.c, at a frame's start)
+    if (!__atomic_exchange_n(&gp_auto_want, 0, __ATOMIC_ACQ_REL)) return false;
+    gp_auto = true;
+    return true;
+}
+static int gp_cmp_ms(const void *a, const void *b) {
+    double x = ((const double *)a)[0], y = ((const double *)b)[0];
+    return x < y ? 1 : x > y ? -1 : 0;
+}
 void renderer_flush(void);
 void vk_gpuprof_report(void) {
-    if (!gp_n) return;
+    if (!gp_n) { gp_auto = false; return; }
     renderer_flush();
     uint64_t t[512];
     if (vkGetQueryPoolResults(g_vk.dev, gp_qp, 0, (uint32_t)gp_n, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
         double per = g_vk.props.limits.timestampPeriod / 1e6, total = (t[gp_n - 1] - t[0]) * per;
+        if (gp_auto) {  // (the heaviest rows, heaviest first)
+            static double rows[512][2];
+            int n = 0;
+            for (int i = 0; i + 1 < gp_n; i++) rows[n][0] = (t[i + 1] - t[i]) * per, rows[n][1] = i, n++;
+            qsort(rows, (size_t)n, sizeof rows[0], gp_cmp_ms);
+            LOG("[gpuprof] slow frame: GPU %.2f ms in %d rows; the heaviest (LARECOMP_GPUPROF_AUTO=0: off)\n", total, n);
+            for (int k = 0; k < n && k < 12; k++) {
+                int i = (int)rows[k][1];
+                LOG("[gpuprof] %6.3f ms %5.1f%%  %s", rows[k][0], 100 * rows[k][0] / (total > 0 ? total : 1), gp_label[i]);
+                if (gp_draws[i]) LOG(", %u draws", gp_draws[i]);
+                LOG("\n");
+            }
+            gp_auto = false;
+            gp_n = 0;
+            return;
+        }
         LOG("[gpuprof] %d marks, %.2f ms first to last (rows: the work after each mark, until the next)\n", gp_n, total);
         for (int i = 0; i + 1 < gp_n; i++) {
             double ms = (t[i + 1] - t[i]) * per;
@@ -681,6 +721,7 @@ void vk_gpuprof_report(void) {
             if (gp_draws[i]) LOG(", %u draws\n", gp_draws[i]);
         }
     }
+    gp_auto = false;
     gp_n = 0;
 }
 

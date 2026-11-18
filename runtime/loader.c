@@ -147,14 +147,24 @@ static void rtld_lookup(Cpu *c) { c->x[0] = loader_find_symbol((const char *)(ui
 // sets on the console and nothing sets here (no exefs/rtld). Code mods walk it (Hakkun's
 // hk::ro::RoUtil::initModuleList, its first act: a null list crashed it). Each module's RoModule is where its MOD0
 // says (the module object field), filled as rtld does in SDK 19+ (Hakkun's __RTLD_PAST_19XX__ layout, which its Z-A
-// builds use: m_IsPltRela before m_Base), linked into one list in load order. Only with code mods (main.c): the game
-// alone keeps running as it always has here.
+// builds use: m_IsPltRela before m_Base), linked as rtld links them: each module in load order (by address, as the
+// console maps them: main, subsdk0-9, sdk) pushed to the front, so the back is main and a lookup - nn::ro::LookupSymbol,
+// Hakkun's module walk: from the back through each module's prev - goes main, subsdk, sdk. (Appended instead, in
+// g_modules' order - main, sdk, mods - every lookup ran mod, sdk, main: the Cheat/Debug Menu's own malloc / free came
+// back as the "real" ones it forwards to, and its free of a game pointer called itself forever - a load stuck at its
+// loading screen, #308.) Only with code mods (main.c): the game alone keeps running as it always has here.
 void loader_ro_modules(void) {
     uint64_t *list = hle_alloc(16);  // RoModuleList {front, back}; empty: both point at the list itself
-    uint64_t head = (uint64_t)(uintptr_t)list, prev = head;
+    uint64_t head = (uint64_t)(uintptr_t)list;
     list[0] = list[1] = head;
+    int order[6], n = 0, aliased = 0;  // (g_modules' indices by base address)
     for (int i = 0; i < g_nmodules; i++) {
-        Module *m = &g_modules[i];
+        int k = n++;
+        for (; k > 0 && g_modules[order[k - 1]].base > g_modules[i].base; k--) order[k] = order[k - 1];
+        order[k] = i;
+    }
+    for (int oi = 0; oi < n; oi++) {
+        Module *m = &g_modules[order[oi]];
         uint32_t mod0 = *(uint32_t *)(m->base + 4);
         uint64_t mo = m->base + mod0 + *(int32_t *)(m->base + mod0 + 0x18);  // (MOD0's module object, in its .bss)
         if (mo < m->base || mo + 0xC0 > m->base + m->size) continue;
@@ -170,8 +180,8 @@ void loader_ro_modules(void) {
             if (d[0] == 10) strsz = d[1];  // DT_STRSZ
             if (d[0] == 0x6FFFFFF9) relacount = d[1];  // DT_RELACOUNT
         }
-        r[0x00 / 8] = head;  // next (the end of the list), prev
-        r[0x08 / 8] = prev;
+        r[0x00 / 8] = list[0];  // next: the old front (pushFront)
+        r[0x08 / 8] = head;     // prev: the list itself
         r[0x10 / 8] = jmprel;  // m_pPlt, m_pDyn
         r[0x18 / 8] = rela;
         *(uint8_t *)(uintptr_t)(mo + 0x20) = 1;  // m_IsPltRela
@@ -180,14 +190,23 @@ void loader_ro_modules(void) {
         r[0x38 / 8] = pltsz;
         r[0x40 / 8] = m->init, r[0x48 / 8] = m->fini;
         if (hash) r[0x50 / 8] = hash + 8, r[0x58 / 8] = hash + 8 + 4ull * *(uint32_t *)(uintptr_t)hash;  // buckets, chains
+        // What code mods look up through rtld is the function's own address (Hakkun resolves its own imports again that
+        // way, nn::ro::LookupSymbol too; its hooks need it), and a call there of a function the host implements runs
+        // the host's, by its slot, as an import's call does (dispatch.c hle_alias). (The lifted code instead: the
+        // Cheat/Debug Menu's pad reads ran the SDK's own hid, which reads shared memory nothing fills here - no
+        // controller, its menu never opened, #308.)
+        for (uint64_t k = 1; m - g_modules < 2 && k < m->nsyms; k++) {
+            Elf64Sym *s = sym(m, k);
+            HostFn impl = s->shndx && (s->info & 0xF) == 2 ? hle_lookup_impl(symname(m, s)) : NULL;
+            if (impl) hle_alias(m->base + s->value, hle_register(symname(m, s), impl)), aliased++;
+        }
         r[0x60 / 8] = m->strtab, r[0x68 / 8] = m->symtab, r[0x70 / 8] = strsz;
         r[0x80 / 8] = relasz, r[0x98 / 8] = relacount;
         if (hash) r[0xA0 / 8] = *(uint32_t *)(uintptr_t)(hash + 4), r[0xA8 / 8] = *(uint32_t *)(uintptr_t)hash;  // nchain, nbucket
         r[0xB8 / 8] = m->size;  // (the image's size: nn::ro::LookupSymbol's "address in this module" check)
-        ((uint64_t *)(uintptr_t)prev)[0] = mo;  // (the previous one's next; the list's front for the first)
-        prev = mo;
+        ((uint64_t *)(uintptr_t)list[0])[1] = mo;  // the old front's prev (the list's back for the first one)
+        list[0] = mo;
     }
-    list[1] = prev;  // back
     // (into every module's own definition: Hakkun mods define one of their own, which on the console comes first in
     // load order - subsdk before sdk - and is the one rtld fills)
     // (and the modules nn::ro loads later: none, an empty list - nn::ro::LookupSymbol walks it after this one, and read
@@ -206,7 +225,14 @@ void loader_ro_modules(void) {
                 *(uint64_t *)(uintptr_t)(m->base + s->value) = (uint64_t)(uintptr_t)manual;
         }
     }
-    LOG("rtld module list: %d modules, in %d g_pAutoLoadList\n", g_nmodules, vars);
+    char walk[160] = "";  // (the lookup order, walked as nn::ro::LookupSymbol walks it: from the back through prev)
+    for (uint64_t mo = list[1]; mo != head; mo = ((uint64_t *)(uintptr_t)mo)[1])
+        for (int i = 0; i < g_nmodules; i++)
+            if (mo >= g_modules[i].base && mo < g_modules[i].base + g_modules[i].size)
+                snprintf(walk + strlen(walk), sizeof walk - strlen(walk), "%s%s", walk[0] ? ", " : "",
+                         g_modules[i].name ? g_modules[i].name : "?");
+    LOG("rtld module list: %d modules, in %d g_pAutoLoadList; lookups go %s; %d host functions by address\n",
+        g_nmodules, vars, walk, aliased);
 }
 
 static uint64_t *lookup_cell;  // (g_LookupGlobalManualFunctionPointer: in the HLE heap, which a reboot hands out again)

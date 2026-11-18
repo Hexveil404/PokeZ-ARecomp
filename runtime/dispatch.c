@@ -114,6 +114,20 @@ static uint64_t hle_next = HLE_HEAP;
 RT_ON_RESET(hle_heap_reset) { hle_next = HLE_HEAP; }  // (guest memory, wiped by the reboot)
 RT_ON_RESET(hle_override_reset) { override_count = 0; }  // (code mods' trampolines only: they hook again each boot)
 
+// A host-implemented function's own address in the game's / the SDK's code, called by a code mod through a pointer
+// (loader.c loader_ro_modules: what they look up through rtld), runs its slot - the host's code, or the mod hook that
+// took the slot - as an import's call does, not the lifted code. Never cached (as the slots): a hook may swap it.
+#define MAX_ALIAS 512
+static struct { uint64_t addr; int slot; } aliases[MAX_ALIAS];
+static int alias_count;
+RT_ON_RESET(hle_alias_reset) { alias_count = 0; }
+void hle_alias(uint64_t addr, uint64_t stub) {
+    if (alias_count == MAX_ALIAS || stub < HLE_BASE || stub >= HLE_BASE + HLE_SIZE) return;
+    aliases[alias_count].addr = addr;
+    aliases[alias_count++].slot = (int)((stub - HLE_BASE) / 16);
+    atomic_fetch_add(&g_dcache_gen, 1);
+}
+
 void *hle_alloc(uint64_t size) {
     static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&m);
@@ -389,6 +403,17 @@ __attribute__((noinline)) static GuestFn dispatch_slow(Cpu *c) {
     }
     for (int i = 0; i < override_count; i++)
         if (overrides[i].addr == pc) return overrides[i].fn;
+    for (int i = 0; i < alias_count; i++) {
+        if (aliases[i].addr != pc) continue;
+        // (a code mod's call only - the host's own wrappers call the SDK's code at its address, heaps.c: the lifted
+        // code for them, uncached, so the next mod call still finds the alias)
+        for (int m = 2; m < g_nmodules; m++)
+            if (c->x[30] >= g_modules[m].base && c->x[30] < g_modules[m].base + g_modules[m].size)
+                return hle_slots[aliases[i].slot].fn;
+        GuestFn f = dispatch_lookup(pc);
+        if (f) return f;
+        break;
+    }
     GuestFn f = dispatch_lookup(pc);
     // (a code mod's pool still zero in its image - a trampoline written only through a view - may be lifted as an
     // all-zero function, udf #0: taken for a miss, and never cached, so a later hook pass's override is still seen)

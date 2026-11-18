@@ -48,6 +48,9 @@ static uint8_t *patched[256];
 static int npatched;
 
 static GuestFn hle_swap(const char *name, GuestFn fn) {
+    // (a slot nothing imports yet - an SDK-internal function the host implements too, hid's detail::GetNpadStates,
+    // which the host's GetNpadState calls through it: made now, so the hook sits in it and its original is the host's)
+    hle_register(name, hle_lookup_impl(name));
     GuestFn was = hle_swap_impl(name, fn);
     if (nswaps < 256) snprintf(swaps[nswaps].name, sizeof swaps[nswaps].name, "%s", name), swaps[nswaps++].was = was;
     return was;

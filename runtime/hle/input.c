@@ -1198,11 +1198,49 @@ static void fill_state(Cpu *c) {
     *(uint32_t *)(s + 32) = 1;  // IsConnected
 }
 
-HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", hid_state_fullkey) { fill_state(c); }
-HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", hid_state_dual) { fill_state(c); }
-HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", hid_state_left) { fill_state(c); }
-HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", hid_state_handheld) { fill_state(c); }
-HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", hid_state_right) { fill_state(c); }
+// With code mods: GetNpadState(state, id) goes through detail::GetNpadStates(&count, state, 1, id), as the console's
+// SDK does, and by its slot - which a mod's hook takes over (codehooks_rt.c hle_swap; its original: hid_states below).
+// The Cheat/Debug Menu reads the pad there (hold ZL, tap R: its menu) and hides it from the game while its menu is
+// open; with only the host's GetNpadState it saw no input at all (#308). Without code mods: the state, as before.
+static void npad_state(Cpu *c, const char *detail, HostFn states) {
+    if (g_nmodules <= 2) { fill_state(c); return; }
+    uint64_t state = c->x[0], id = c->x[1];
+    c->sp -= 16;  // (the count, on the guest stack)
+    c->x[0] = c->sp, c->x[1] = state, c->x[2] = 1, c->x[3] = id;
+    guest_call(c, hle_register(detail, states));  // (its slot: made by hle_swap when a mod hooked it, else here)
+    c->sp += 16;
+}
+static void hid_states(Cpu *c) {  // Result detail::GetNpadStates(int *count, State *out, int n, const NpadIdType &id)
+    uint64_t count = c->x[0];
+    int n = (int)c->x[2];
+    if (n > 0) {
+        c->x[0] = c->x[1], c->x[1] = c->x[3];
+        fill_state(c);
+    }
+    *(int32_t *)(uintptr_t)count = n > 0;
+    c->x[0] = 0;  // its Result: the SDK's own GetNpadState aborts on any other (the mod calls that one too)
+}
+#define DETAIL(ty) "_ZN2nn3hid6detail13GetNpadStatesEPiPNS0_" ty "EiRKj"
+HLE_FUNC(DETAIL("16NpadFullKeyState"), hid_states_fullkey) { hid_states(c); }
+HLE_FUNC(DETAIL("16NpadJoyDualState"), hid_states_dual) { hid_states(c); }
+HLE_FUNC(DETAIL("16NpadJoyLeftState"), hid_states_left) { hid_states(c); }
+HLE_FUNC(DETAIL("17NpadHandheldState"), hid_states_handheld) { hid_states(c); }
+HLE_FUNC(DETAIL("17NpadJoyRightState"), hid_states_right) { hid_states(c); }
+HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", hid_state_fullkey) {
+    npad_state(c, DETAIL("16NpadFullKeyState"), hid_states_fullkey);
+}
+HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", hid_state_dual) {
+    npad_state(c, DETAIL("16NpadJoyDualState"), hid_states_dual);
+}
+HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", hid_state_left) {
+    npad_state(c, DETAIL("16NpadJoyLeftState"), hid_states_left);
+}
+HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", hid_state_handheld) {
+    npad_state(c, DETAIL("17NpadHandheldState"), hid_states_handheld);
+}
+HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", hid_state_right) {
+    npad_state(c, DETAIL("17NpadJoyRightState"), hid_states_right);
+}
 
 // FullKey for player 1 only (we report docked mode, where Handheld is unavailable)
 HLE_FUNC("_ZN2nn3hid15GetNpadStyleSetERKj", hid_style_set) {

@@ -83,6 +83,7 @@ bool dispatch_add_table(const uint64_t *addrs, const GuestFn *fns, uint64_t coun
 uint64_t hle_register(const char *name, HostFn fn);  // returns fake guest address
 HostFn hle_lookup_impl(const char *name);
 void hle_override(uint64_t guest_addr, HostFn fn, const char *name);
+void hle_alias(uint64_t guest_addr, uint64_t stub);  // a call to guest_addr runs the slot at stub (dispatch.c)
 void rt_fatal_trace(void) __attribute__((noreturn));
 // runtime/crash_explain.c: the fatal line / crash spot, and the player's explanation of it (the crash dialog)
 void rt_fatal_msg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

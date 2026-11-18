@@ -601,6 +601,7 @@ static void gw_explain(uint64_t pa) {
 
 static char gp_label[512][112];
 static uint32_t gp_draws[512];
+static uint64_t gp_cs[512];  // (a dispatch's row: its shader's content hash - the compute sweep)
 // LARECOMP_VK_DEVLOST_TRACE=1: the last 64 GPU operations, dumped on device loss (with LARECOMP_SYNC_SUBMIT=1 the
 // dump ends with the command list that faulted).
 #define DL_N 4096  // (a power of two)
@@ -665,8 +666,15 @@ static void gp_mark(VkCommandBuffer cb, const char *fmt, ...) {
     vsnprintf(gp_label[gp_n], sizeof gp_label[0], fmt, ap);
     va_end(ap);
     gp_draws[gp_n] = 0;
+    gp_cs[gp_n] = 0;
     gp_n++;
 }
+// (the compute sweep, below with the compute programs: #315)
+static int csw_state, csw_variant, csw_samples;  // (csw_samples: the variant's profiled frames so far)
+static bool gp_sweep;
+static bool csw_tick(void);
+static void csw_start(const double *ms, const uint64_t *cs, int n);
+static void csw_measured(const double *ms, const uint64_t *cs, int n);
 // A slow frame the GPU held up (slowframe.c asks): the frame after it is profiled as LARECOMP_GPUPROF_AT does, and only
 // its heaviest rows go to the log - which pass / dispatch / shader costs the time, on GPUs we can't test here (#299:
 // RX 6700 XT on Linux at 17 fps, #315: RX 580, one view at 18 fps even at 25% resolution). At most 3 a session, a minute
@@ -683,6 +691,7 @@ void vk_gpuprof_request(void) {
     __atomic_store_n(&gp_auto_want, 1, __ATOMIC_RELEASE);
 }
 bool vk_gpuprof_take_request(void) {  // (device.c, at a frame's start)
+    if (csw_tick()) { gp_auto = true; return true; }
     if (!__atomic_exchange_n(&gp_auto_want, 0, __ATOMIC_ACQ_REL)) return false;
     gp_auto = true;
     return true;
@@ -699,9 +708,18 @@ void vk_gpuprof_report(void) {
     if (vkGetQueryPoolResults(g_vk.dev, gp_qp, 0, (uint32_t)gp_n, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
         double per = g_vk.props.limits.timestampPeriod / 1e6, total = (t[gp_n - 1] - t[0]) * per;
         if (gp_auto) {  // (the heaviest rows, heaviest first)
-            static double rows[512][2];
+            static double rows[512][2], rms[512];
+            static uint64_t rcs[512];
             int n = 0;
-            for (int i = 0; i + 1 < gp_n; i++) rows[n][0] = (t[i + 1] - t[i]) * per, rows[n][1] = i, n++;
+            for (int i = 0; i + 1 < gp_n; i++) rows[n][0] = rms[n] = (t[i + 1] - t[i]) * per, rcs[n] = gp_cs[i], rows[n][1] = i, n++;
+            if (gp_sweep) {  // (the compute sweep's frame: its numbers only)
+                LOG("[cs-sweep] variant %d, frame %d: GPU %.2f ms\n", csw_variant, csw_samples + 1, total);
+                csw_measured(rms, rcs, n);
+                gp_sweep = gp_auto = false;
+                gp_n = 0;
+                return;
+            }
+            csw_start(rms, rcs, n);
             qsort(rows, (size_t)n, sizeof rows[0], gp_cmp_ms);
             LOG("[gpuprof] slow frame: GPU %.2f ms in %d rows; the heaviest (LARECOMP_GPUPROF_AUTO=0: off)\n", total, n);
             for (int k = 0; k < n && k < 12; k++) {
@@ -6937,7 +6955,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
 }
 
 // ================================================================== compute
-typedef struct { Prog p; ShaderInfo *si; VkPipeline pipe; uint32_t local[3], shared; uint64_t code, gh; _Atomic int used; } CsProg;  // (gh: the GLSL's hash, first_use)
+typedef struct { Prog p; ShaderInfo *si; VkPipeline pipe; uint32_t local[3], shared; uint64_t code, gh; _Atomic int used; int variant; } CsProg;  // (variant: the compute sweep's)  // (gh: the GLSL's hash, first_use)
 
 // Compute programs run in 32-lane subgroups, as Maxwell's warps do. The game's compute shaders use ballot / shuffle / vote on a 32-lane warp (Pokémon Z-A's GPU culling
 // counts the visible instances of a batch with ballot + a leader's atomicAdd); AMD drivers run compute in 64-lane waves by default (RADV), where those counts are wrong:
@@ -6964,7 +6982,10 @@ static void build_compute(void *arg) {
     uint64_t t0 = SDL_GetTicksNS();
     int bs = build_begin("pipeline cs", cp->code, 0);
     size_t n = 0;
+    extern __thread int vk_spirv_opt_perf;
+    vk_spirv_opt_perf = cp->variant & 2;  // (the compute sweep: SPIR-V optimizer)
     uint32_t *spv = vk_glsl_to_spirv(cp->si->msl, STAGE_COMPUTE, "cs", &n);
+    vk_spirv_opt_perf = 0;
     if (!spv) { atomic_store(&cp->p.state, 2); build_end(bs); return; }
     cp->p.nbinds = vk_reflect(spv, n, cp->p.binds, MAX_BIND);
     VkShaderModule m = vk_module(spv, n);
@@ -7033,7 +7054,10 @@ static bool translate_compute(CsProg *cp, const uint8_t *code, size_t max, uint6
     // (unknown: a record from before the size was kept - the most the hardware has, 48 KB, or what this GPU allows)
     uint32_t smax = g_vk.props.limits.maxComputeSharedMemorySize;
     maxwell_shared_bytes = cp->shared ? cp->shared : smax < 0xC000 ? smax : 0xC000;
+    extern bool maxwell_cs_no_gfast;
+    maxwell_cs_no_gfast = cp->variant & 1;  // (the compute sweep: heap only)
     cp->si = maxwell_translate(code, max, STAGE_COMPUTE, &k);
+    maxwell_cs_no_gfast = false;
     if (ENV("LARECOMP_DUMP_GLSL")) {  // (debug) build/glsl/<code address>.comp
         mkdir("build/glsl", 0755);
         char path[96];
@@ -7049,6 +7073,106 @@ static bool translate_compute(CsProg *cp, const uint8_t *code, size_t max, uint6
         return false;
     }
     return true;
+}
+
+// ---- compute sweep (#315): an RX 580's [gpuprof] rows put Lumiose's three crowd dispatches at 23 + 16 + 9 ms a
+// frame (0.3-0.7 ms on an RTX 4060 Ti), and the first guess - their storage slots in video memory - changed nothing.
+// Rather than a test build per guess, the game times the guesses itself: when a slow frame's profile has compute
+// dispatches over CSW_MS, each such shader (by content, up to CSW_T) gets variants built beside it - 1: loads, stores
+// and atomics on the heap only (no gfast copy / gfind table search per access), 2: SPIR-V optimizer on, 3: both - and
+// each variant in turn replaces it (only once built: the original runs meanwhile), for a profiled frame every
+// CSW_WAIT. The log gets a [cs-sweep] table; a variant at least 30% faster than the original stays in use. Once a
+// session. The variants compute the same thing as the original. LARECOMP_CS_SWEEP=0: off, LARECOMP_CS_SWEEP_MS: the bar.
+#define CSW_T 3
+#define CSW_N 4
+#define CSW_MS (ENV("LARECOMP_CS_SWEEP_MS") ? atof(ENV("LARECOMP_CS_SWEEP_MS")) : 3.0)  // (tests: a lower bar)
+#define CSW_WAIT 6000000000ull
+static uint64_t csw_hash[CSW_T];      // the shaders swept (content hash)
+static int csw_nt;                    // (csw_state: 0 not yet, 1 sweeping, 2 done; csw_variant: the one in use, 0 the original)
+static int csw_pick[CSW_T];           // after the sweep: each shader's variant
+static double csw_ms[CSW_T][CSW_N];   // GPU ms a frame, by variant (0: not measured)
+static uint64_t csw_since;            // when this variant went in, or its last sample (ns)
+#define CSW_SAMPLES 3
+static CsProg *csw_prog[CSW_T][CSW_N];
+// (dispatch) the program to run for cp: a variant of a swept shader when it's built, else cp
+static CsProg *csw_choose(CsProg *cp, NvnShaderStage *ss, uint64_t *hash_out) {
+    uint64_t h = shader_stage_hash(ss);
+    *hash_out = h;
+    if (!csw_state || !h) return cp;
+    int t = 0;
+    while (t < csw_nt && csw_hash[t] != h) t++;
+    if (t == csw_nt) return cp;
+    int v = csw_state == 2 ? csw_pick[t] : csw_variant;
+    if (!v) return cp;
+    CsProg *w = csw_prog[t][v];
+    if (!w) {
+        w = csw_prog[t][v] = calloc(1, sizeof *w);
+        memcpy(w->local, cp->local, sizeof w->local);
+        w->shared = cp->shared, w->code = cp->code, w->variant = v;
+        if (translate_compute(w, (const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, ss->code_addr))
+            run_job(build_compute, w, &w->p.state);
+    }
+    return atomic_load(&w->p.state) == 1 ? w : cp;
+}
+static void csw_start(const double *ms, const uint64_t *cs, int n) {  // (a slow frame's rows)
+    static int off = -1;
+    if (off < 0) off = ENV("LARECOMP_CS_SWEEP") && !atoi(ENV("LARECOMP_CS_SWEEP"));
+    if (off || csw_state) return;
+    for (int i = 0; i < n && csw_nt < CSW_T; i++) {
+        if (!cs[i] || ms[i] < CSW_MS) continue;
+        int t = 0;
+        while (t < csw_nt && csw_hash[t] != cs[i]) t++;
+        if (t == csw_nt) csw_hash[csw_nt++] = cs[i];
+    }
+    if (!csw_nt) return;
+    csw_state = 1, csw_variant = 0, csw_samples = 0, csw_since = plat_now_ns() - CSW_WAIT;  // (v0, the original, first)
+    LOG("[cs-sweep] %d slow compute shader%s: timing the original (v0) and variants 1-%d (1 heap only, 2 "
+        "SPIR-V optimizer, 3 both), %d frames each (LARECOMP_CS_SWEEP=0: off)\n", csw_nt, csw_nt == 1 ? "" : "s", CSW_N - 1,
+        CSW_SAMPLES);
+}
+static void csw_end(void) {
+    csw_state = 2, csw_variant = 0;
+    for (int t = 0; t < csw_nt; t++) {
+        char b[200];
+        int n = snprintf(b, sizeof b, "[cs-sweep] cs %016llx:", (unsigned long long)csw_hash[t]);
+        int best = 0;
+        for (int v = 0; v < CSW_N; v++) {
+            if (csw_ms[t][v] > 0) n += snprintf(b + n, sizeof b - n, " v%d %.2f ms", v, csw_ms[t][v]);
+            else n += snprintf(b + n, sizeof b - n, " v%d -", v);
+            if (v && csw_ms[t][v] > 0 && csw_ms[t][v] < csw_ms[t][best]) best = v;
+        }
+        csw_pick[t] = best && csw_ms[t][best] < 0.7 * csw_ms[t][0] ? best : 0;
+        if (ENV("LARECOMP_CS_VARIANT")) csw_pick[t] = atoi(ENV("LARECOMP_CS_VARIANT")) & 3;  // (tests: this one, whatever the times)
+        LOG("%s -> v%d in use\n", b, csw_pick[t]);
+    }
+}
+// (vk_gpuprof_take_request) the sweep's next profile, when the variant has been in long enough and is built
+static bool csw_tick(void) {
+    if (csw_state != 1 || plat_now_ns() - csw_since < (csw_samples ? 1000000000ull : CSW_WAIT)) return false;
+    bool built = true;
+    for (int t = 0; t < csw_nt && csw_variant; t++)
+        if (!csw_prog[t][csw_variant] || atomic_load(&csw_prog[t][csw_variant]->p.state) != 1) built = false;
+    if (!built && plat_now_ns() - csw_since < 4 * CSW_WAIT) return false;  // (not built yet, or never dispatched: skipped)
+    if (!built) {
+        LOG("[cs-sweep] variant %d: not built in time, skipped\n", csw_variant);
+        if (++csw_variant == CSW_N) csw_end();
+        csw_since = plat_now_ns();
+        return false;
+    }
+    gp_sweep = true;
+    return true;
+}
+// (vk_gpuprof_report) the sweep's profile: this variant's GPU time per shader
+static void csw_measured(const double *ms, const uint64_t *cs, int n) {
+    for (int t = 0; t < csw_nt; t++) {
+        double sum = 0;
+        for (int i = 0; i < n; i++) if (cs[i] == csw_hash[t]) sum += ms[i];
+        csw_ms[t][csw_variant] += sum / CSW_SAMPLES;
+    }
+    csw_since = plat_now_ns();
+    if (++csw_samples < CSW_SAMPLES) return;
+    csw_samples = 0;
+    if (++csw_variant == CSW_N) csw_end();
 }
 
 // Compute programs by code address and fingerprint (cs_kv), and by content - code hash and workgroup size
@@ -7541,6 +7665,8 @@ static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz) {
     if (!st.program || !gx || !gy || !gz) return;
     CsProg *cp = compute_program(st.program);
     if (!cp || atomic_load(&cp->p.state) != 1) { SKIP_CS(!cp ? SK_NO_STAGES : atomic_load(&cp->p.state) == 2 ? SK_CS_FAILED : SK_CS_BUILDING); return; }
+    uint64_t cs_hash = 0;
+    if (g_gpuprof_frame || csw_state) cp = csw_choose(cp, &st.program->stages[5], &cs_hash);  // (#315: the compute sweep)
     {   // LARECOMP_SKIP_CS=<code address hex> (debug): skip that compute shader's dispatches, to see what it does
         static uint64_t skip = ~0ull;
         if (skip == ~0ull) { const char *e = getenv("LARECOMP_SKIP_CS"); skip = e ? strtoull(e, NULL, 16) : 0; }
@@ -7564,8 +7690,9 @@ static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz) {
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
-    gp_mark(cb, "dispatch %ux%ux%u (local %ux%ux%u) cs %llx gmem %d", gx, gy, gz, cp->local[0], cp->local[1], cp->local[2],
-            (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
+    gp_mark(cb, "dispatch %ux%ux%u (local %ux%ux%u) cs %llx gmem %d%s", gx, gy, gz, cp->local[0], cp->local[1], cp->local[2],
+            (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem, cp->variant ? " (sweep variant)" : "");
+    if (g_gpuprof_frame && gp_n) gp_cs[gp_n - 1] = cs_hash ? cs_hash : shader_stage_hash(&st.program->stages[5]);
     dl_note("dispatch %ux%ux%u cs %llx gmem %d", gx, gy, gz, (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
     if (dl_on > 0) vk_checkpoint(cb, dl_n);
     nfeedback = 0;

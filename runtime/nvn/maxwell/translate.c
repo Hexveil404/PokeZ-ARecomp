@@ -33,6 +33,10 @@ __thread uint64_t maxwell_gmem_base, maxwell_gmem_size;
 __thread uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 bool maxwell_gmem_lazy;
 bool maxwell_flat_default = true;
+// (exec.c's compute sweep, #315) translate compute loads / stores / atomics on the heap only, without the device-local
+// copy of the storage buffers (gfast / gfind): one of the variants a slow compute shader is timed in. Set under
+// translate_lock; part of the translation cache key.
+bool maxwell_cs_no_gfast;
 bool maxwell_quad_ops;  // (vk_exec_init: the device has quad subgroup operations in fragment shaders)
 int maxwell_gather_bias_default;  // (vk_exec_init: the sub-texel bits on AMD / Intel Windows; gather_bias)
 bool maxwell_quad_deriv_default;  // (vk_exec_init: AMD; quad_deriv)
@@ -976,7 +980,7 @@ static void emit_atom(Ctx *c, uint64_t w, bool red) {
     strcpy(v, R(b));
     sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < 0x%llxul; uint old = 0u;\n", addr,
        (unsigned long long)maxwell_gmem_base, (unsigned long long)maxwell_gmem_size);
-    bool fast = c->stage == STAGE_COMPUTE;
+    bool fast = c->stage == STAGE_COMPUTE && !maxwell_cs_no_gfast;
     if (fast) {
         c->info->uses_gmem_map = true;
         sp(&c->body, "      uint fw = ok ? gfind(uint(ga)) : 0xFFFFFFFFu;\n");
@@ -1991,7 +1995,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                                                "uint(*(device ushort *)(gmem + ga))", "uint(int(*(device short *)(gmem + ga)))"};
         int nw = size == 5 ? 2 : size >= 6 ? 4 : 1;
         bool lazy_wide = c->glsl && maxwell_gmem_chunk_shift && maxwell_gmem_lazy && nw > 1;  // (one chunk check per access)
-        if (c->glsl && c->stage == STAGE_COMPUTE) {
+        if (c->glsl && c->stage == STAGE_COMPUTE && !maxwell_cs_no_gfast) {
             // Compute (Vulkan): the guest heap is host memory across PCIe on a discrete GPU, and a shader storing to
             // it in a loop crawls (the little chain chomps in Madam MeowMeow's house: ~4 ms a dispatch, ~0.07 ms without
             // the heap stores). The dispatch's storage buffers are copied to a device-local buffer (gfast_, address
@@ -3461,7 +3465,7 @@ static uint64_t cache_key(const uint8_t *blob, size_t max_size, int stage, const
         if ((((const uint64_t *)code)[i] & 0xfff0000000000000ull) == 0xe250000000000000ull) return 0;  // BRX
     // (the straight-line switch is in the key: on and off translations of one shader differ, and a GPU that changes
     // the default - AMD - or a player's LARECOMP_SHADER_FLAT must not load the other form)
-    uint64_t v[7] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size, (uint64_t)maxwell_flat_on() | (uint64_t)loop_guard() << 8 | (uint64_t)maxwell_guard_word << 32, (uint64_t)quad_on() + 2 + 16 * (uint64_t)quad_deriv() + 64 * (uint64_t)!maxwell_output_layer + 128 * (uint64_t)quad_control_on() + 256 * (uint64_t)quad_lockstep(), stage == STAGE_COMPUTE ? maxwell_shared_bytes : 0};
+    uint64_t v[7] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size, (uint64_t)maxwell_flat_on() | (uint64_t)loop_guard() << 8 | (uint64_t)maxwell_guard_word << 32 | (uint64_t)maxwell_cs_no_gfast << 40, (uint64_t)quad_on() + 2 + 16 * (uint64_t)quad_deriv() + 64 * (uint64_t)!maxwell_output_layer + 128 * (uint64_t)quad_control_on() + 256 * (uint64_t)quad_lockstep(), stage == STAGE_COMPUTE ? maxwell_shared_bytes : 0};
     uint64_t h = fnv(fnv(fnv(0xcbf29ce484222325ull, cache_build, sizeof cache_build), v, sizeof v), key, sizeof *key);
     h = fnv(h, blob, (size_t)(code - blob) + end * 8);
     return h ? h : 1;

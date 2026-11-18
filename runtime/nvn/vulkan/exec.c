@@ -7595,18 +7595,12 @@ static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz) {
     }
     gfast_stores = cp->si->uses_gmem_store;
     {
-        // AMD: every bound slot (#315). A compute shader's storage slots sit at 0x310 in its driver constants, which
-        // translate.c's ssbo_read doesn't count (it knows the graphics stages' 0x110 / 0x510), so compute dispatches
-        // never got their slots copied: Lumiose's three crowd dispatches do their atomics and reads on the heap across
-        // PCIe - 0.3-0.7 ms on an RTX 4060 Ti, 23 + 16 + 9 ms on an RX 580 (its log's [gpuprof] rows, Rouge Sector 7 at
-        // 18 fps even at 25% resolution). NVIDIA keeps the old rule: the copies (~6 MB in and back) cost it ~1.5 ms a
-        // frame there. LARECOMP_GFAST_ALL=1 / =0: on / off on any GPU.
+        // LARECOMP_GFAST_ALL=1: every bound slot, =0 / unset: the slots the shader reads (si->ssbo_read). (#315: a
+        // compute shader's slots sit at 0x310 in its driver constants, which ssbo_read doesn't count, so compute
+        // dispatches get none copied. Copying all of them on AMD was tried (8a2f62a8): an RX 580's crowd dispatches
+        // stayed at 33-40 ms - the heap across PCIe wasn't what made them slow - so it's off again.)
         static int all = -1;
-        if (all < 0) {
-            const char *e = getenv("LARECOMP_GFAST_ALL");
-            all = e ? atoi(e) != 0 : g_vk.props.vendorID == 0x1002;
-            if (all && !e) LOG("[vk] compute storage slots copied to video memory: all bound ones (AMD, #315; LARECOMP_GFAST_ALL=0: off)\n");
-        }
+        if (all < 0) { const char *e = getenv("LARECOMP_GFAST_ALL"); all = e && atoi(e) != 0; }
         gfast_mask = all ? 0xFFFF : cp->si->ssbo_read;
     }
     if (cp->si->uses_gmem_map) gfast_prepare(cb);

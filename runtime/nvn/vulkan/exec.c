@@ -7102,17 +7102,19 @@ static CsProg *csw_choose(CsProg *cp, NvnShaderStage *ss, uint64_t *hash_out) {
     int t = 0;
     while (t < csw_nt && csw_hash[t] != h) t++;
     if (t == csw_nt) return cp;
-    int v = csw_state == 2 ? csw_pick[t] : csw_variant;
-    if (!v) return cp;
-    CsProg *w = csw_prog[t][v];
-    if (!w) {
-        w = csw_prog[t][v] = calloc(1, sizeof *w);
+    // (every variant built at once, at the shader's first dispatch in the sweep: AMD's compiler took 23-45 s for each
+    // optimized one of these on an RX 580, and one after the other ran past the wait)
+    for (int k = 1; csw_state == 1 && k < CSW_N; k++) {
+        if (csw_prog[t][k]) continue;
+        CsProg *w = csw_prog[t][k] = calloc(1, sizeof *w);
         memcpy(w->local, cp->local, sizeof w->local);
-        w->shared = cp->shared, w->code = cp->code, w->variant = v;
+        w->shared = cp->shared, w->code = cp->code, w->variant = k;
         if (translate_compute(w, (const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, ss->code_addr))
             run_job(build_compute, w, &w->p.state);
     }
-    return atomic_load(&w->p.state) == 1 ? w : cp;
+    int v = csw_state == 2 ? csw_pick[t] : csw_variant;
+    CsProg *w = v ? csw_prog[t][v] : NULL;
+    return w && atomic_load(&w->p.state) == 1 ? w : cp;
 }
 static void csw_start(const double *ms, const uint64_t *cs, int n) {  // (a slow frame's rows)
     static int off = -1;
@@ -7149,12 +7151,16 @@ static void csw_end(void) {
 // (vk_gpuprof_take_request) the sweep's next profile, when the variant has been in long enough and is built
 static bool csw_tick(void) {
     if (csw_state != 1 || plat_now_ns() - csw_since < (csw_samples ? 1000000000ull : CSW_WAIT)) return false;
-    bool built = true;
-    for (int t = 0; t < csw_nt && csw_variant; t++)
-        if (!csw_prog[t][csw_variant] || atomic_load(&csw_prog[t][csw_variant]->p.state) != 1) built = false;
-    if (!built && plat_now_ns() - csw_since < 4 * CSW_WAIT) return false;  // (not built yet, or never dispatched: skipped)
+    bool built = true, failed = false;
+    for (int t = 0; t < csw_nt && csw_variant; t++) {
+        int s = csw_prog[t][csw_variant] ? atomic_load(&csw_prog[t][csw_variant]->p.state) : 0;
+        if (s != 1) built = false;
+        if (s == 2) failed = true;
+    }
+    // (not built yet: waited up to 2 minutes - a failed build or a shader no longer dispatched is skipped)
+    if (!built && !failed && plat_now_ns() - csw_since < 120000000000ull) return false;
     if (!built) {
-        LOG("[cs-sweep] variant %d: not built in time, skipped\n", csw_variant);
+        LOG("[cs-sweep] variant %d: %s, skipped\n", csw_variant, failed ? "its build failed" : "not built in 2 minutes");
         if (++csw_variant == CSW_N) csw_end();
         csw_since = plat_now_ns();
         return false;

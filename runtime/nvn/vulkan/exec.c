@@ -2586,6 +2586,15 @@ static void translate_globals_set(void) {
     gmem_window_get(&wl, &wn);
     maxwell_gmem_base = gwin_base + wl, maxwell_gmem_size = wn;
     maxwell_gmem_chunk_shift = gmem_chunk_shift();
+    // (translate.c maxwell_gmem_bda) compute shaders by the import's device address: the windows of one import with an
+    // address (AMD: g_vk.gmem_addr), starting where the shaders' offsets do. LARECOMP_VK_CS_BDA=0: the windows; =1 on
+    // any GPU with windows.
+    extern bool maxwell_gmem_bda;
+    extern uint64_t g_gmem_va, g_gmem_guest;
+    static int on = -1;
+    if (on < 0) { const char *e = ENV("LARECOMP_VK_CS_BDA"); on = e ? atoi(e) != 0 : g_vk.props.vendorID == 0x1002; }
+    extern bool maxwell_gmem_lazy;
+    maxwell_gmem_bda = on && !maxwell_gmem_lazy && maxwell_gmem_chunk_shift && g_gmem_va && g_gmem_guest == maxwell_gmem_base;
 }
 // Translates both stages (false: failed, logged)
 static bool translate_program_now(Prog *p) {
@@ -4630,6 +4639,8 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         if (stage == 5) {
             for (int i = 0; i < 16; i++) key.ub[i][0] = st.ubuf[5][i].addr, key.ub[i][1] = st.ubuf[5][i].size;
             key.g[0] = gx, key.g[1] = gy, key.g[2] = gz;
+            extern uint64_t g_gmem_va;
+            key.g[3] = (uint32_t)(g_gmem_va >> 8);  // (a new import: another address in the constants)
         }
         // A compute shader reads its uniform buffers through the table below with global memory loads, which reach
         // only the guest memory window: one outside it read zero (Pokémon Z-A: the rain's particle update read its
@@ -4675,6 +4686,14 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
                 u[0] = (uint32_t)ua; u[1] = (uint32_t)(ua >> 32); u[2] = (uint32_t)us;
                 uint32_t *e = &drv[(0x310 + 16 * i) / 4];
                 e[0] = (uint32_t)sb[i].addr; e[1] = (uint32_t)(sb[i].addr >> 32); e[2] = (uint32_t)sb[i].size;
+            }
+            extern uint64_t g_gmem_va, g_gmem_guest, g_gmem_va_size;  // (translate.c maxwell_gmem_bda: the heap by address)
+            uint64_t wl_, wn_;
+            gmem_window_get(&wl_, &wn_);
+            if (g_gmem_va && g_gmem_guest == gwin_base + wl_) {
+                uint32_t *e = &drv[GMEM_BDA_OFF / 4];
+                uint64_t words = g_gmem_va_size / 4;
+                e[0] = (uint32_t)g_gmem_va; e[1] = (uint32_t)(g_gmem_va >> 32); e[2] = words > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)words;
             }
         } else {
             uint32_t base = 0x110 + 0x100 * (stage == 1 ? 4 : 0);
@@ -6983,7 +7002,7 @@ static void build_compute(void *arg) {
     int bs = build_begin("pipeline cs", cp->code, 0);
     size_t n = 0;
     extern __thread int vk_spirv_opt_perf;
-    vk_spirv_opt_perf = cp->variant & 2;  // (the compute sweep: SPIR-V optimizer)
+    vk_spirv_opt_perf = 0;  // (the compute sweep tried the SPIR-V optimizer: 10-30x slower on an RX 580)
     uint32_t *spv = vk_glsl_to_spirv(cp->si->msl, STAGE_COMPUTE, "cs", &n);
     vk_spirv_opt_perf = 0;
     if (!spv) { atomic_store(&cp->p.state, 2); build_end(bs); return; }
@@ -7055,13 +7074,16 @@ static bool translate_compute(CsProg *cp, const uint8_t *code, size_t max, uint6
     uint32_t smax = g_vk.props.limits.maxComputeSharedMemorySize;
     maxwell_shared_bytes = cp->shared ? cp->shared : smax < 0xC000 ? smax : 0xC000;
     extern bool maxwell_cs_no_gfast;
+    extern bool maxwell_cs_uniform_pc;
     maxwell_cs_no_gfast = cp->variant & 1;  // (the compute sweep: heap only)
+    maxwell_cs_uniform_pc = (cp->variant & 2) != 0;  // (... and one pc a turn)
     cp->si = maxwell_translate(code, max, STAGE_COMPUTE, &k);
-    maxwell_cs_no_gfast = false;
+    maxwell_cs_no_gfast = maxwell_cs_uniform_pc = false;
     if (ENV("LARECOMP_DUMP_GLSL")) {  // (debug) build/glsl/<code address>.comp
         mkdir("build/glsl", 0755);
         char path[96];
-        snprintf(path, sizeof path, "build/glsl/%llx.comp", (unsigned long long)addr);
+        if (cp->variant) snprintf(path, sizeof path, "build/glsl/%llx_v%d.comp", (unsigned long long)addr, cp->variant);  // (a sweep variant)
+        else snprintf(path, sizeof path, "build/glsl/%llx.comp", (unsigned long long)addr);
         FILE *f = fopen(path, "wb");
         if (f) { fputs(cp->si->msl ? cp->si->msl : cp->si->error, f); fclose(f); }
     }
@@ -7079,7 +7101,8 @@ static bool translate_compute(CsProg *cp, const uint8_t *code, size_t max, uint6
 // frame (0.3-0.7 ms on an RTX 4060 Ti), and the first guess - their storage slots in video memory - changed nothing.
 // Rather than a test build per guess, the game times the guesses itself: when a slow frame's profile has compute
 // dispatches over CSW_MS, each such shader (by content, up to CSW_T) gets variants built beside it - 1: loads, stores
-// and atomics on the heap only (no gfast copy / gfind table search per access), 2: SPIR-V optimizer on, 3: both - and
+// and atomics on the heap only (no gfast copy / gfind table search per access), 2: its switch (pc) state machine one
+// pc a turn for the subgroup (translate.c maxwell_cs_uniform_pc), 3: both - and
 // each variant in turn replaces it (only once built: the original runs meanwhile), for a profiled frame every
 // CSW_WAIT. The log gets a [cs-sweep] table; a variant at least 30% faster than the original stays in use. Once a
 // session. The variants compute the same thing as the original. LARECOMP_CS_SWEEP=0: off, LARECOMP_CS_SWEEP_MS: the bar.
@@ -7103,7 +7126,8 @@ static CsProg *csw_choose(CsProg *cp, NvnShaderStage *ss, uint64_t *hash_out) {
     while (t < csw_nt && csw_hash[t] != h) t++;
     if (t == csw_nt) return cp;
     // (every variant built at once, at the shader's first dispatch in the sweep: AMD's compiler took 23-45 s for each
-    // optimized one of these on an RX 580, and one after the other ran past the wait)
+    // optimized one of these on an RX 580, and one after the other ran past the wait. The SPIR-V optimizer variants
+    // timed 10-30x slower there: replaced by the uniform pc ones.)
     for (int k = 1; csw_state == 1 && k < CSW_N; k++) {
         if (csw_prog[t][k]) continue;
         CsProg *w = csw_prog[t][k] = calloc(1, sizeof *w);
@@ -7129,7 +7153,7 @@ static void csw_start(const double *ms, const uint64_t *cs, int n) {  // (a slow
     if (!csw_nt) return;
     csw_state = 1, csw_variant = 0, csw_samples = 0, csw_since = plat_now_ns() - CSW_WAIT;  // (v0, the original, first)
     LOG("[cs-sweep] %d slow compute shader%s: timing the original (v0) and variants 1-%d (1 heap only, 2 "
-        "SPIR-V optimizer, 3 both), %d frames each (LARECOMP_CS_SWEEP=0: off)\n", csw_nt, csw_nt == 1 ? "" : "s", CSW_N - 1,
+        "one pc a turn, 3 both), %d frames each (LARECOMP_CS_SWEEP=0: off)\n", csw_nt, csw_nt == 1 ? "" : "s", CSW_N - 1,
         CSW_SAMPLES);
 }
 static void csw_end(void) {

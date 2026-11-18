@@ -150,6 +150,9 @@ extern bool maxwell_gmem_fs_miss;
 #define GMEM_DIRECT_BINDING 2  // lazy: GDir<k> at 2 + k (k < GMEM_DIRECT_MAX; unused: a small zero buffer)
 #define GMEM_CHUNKS_MAX 256  // chunks at most (HEAP_MAX in 16 MB chunks is 208)
 #define GMEM_CHUNK_SET(stage) ((stage) == STAGE_COMPUTE ? 1 : 2)
+// (maxwell_gmem_bda) a compute dispatch's driver constants hold the heap import's device address there: x, y = address,
+// z = its size in words (inside the 0x500 bytes every compute dispatch uploads; nothing of NVN's lies there)
+#define GMEM_BDA_OFF 0x4F0
 #define GMEM_CHUNK_BINDING 0  // windows: GMem<k> at binding k; lazy: the GChunks table
 #define GMEM_MISS_BINDING 1   // lazy: GMiss { uint n[GMEM_CHUNKS_MAX]; uint w[GMEM_CHUNKS_MAX]; } (accesses, lowest word hit)
 static inline int maxwell_gmem_chunks(void) {

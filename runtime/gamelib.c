@@ -47,6 +47,65 @@ static bool exists(const char *p) {
     return f != NULL;
 }
 
+// Whether the library file is whole: its header and the end of its last section are there (#332: lasgame.dll left
+// damaged on the disk - a crash or power loss while something wrote it, a disk or antivirus fault - failed to load
+// with error 193 at every start, though its .id file still matched; now the start screen builds it again, which links
+// the kept pieces in .gamebuild in a minute or two). The file's own bytes only: the OS loader still has the last word.
+static bool lib_intact(const char *path, char *why, size_t why_size) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { snprintf(why, why_size, "can't be read"); return false; }
+    unsigned char h[4096];
+    size_t n = fread(h, 1, sizeof h, f);
+    fseek(f, 0, SEEK_END);
+    long long size = ftell(f);
+    fclose(f);
+    bool all_zero = true;
+    for (size_t i = 0; i < n && all_zero; i++) all_zero = !h[i];
+    if (n < 64 || all_zero) { snprintf(why, why_size, "%s (%lld bytes)", all_zero ? "all zero" : "too short", size); return false; }
+#ifdef _WIN32
+    if (h[0] != 'M' || h[1] != 'Z') { snprintf(why, why_size, "no MZ header"); return false; }
+    uint32_t pe = *(uint32_t *)(h + 0x3C);
+    if (pe > n - 24 || memcmp(h + pe, "PE\0\0", 4)) { snprintf(why, why_size, "no PE header"); return false; }
+    uint16_t nsec = *(uint16_t *)(h + pe + 6), opt = *(uint16_t *)(h + pe + 20);
+    size_t sec = pe + 24 + opt;
+    if (sec + 40ull * nsec > n) { snprintf(why, why_size, "section table cut"); return false; }
+    long long end = 0;
+    for (int i = 0; i < nsec; i++) {
+        const unsigned char *s = h + sec + 40 * i;
+        long long e = (long long)*(uint32_t *)(s + 20) + *(uint32_t *)(s + 16);  // PointerToRawData + SizeOfRawData
+        if (e > end) end = e;
+    }
+    if (size < end) { snprintf(why, why_size, "cut short: %lld of %lld bytes", size, end); return false; }
+#elif defined(__APPLE__)
+    uint32_t m = *(uint32_t *)h;
+    if (m != 0xFEEDFACFu && m != 0xCAFEBABEu && m != 0xBEBAFECAu) { snprintf(why, why_size, "no Mach-O header"); return false; }
+#else
+    if (memcmp(h, "\x7f" "ELF", 4)) { snprintf(why, why_size, "no ELF header"); return false; }
+    uint64_t shoff = *(uint64_t *)(h + 0x28);
+    uint16_t shentsize = *(uint16_t *)(h + 0x3A), shnum = *(uint16_t *)(h + 0x3C);
+    long long end = (long long)shoff + (long long)shentsize * shnum;
+    if (size < end) { snprintf(why, why_size, "cut short: %lld of %lld bytes", size, end); return false; }
+#endif
+    return true;
+}
+
+// A library whose .id matches but whose file is damaged: told once, then taken for not built (and moved aside so the
+// build writes a fresh one; the build's pieces in .gamebuild are kept)
+static bool lib_usable(const char *path) {
+    char why[128];
+    if (lib_intact(path, why, sizeof why)) return true;
+    static char told[1100];
+    if (strcmp(told, path)) {
+        snprintf(told, sizeof told, "%s", path);
+        LOG("[gamelib] %s is damaged (%s): it will be built again\n", path, why);
+        char bad[1120];
+        snprintf(bad, sizeof bad, "%s.damaged", path);
+        remove(bad);
+        rename(path, bad);
+    }
+    return false;
+}
+
 // The places to look, in order (gamelib.h). Returns how many were filled.
 static int candidates(const char *game_dir, char out[3][1100]) {
     int n = 0;
@@ -73,7 +132,7 @@ bool gamelib_present(const char *game_dir) {
     char c[3][1100];
     int n = candidates(game_dir, c);
     for (int i = 0; i < n; i++)
-        if (exists(c[i]) && id_matches(c[i], want)) return true;
+        if (exists(c[i]) && id_matches(c[i], want) && lib_usable(c[i])) return true;
     return false;
 }
 
@@ -120,6 +179,11 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
             bool given = i == 0 && env && *env;  // LARECOMP_GAME_LIB: loaded as given, the library's own id decides
             if (!given && !id_matches(c[i], want)) {
                 snprintf(g_error, sizeof g_error, "%s was built for another version", c[i]);
+                continue;
+            }
+            if (!given && !lib_usable(c[i])) {
+                snprintf(g_error, sizeof g_error, "%s was damaged on the disk: open ZA Recomp again and the start "
+                         "screen builds it again", c[i]);
                 continue;
             }
             g_tables = open_lib(c[i], want);

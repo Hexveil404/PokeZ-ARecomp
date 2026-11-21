@@ -318,6 +318,32 @@ if args.verify:
     import verify_files, lod_mod
     trpfs, trpfd = open_game(args.romfs[0])
     version, bad = verify_files.check(trpfs, lod_mod.pack_names(trpfd), log=lambda *a: print(*a, flush=True))
+    # (#301: a player's own Switch dump and two other copies were all called damaged - the import had checked them
+    # against the packages' own hash trees. A pack that differs from our copy is damaged only when one of its files
+    # doesn't decompress: one that decodes whole is another legitimate build of it, logged and passed)
+    def pack_decodes(i):
+        fb = FB(trpfs)
+        root = fb.u64(8)
+        n, op = fb.vec(fb.table(root + fb.u32(root))[1])
+        off = fb.u64(op + 8 * i)
+        nf, fp = fb.vec(fb.table(off + fb.u32(off))[1])
+        for j in range(nf):
+            e = fp + 4 * j
+            ft = fb.table(e + fb.u32(e))
+            comp = trpfs[ft[1]] if len(ft) > 1 and ft[1] else 0xFF
+            size = fb.u64(ft[3]) if len(ft) > 3 and ft[3] else 0
+            dn, dp = fb.vec(ft[4])
+            try:
+                unpack(comp, size, trpfs[dp:dp + dn])
+            except Exception as ex:
+                print('pack %d (%s) file %d of %d: %d bytes from %d at +%x do not decompress (%s)' % (
+                    i, dict(bad).get(i, '?'), j, nf, size, dn, dp, ex), flush=True)
+                return False
+        return True
+    if bad and bad[0][0] >= 0:
+        intact = [(i, nm) for i, nm in bad if pack_decodes(i)]
+        for i, nm in intact: print('pack %d (%s): differs from our copy but every file decompresses: kept' % (i, nm), flush=True)
+        bad = [b for b in bad if b not in intact]
     head = 'unknown' if not version else 'damaged %s %d' % (version, len(bad)) if bad else 'ok ' + version
     lines = [head] + [n for _, n in bad]
     print(*lines, sep='\n', flush=True)

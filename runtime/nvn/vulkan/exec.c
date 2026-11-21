@@ -1526,7 +1526,8 @@ void vk_exec_init(void) {
     }
     extern bool maxwell_quad_control_ok, maxwell_quad_control_default;
     maxwell_quad_control_ok = g_vk.quad_control;  // (translate.c quad_control_on: full quads where the game derives itself)
-    maxwell_quad_control_default = g_vk.quad_control && g_vk.props.vendorID == 0x1002;
+    // (Intel too: #327, an Arc B580 on DirectX 12 had AMD's grainy irises - its driver has quad control, the lockstep was off)
+    maxwell_quad_control_default = g_vk.quad_control && (g_vk.props.vendorID == 0x1002 || g_vk.props.vendorID == 0x8086);
     {
         const char *qc = getenv("LARECOMP_SHADER_QUAD_CONTROL");
         bool qc_on = g_vk.quad_control && (qc ? atoi(qc) != 0 : maxwell_quad_control_default);  // (as translate.c decides)

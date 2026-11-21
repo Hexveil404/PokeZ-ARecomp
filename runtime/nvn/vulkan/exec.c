@@ -7106,7 +7106,7 @@ static bool translate_compute(CsProg *cp, const uint8_t *code, size_t max, uint6
 // pc a turn for the subgroup (translate.c maxwell_cs_uniform_pc), 3: both - and
 // each variant in turn replaces it (only once built: the original runs meanwhile), for a profiled frame every
 // CSW_WAIT. The log gets a [cs-sweep] table; a variant at least 30% faster than the original stays in use. Once a
-// session. The variants compute the same thing as the original. LARECOMP_CS_SWEEP=0: off, LARECOMP_CS_SWEEP_MS: the bar.
+// session. The variants compute the same thing as the original. LARECOMP_CS_SWEEP=1: on (off by default), LARECOMP_CS_SWEEP_MS: the bar.
 #define CSW_T 3
 #define CSW_N 4
 #define CSW_MS (ENV("LARECOMP_CS_SWEEP_MS") ? atof(ENV("LARECOMP_CS_SWEEP_MS")) : 3.0)  // (tests: a lower bar)
@@ -7143,7 +7143,9 @@ static CsProg *csw_choose(CsProg *cp, NvnShaderStage *ss, uint64_t *hash_out) {
 }
 static void csw_start(const double *ms, const uint64_t *cs, int n) {  // (a slow frame's rows)
     static int off = -1;
-    if (off < 0) off = ENV("LARECOMP_CS_SWEEP") && !atoi(ENV("LARECOMP_CS_SWEEP"));
+    // (off by default since a157c605 fixed #315 at its cause: the sweep builds three variants of a shader mid-game,
+    // 23-45 s each on AMD - a diagnostic for a log, LARECOMP_CS_SWEEP=1)
+    if (off < 0) off = !ENV("LARECOMP_CS_SWEEP") || !atoi(ENV("LARECOMP_CS_SWEEP"));
     if (off || csw_state) return;
     for (int i = 0; i < n && csw_nt < CSW_T; i++) {
         if (!cs[i] || ms[i] < CSW_MS) continue;
@@ -7154,7 +7156,7 @@ static void csw_start(const double *ms, const uint64_t *cs, int n) {  // (a slow
     if (!csw_nt) return;
     csw_state = 1, csw_variant = 0, csw_samples = 0, csw_since = plat_now_ns() - CSW_WAIT;  // (v0, the original, first)
     LOG("[cs-sweep] %d slow compute shader%s: timing the original (v0) and variants 1-%d (1 heap only, 2 "
-        "one pc a turn, 3 both), %d frames each (LARECOMP_CS_SWEEP=0: off)\n", csw_nt, csw_nt == 1 ? "" : "s", CSW_N - 1,
+        "one pc a turn, 3 both), %d frames each (LARECOMP_CS_SWEEP=1)\n", csw_nt, csw_nt == 1 ? "" : "s", CSW_N - 1,
         CSW_SAMPLES);
 }
 static void csw_end(void) {

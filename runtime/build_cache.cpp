@@ -94,8 +94,28 @@ void replace(const fs::path &from, const fs::path &to) {
     plain(from);
     plain(to);
 #ifdef _WIN32
-    need(MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0,
-         "Cannot replace a build file.");
+    // (#328: the old lasgame.dll still open - a game process left running, an antivirus scanning it - and every build
+    // ended in "Cannot replace a build file" after 10 minutes of compiling. A file in use can't be overwritten but can
+    // be renamed: a few tries first (a scan lets go), then the old one is moved aside as <name>.old-<n>, removed by
+    // the next build once nothing holds it)
+    DWORD err = 0;
+    for (int attempt = 0; attempt < 6; attempt++) {
+        if (MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return;
+        err = GetLastError();
+        if (err != ERROR_ACCESS_DENIED && err != ERROR_SHARING_VIOLATION && err != ERROR_LOCK_VIOLATION) break;
+        if (attempt >= 2 && fs::exists(to)) {
+            auto aside = to;
+            aside += ".old-" + std::to_string(GetTickCount64());
+            if (MoveFileExW(to.c_str(), aside.c_str(), 0))
+                fprintf(stderr, "[gamebuild] %s was in use (error %lu): moved aside\n", to.filename().u8string().c_str(),
+                        err);
+        }
+        Sleep(500u << (attempt < 3 ? attempt : 3));
+    }
+    char msg[200];
+    snprintf(msg, sizeof msg, "Cannot replace a build file (%s, Windows error %lu: is another ZA Recomp window still "
+             "open?).", to.filename().u8string().c_str(), err);
+    throw std::runtime_error(msg);
 #else
     fs::rename(from, to);
 #endif
@@ -422,6 +442,11 @@ extern "C" bool build_cache_publish(BuildCache *c, const char *name, const char 
         std::error_code ec;
         fs::remove(c->root / "previous-library", ec);
         fs::remove(c->root / "previous-id", ec);
+        // (old libraries a replace moved aside while they were in use: gone once nothing holds them)
+        for (auto it = fs::directory_iterator(lib.parent_path(), ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+            auto f = it->path().filename().u8string();
+            if (f.rfind(std::string(name) + ".old-", 0) == 0) fs::remove(it->path(), ec), ec.clear();
+        }
         try { finish(c); }
         catch (const std::exception &e) { // The installed library is already good; cleanup can be retried with Clear.
             fprintf(stderr, "[gamebuild] cache cleanup: %s\n", e.what());

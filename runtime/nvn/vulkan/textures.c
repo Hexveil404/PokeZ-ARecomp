@@ -211,9 +211,22 @@ static bool tex_scalable(const NvnTexture *t) {
     static int off = -1;  // (per texture lookup: cached)
     if (off < 0) off = getenv("LARECOMP_NO_SCALE") != NULL;
     if (off) return false;
-    if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width < 32 || t->height < 16) return false;
+    if (t->samples > 1 || !(t->flags & 8) || t->width < 32 || t->height < 16) return false;
     float a = (float)t->width / (float)t->height;
-    return a > 1.74f && a < 1.81f;
+    if (t->target == 1 && a > 1.74f && a < 1.81f) return true;
+    // A render target of the screen's height but narrower than it, drawn with the screen's depth: Pokémon Z-A's outfit
+    // and appearance previews (Outfit & Looks, boutiques, salon) draw the player into a 1600x1080 x 6 array with the
+    // scene's 1920x1080 depth. Left at the game's size next to a scaled depth, the pass's area was the smaller of the
+    // two - the depth's scaled size - so only the preview's top-left 960x540 (render scale 0.5) or 1280x720 (0.667)
+    // was drawn and the rest showed old contents (issues #318, #344). Scaled like the depth, both have one size again.
+    if ((t->target == 1 || t->target == 4) && (t->height == 1080 || t->height == 720) && t->width >= t->height &&
+        a <= 1.74f) {
+        static int nlog;
+        if (nlog++ < 4) LOG("[vk] render target %ux%u (%u layers) scaled with the screen (its height)\n", t->width, t->height,
+                            t->target == 4 ? t->depth : 1);
+        return true;
+    }
+    return false;
 }
 
 // Shadow maps (square depth render targets, also arrays: Pokemon Z-A's cascades are 1024x1024 x 3) keep the game's size

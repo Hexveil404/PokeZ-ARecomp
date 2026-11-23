@@ -561,16 +561,23 @@ static void gmir_copy_back(VkCommandBuffer cb);
 bool g_gpuprof_frame;
 static VkQueryPool gp_qp;
 static int gp_n;
-// (debug) LARECOMP_GPU_WRITES=1: the guest memory each GPU operation may write (a compute dispatch's storage
-// buffers, a storing dispatch's copy back, transform feedback buffers, buffer copies, counters), the last GW_N of
-// them, so a block found overwritten (ind_args_bad / ib_overrun: indirect parameters holding other data, #70 #81
-// #82 #86) is logged with the operations that wrote over it in the frames before.
+// LARECOMP_GPU_WRITES=1: the guest memory each GPU operation may write (a compute dispatch's storage buffers, a
+// storing dispatch's copy back, transform feedback buffers, buffer copies, counters), the last GW_N of them, so a block
+// found overwritten (ind_args_bad / ib_overrun: indirect parameters holding other data, #70 #81 #82 #86) is logged with
+// the operations that wrote over it in the frames before ("[gpuw]", 6 at most). On by default on AMD: #340 #345 #347
+// (and the RX 550s' #210 #336 #339) - without the overlap there, blocks the GPU reads in place hold floats for counts
+// minutes in (seconds on an RX 550), the GPU is on them 7-10 s and the game stops on its fence; none of it shows on
+// NVIDIA with AMD's paths forced, so the next such log names the writer. A ring of 16k entries, a few hundred notes a
+// frame. =0: off.
 #define GW_N 16384  // (a power of two)
 static struct { uint64_t lo, hi, frame, prog; const char *what; } gw_ring[GW_N];
 static unsigned gw_n;
 static int gw_on = -1;
 static void gw_note(const char *what, uint64_t lo, uint64_t size, uint64_t prog) {
-    if (gw_on < 0) gw_on = ENV("LARECOMP_GPU_WRITES") && atoi(ENV("LARECOMP_GPU_WRITES"));
+    if (gw_on < 0) {
+        gw_on = ENV("LARECOMP_GPU_WRITES") ? atoi(ENV("LARECOMP_GPU_WRITES")) != 0 : g_vk.props.vendorID == 0x1002;
+        if (gw_on) LOG("[vk] GPU write report on: an overwritten indirect block names its writers ([gpuw]; LARECOMP_GPU_WRITES=0: off)\n");
+    }
     if (!gw_on || !lo || !size) return;
     extern uint64_t renderer_exec_frame(void);
     unsigned i = gw_n++ & (GW_N - 1);
@@ -578,6 +585,7 @@ static void gw_note(const char *what, uint64_t lo, uint64_t size, uint64_t prog)
 }
 static void gw_explain(uint64_t pa) {
     static int n;
+    if (gw_on < 0) gw_note("", 0, 0, 0);  // (decides gw_on)
     if (gw_on <= 0 || n >= 6) return;
     n++;
     extern uint64_t renderer_exec_frame(void);

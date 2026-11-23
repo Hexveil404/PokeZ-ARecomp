@@ -271,8 +271,6 @@ bool settings_video_matches_recommended(void) {
 // LARECOMP_FRAME_DT=0 / 1: a test override of the frame_dt setting. Applied to g_settings at load, so F1 shows (and can
 // change) the value it set; not read again after that.
 static void settings_env_overrides(void) {
-    const char *mode = getenv("RECOMPLAUNCHER_MODE");
-    if (mode && !strcmp(mode, "bigpicture")) g_settings.fullscreen = true;
     const char *e = getenv("LARECOMP_FRAME_DT");
     if (e && *e) g_settings.frame_dt = atoi(e) != 0;
     e = getenv("LARECOMP_SMOOTH_ANIM");  // (same: a test override of smooth_anim)

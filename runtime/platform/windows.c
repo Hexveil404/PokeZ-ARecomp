@@ -602,7 +602,7 @@ static void log_to_file_without_console(void) {
     snprintf(g_log_tag, sizeof g_log_tag, "[session] %s\n", name ? name + 1 : g_log_path);
     // A GUI-subsystem process with no inherited handles starts with invalid CRT stream descriptors.
     // Give both streams real descriptors before duplicating the shared-delete log handle into them.
-    // (stdout kept when it was given on its own: RecompLauncher's setup reads its "progress" lines there, PR #351)
+    // (stdout kept when it was given on its own: whoever started us reads it)
     HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
     bool out_given = fresh && out && out != INVALID_HANDLE_VALUE && GetFileType(out) != FILE_TYPE_UNKNOWN;
     if (!freopen("NUL", "ab", stderr) || (!out_given && !freopen("NUL", "ab", stdout))) {

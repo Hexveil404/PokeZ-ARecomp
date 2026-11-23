@@ -295,12 +295,6 @@ static void log_startup_info(void) {
 
 int main(int argc, char **argv) {
     plat_init();
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--prepare")) {
-            extern int launcher_prepare(int argc, char **argv);
-            return launcher_prepare(argc, argv);
-        }
-    }
     log_startup_info();
     if (getenv("LARECOMP_REEXEC")) {  // (reserve_guest_space started this process again)
         const char *why = getenv("LARECOMP_REEXEC_WHY"), *n = getenv("LARECOMP_REEXEC");
@@ -318,7 +312,7 @@ int main(int argc, char **argv) {
     // delete game files, and a test's extracted/ may be a link to someone else's. Where it would come up (a forced
     // start screen, "Title screen" in game) the app exits instead. =0: off (start screen tests, scratch data root).
     const char *nl = getenv("LARECOMP_NO_LAUNCHER");
-    bool no_launcher = (nl && *nl && strcmp(nl, "0")) || getenv("RECOMPLAUNCHER");
+    bool no_launcher = nl && *nl && strcmp(nl, "0");
     bool skip_launcher = no_launcher || getenv("LARECOMP_INPUT");  // tests boot straight in
     if (getenv("LARECOMP_FORCE_LAUNCHER")) skip_launcher = false;  // (test: the start screen, then the scripted input)
     static char arg_root[1024], build_mod[1024];

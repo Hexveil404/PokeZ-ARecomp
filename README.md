@@ -101,20 +101,6 @@ On a Mac, use [MonZaMac](https://github.com/lucabravi/MonZaMac) by
 
 ## Installation
 
-### RecompLauncher
-
-With a release that includes `recomplauncher.json`, install ZA Recomp in
-[RecompLauncher](https://recomplauncher.com/) and open **Easy Setup**. Select your extracted game
-folder (`exefs` and `romfs`) or your `.nup`, `.nsp`, or `.xci` base game. For a packaged game, you can
-also select a separate `.nsp` update and the optional *Mega Dimension* DLC. Easy Setup asks for
-`prod.keys` and `title.keys` from your own Switch when you select an encrypted package.
-
-RecompLauncher imports and compiles the game before you press **Play**. It keeps saves, settings,
-and built game files in the installation's `recompdata` folder. To bring over an existing save,
-close the game and copy your `save` folder into `recompdata`.
-
-### Standalone
-
 1. Download the latest `ZA-Recomp-windows.zip` from [Releases](https://github.com/Hexveil404/PokeZ-ARecomp/releases/latest)
    and extract it to a folder of your choice (for example `C:\Games\ZA Recomp`).
 2. Prepare your own copy of the game in a folder, in one of two ways:

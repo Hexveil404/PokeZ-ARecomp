@@ -96,8 +96,7 @@ static bool writable(const char *dir) {
 
 static void fail(const char *msg) {
     fprintf(stderr, "%s\n", msg);
-    if (!getenv("RECOMPLAUNCHER") && !getenv("LARECOMP_HEADLESS"))
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "ZA Recomp", msg, NULL);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "ZA Recomp", msg, NULL);
     exit(1);
 }
 
@@ -220,8 +219,7 @@ static bool pointer_root(const char *home, char *out, size_t n) {
 }
 
 bool rt_data_root_early(char *out, size_t n) {
-    const char *env = getenv("RECOMPLAUNCHER_DATA");
-    if (!env || !*env) env = getenv("LARECOMP_DATA_ROOT");
+    const char *env = getenv("LARECOMP_DATA_ROOT");
     if (env && *env) return (size_t)snprintf(out, n, "%s", env) < n;
     if (is_dir("extracted")) return false;  // (dev mode)
     char home[1024];
@@ -295,8 +293,7 @@ void rt_paths_init(void) {
     exe_dir(g_exe_dir, sizeof g_exe_dir);
     default_home(g_home, sizeof g_home);
     char root[1024];
-    const char *env = getenv("RECOMPLAUNCHER_DATA");
-    if (!env || !*env) env = getenv("LARECOMP_DATA_ROOT");
+    const char *env = getenv("LARECOMP_DATA_ROOT");
     if (env && *env) snprintf(root, sizeof root, "%s", env);
     else if (is_dir("extracted")) snprintf(root, sizeof root, "%s", g_start), g_dev = true;  // dev / portable: as before
     else {
@@ -307,7 +304,6 @@ void rt_paths_init(void) {
             char msg[1400];
             snprintf(msg, sizeof msg, "LAS Recomp's data folder isn't available:\n%s\n\nIf it's on a drive that isn't "
                      "connected, connect it and try again.", ptr);
-            if (getenv("LARECOMP_HEADLESS") || getenv("RECOMPLAUNCHER")) fail(msg);
             const SDL_MessageBoxButtonData b[] = {{SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "Try again"},
                                                   {0, 1, "Use the default folder"},
                                                   {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 2, "Quit"}};
@@ -481,8 +477,6 @@ unsigned long long rt_game_files_size(const char *game_dir) {
 
 // ---- choosing another data folder, moving the data there (the start screen: runtime/ui/launcher.mm)
 const char *rt_data_root_fixed(void) {
-    const char *managed = getenv("RECOMPLAUNCHER_DATA");
-    if (managed && *managed) return "Managed by RecompLauncher.";
     const char *env = getenv("LARECOMP_DATA_ROOT");
     if (env && *env) return "Set by LARECOMP_DATA_ROOT.";
     if (g_dev) return "A source checkout uses its own folder.";

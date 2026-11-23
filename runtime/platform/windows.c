@@ -602,10 +602,7 @@ static void log_to_file_without_console(void) {
     snprintf(g_log_tag, sizeof g_log_tag, "[session] %s\n", name ? name + 1 : g_log_path);
     // A GUI-subsystem process with no inherited handles starts with invalid CRT stream descriptors.
     // Give both streams real descriptors before duplicating the shared-delete log handle into them.
-    // (stdout kept when it was given on its own: whoever started us reads it)
-    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
-    bool out_given = fresh && out && out != INVALID_HANDLE_VALUE && GetFileType(out) != FILE_TYPE_UNKNOWN;
-    if (!freopen("NUL", "ab", stderr) || (!out_given && !freopen("NUL", "ab", stdout))) {
+    if (!freopen("NUL", "ab", stderr) || !freopen("NUL", "ab", stdout)) {
         CloseHandle(file); g_log_path[0] = 0; ReleaseMutex(g_log_mutex); return;
     }
     int fd = _open_osfhandle((intptr_t)file, _O_WRONLY | _O_APPEND | _O_BINARY);
@@ -615,7 +612,7 @@ static void log_to_file_without_console(void) {
     }
     _close(fd);
     setvbuf(stderr, NULL, _IONBF, 0);
-    if (!out_given) _dup2(_fileno(stderr), _fileno(stdout));
+    _dup2(_fileno(stderr), _fileno(stdout));
     _putenv_s("LASRECOMP_LOG_FILE", g_log_path);
     if (fresh) {
         fputs(g_log_tag, stderr);

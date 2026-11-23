@@ -97,6 +97,7 @@ cp README.md LICENSE "$D/"  # (licenses and source links of the bundled componen
 mkdir -p "$D/docs" && cp docs/XBOX-ATTACK-LAYOUT.md "$D/docs/"
 cp tools/za/za-default.ini "$D/za-default.ini"  # (not larecomp.ini: the data folder holds the player's own)
 cp tools/linux/AppRun "$APPDIR/" && chmod +x "$APPDIR/AppRun"
+cp recomplauncher.json "$APPDIR/"
 cat > "$APPDIR/zarecomp.desktop" <<EOF
 [Desktop Entry]
 Type=Application
@@ -151,13 +152,17 @@ APPIMAGE_EXTRACT_AND_RUN=1 ARCH=$ARCH build/linux/src/appimagetool-x86_64.AppIma
     --runtime-file build/linux/src/runtime-x86_64 "$APPDIR" "$OUT"
 ls -la "$OUT"
 
-# ---- zip: the AppDir as a folder (AppRun starts it; everything it writes still goes to ~/.local/share/zarecomp)
+# The tarball and AppImage contain the same portable folder; neither needs APPIMAGE to run.
+tar -czf "build/dist/ZA Recomp-$VERSION-linux-$ARCH.tar.gz" -C "$APPDIR" .
+
+# ---- zip: the same folder with zarecomp as its entry point
 if [ "$ZIP" = 1 ]; then
     ZOUT="$PWD/build/dist/ZA Recomp-$VERSION-linux-$ARCH.zip"
     ZD=$L/zip/"ZA Recomp-$VERSION-linux-$ARCH"
     rm -rf "$L/zip" "$ZOUT" && mkdir -p "$ZD"
     cp -R "$APPDIR/usr" "$APPDIR/zarecomp.desktop" "$APPDIR/zarecomp.png" "$ZD/"
     cp "$APPDIR/AppRun" "$ZD/zarecomp"  # (AppRun finds usr/bin next to itself)
+    cp "$APPDIR/recomplauncher.json" "$ZD/"
     (cd "$L/zip" && zip -qry9 "$ZOUT" "ZA Recomp-$VERSION-linux-$ARCH")  # (-y: links as links; modes are kept)
     ls -la "$ZOUT"
 fi

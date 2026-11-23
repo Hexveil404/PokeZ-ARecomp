@@ -178,14 +178,35 @@ static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
 // while playing).
 static __thread unsigned t_dcache_gen;  // (g_dcache_gen: with the overrides, above)
 
-// Guest setjmp sites of this thread (cpu.h RtJmp): one per guest jmp_buf, the oldest replaced when full
-#define NJMP 32
+// Guest setjmp sites of this thread (cpu.h RtJmp): one per guest jmp_buf. A site whose function has returned is never
+// told to us, so the table fills with dead ones; it used to replace them in turn, the oldest first - and the oldest is
+// the outermost try, still live: #342 (2.0.2, after 20 and 48 min) was f_70017ad8c0's try 3.4 KB under the top of the
+// main thread's stack, replaced after 32 other jmp_bufs, and the game's longjmp back to it found nothing: "no function
+// at 70017ad904" (its setjmp's return). Now a dead site goes first: one of the same stack (its Cpu: each fiber has its
+// own, runtime/hle/fiber.c - kept beside the table, cpu.h's RtJmp is in the game code's id) deeper than where this
+// setjmp is called from. All live: the deepest of this stack (the most recent, the likeliest to end soon), never the
+// outermost. A longjmp also drops the sites under the one it goes to. "[setjmp]" logs a live site replaced (the next
+// crash of this kind would say so).
+#define NJMP 64
 static __thread RtJmp jmps[NJMP];
+static __thread Cpu *jmp_cpu[NJMP];
 static __thread unsigned jmp_next;
 RtJmp *rt_setjmp_site(Cpu *c, uint64_t ret) {
     RtJmp *j = NULL;
     for (int i = 0; i < NJMP && !j; i++) if (jmps[i].buf == c->x[0]) j = &jmps[i];
-    if (!j) j = &jmps[jmp_next++ % NJMP];
+    for (int i = 0; i < NJMP && !j; i++)  // free, or dead: its frame has returned (deeper than this one, same stack)
+        if (!jmps[i].buf || (jmp_cpu[i] == c && jmps[i].sp < c->sp)) j = &jmps[i];
+    if (!j) {
+        int deep = -1;
+        for (int i = 0; i < NJMP; i++)
+            if (jmp_cpu[i] == c && (deep < 0 || jmps[i].sp < jmps[deep].sp)) deep = i;
+        j = deep >= 0 ? &jmps[deep] : &jmps[jmp_next++ % NJMP];
+        static int nlog;
+        if (nlog++ < 5)
+            LOG("[setjmp] %d live sites on this thread: replaced the one for %llx (sp %llx)\n", NJMP,
+                (unsigned long long)j->ret, (unsigned long long)j->sp);
+    }
+    jmp_cpu[j - jmps] = c;
     j->buf = c->x[0], j->ret = ret, j->sp = c->sp;
     return j;
 }
@@ -420,7 +441,15 @@ __attribute__((noinline)) static GuestFn dispatch_slow(Cpu *c) {
     bool blank = f && g_nmodules > 2 && mod_blank(pc);
     if (!f || blank) {
         for (int i = 0; i < NJMP; i++)  // a guest longjmp returning to its setjmp
-            if (jmps[i].buf && jmps[i].ret == pc && jmps[i].sp == c->sp) longjmp(jmps[i].host, 1);
+            if (jmps[i].buf && jmps[i].ret == pc && jmps[i].sp == c->sp) {
+                for (int k = 0; k < NJMP; k++)  // (the sites it jumps past are dead: deeper on this stack)
+                    if (jmp_cpu[k] == c && jmps[k].buf && jmps[k].sp < c->sp) jmps[k].buf = 0;
+                longjmp(jmps[i].host, 1);
+            }
+        for (int i = 0; i < NJMP; i++)  // (a setjmp's return without its site: say which part didn't match)
+            if (jmps[i].buf && jmps[i].ret == pc)
+                LOG("[setjmp] a site for %llx: sp %llx, this jump's %llx, %s\n", (unsigned long long)pc,
+                    (unsigned long long)jmps[i].sp, (unsigned long long)c->sp, jmp_cpu[i] == c ? "same stack" : "another stack");
         if (g_nmodules > 2) {  // a code mod's trampoline written after the last hook pass, through a view it keeps mapped
             extern void hooks_capture(void);  // (exlaunch's pool: Lumiose Online's first "call the original")
             hooks_capture();

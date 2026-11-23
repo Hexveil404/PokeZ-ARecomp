@@ -115,10 +115,7 @@
     {
       "id": "main",
       "format": "ini",
-      "file": [{ "path": "{data}/larecomp.ini" }],
-      "ensure": {
-        "video_recommended": "done"
-      }
+      "file": [{ "path": "{data}/larecomp.ini" }]
     }
   ],
   "saves": [

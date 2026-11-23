@@ -2,7 +2,8 @@
 #   --stones   the Ranked Battle Mega Stones (Greninjite, Delphoxite, Chesnaughtite, Baxcalibrite, Sceptilite,
 #              Swampertite, Blazikenite) in Quasartico's Mega Shard exchange, from the day it opens, 360 shards each
 #   --tradeevo trade evolutions without a trade: plain trades at level 40, trades with an item by holding the item
-#              (the evolve icon appears, day or night) - after the "No More Trade Evolutions" mod's rules
+#              (the evolve icon appears, day or night) - after the "No More Trade Evolutions" mod's rules; and
+#              Inkay, which needs the console held upside down (no gyro on a PC), at its own level (30) (#349)
 # The tables (flatbuffers) are the game's own; what is added goes in front of the old data (item rows, the shop's list:
 # the old objects stay where they are, a new root lists them) or at its end (the evolution lists, plain structs), so
 # nothing has to be understood beyond the fields named here. make() writes loose files under out/romfs at their own
@@ -16,7 +17,7 @@ P_PERSONAL = 'avalon/data/personal_array.bin'
 P_PLIB = 'world/ik_data/battle/plib_item_conversion/plib_item_conversion_array.bin'
 P_ITEM = 'world/exl/item_data/item_data/item_data.bin'
 P_LINEUP = 'world/exl/shop/shop_item_lineup/shop_item_lineup.bin'
-TRADE, TRADE_ITEM, LEVEL, HELD_DAY, HELD_NIGHT = 5, 6, 4, 19, 20  # evolution methods
+TRADE, TRADE_ITEM, LEVEL, HELD_DAY, HELD_NIGHT, UPSIDE_DOWN = 5, 6, 4, 19, 20, 28  # evolution methods
 
 
 class FB:
@@ -184,7 +185,8 @@ def evolutions(fb):
 
 def patch_trade(personal, plib):
     """-> (personal bytes, plib bytes, evolutions added): a level 40 evolution next to each trade, held-item ones (day
-    and night) next to each trade with an item; the items get held-item numbers where they have none"""
+    and night) next to each trade with an item, a plain one at the same level next to each upside-down one (Inkay: 30);
+    the items get held-item numbers where they have none"""
     fb, pb = FB(personal), FB(plib)
     prow = plib_rows(pb)
     num = {i: p for _, i, p in prow if i}
@@ -203,8 +205,8 @@ def patch_trade(personal, plib):
     for t, at, ev in evolutions(fb):
         new = []
         for lv, m, arg, r3, r4, r5, sp, form in ev:
-            if m == TRADE and not any(e[1] == LEVEL and e[6:] == (sp, form) for e in ev):
-                new.append((40, LEVEL, 0, 0, 0, 0, sp, form))
+            if m in (TRADE, UPSIDE_DOWN) and not any(e[1] == LEVEL and e[6:] == (sp, form) for e in ev):
+                new.append((40 if m == TRADE else lv, LEVEL, 0, 0, 0, 0, sp, form))
             if m == TRADE_ITEM:
                 for hm in (HELD_DAY, HELD_NIGHT):
                     if not any(e[1] == hm and e[6:] == (sp, form) for e in ev):

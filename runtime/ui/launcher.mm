@@ -1064,7 +1064,8 @@ extern "C" void launcher_content_kick(void) {
     char src[96] = "", had[96] = "";
     struct stat sb;
     if (stat(data.c_str(), &sb)) return;
-    snprintf(src, sizeof src, "%lld %lld %s", (long long)sb.st_size, (long long)sb.st_mtime, content_want());
+    // (r2: the tables gained Inkay's evolution (#349) - copies made before are made again)
+    snprintf(src, sizeof src, "%lld %lld %s r2", (long long)sb.st_size, (long long)sb.st_mtime, content_want());
     if (FILE *f = fopen("cache/content.src", "rb")) { size_t n = fread(had, 1, sizeof had - 1, f); had[n] = 0; fclose(f); }
     if (!strcmp(src, had) && launcher_content_state() == 2) return;
     if (!rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool))

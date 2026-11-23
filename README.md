@@ -341,7 +341,8 @@ game itself; both options are off by default and apply from the next start.
   [above](#why-it-works-this-way-and-why-theres-no-ranked-mode)). On, Quasartico Inc.'s Mega Shard exchange sells them
   from the day it opens, 360 Mega Shards each.
 - **Trade evolutions without trading:** Pokémon that evolve when traded also evolve at level 40, and those that evolve
-  when traded holding an item can evolve while holding it (the evolve icon appears, day or night). The rules are those
+  when traded holding an item can evolve while holding it (the evolve icon appears, day or night). Inkay, which needs
+  the console held upside down, evolves at level 30 as it is. The rules are those
   of the "No More Trade Evolutions" mod; unlike a mod's files, the tables are made from your own game version's. Link
   trades still work as before.
 - **How:** the item, shop and evolution tables are made from your own game files into `cache/content/` (a second or

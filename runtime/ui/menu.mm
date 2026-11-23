@@ -1312,12 +1312,14 @@ static void tab_content(bool in_game) {
                TR("Pokémon that evolve when traded (Kadabra, Haunter, Machoke, Phantump, Pumpkaboo...) also evolve at "
                   "level 40; those that evolve when traded holding an item (Onix and Scyther with a Metal Coat, "
                   "Slowpoke with a King's Rock...) can evolve while holding it: the evolve icon appears, day or night. "
+                  "Inkay, which needs the console held upside down, evolves at level 30 as it is. "
                   "After the \"No More Trade Evolutions\" mod's rules. Trading still works. Made from your own game "
                   "files; applies from the next start.",
                   "Pokémon que evoluem por troca (Kadabra, Haunter, Machoke, Phantump, Pumpkaboo...) também evoluem no "
                   "nível 40; os que evoluem por troca segurando um item (Onix e Scyther com Revestimento Metálico, "
                   "Slowpoke com Pedra do Rei...) podem evoluir segurando o item: o ícone de evolução aparece, de dia ou "
-                  "de noite. Segue as regras do mod \"No More Trade Evolutions\". A troca continua funcionando. Feito "
+                  "de noite. Inkay, que precisa do console de cabeça para baixo, evolui no nível 30 normalmente. "
+                  "Segue as regras do mod \"No More Trade Evolutions\". A troca continua funcionando. Feito "
                   "a partir dos seus arquivos do jogo; vale a partir da próxima abertura."));
     if (stones != g_settings.content_stones || trade != g_settings.content_trade) settings_save(), launcher_content_kick();
     int st = launcher_content_state();

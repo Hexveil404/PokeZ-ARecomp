@@ -143,6 +143,12 @@ bool gamelib_stale(const char *game_dir) {
 
 static const GameLibTables *open_lib(const char *path, const char *want) {
 #ifdef _WIN32
+    // (a full path: LoadLibrary takes a relative one with a folder in it from the program's folder first - a data
+    // folder elsewhere (RecompLauncher's, LARECOMP_DATA_ROOT) next to a program folder with its own extracted/ loaded
+    // that copy's library: "built for another version")
+    char full[MAX_PATH];
+    DWORD fn = GetFullPathNameA(path, sizeof full, full, NULL);
+    if (fn && fn < sizeof full) path = full;
     HMODULE h = LoadLibraryA(path);
     if (!h) { snprintf(g_error, sizeof g_error, "can't load %s (error %lu)", path, GetLastError()); return NULL; }
     GameLibEntry entry = (GameLibEntry)(void *)GetProcAddress(h, GAMELIB_ENTRY);

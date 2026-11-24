@@ -442,6 +442,8 @@ extern "C" bool build_cache_publish(BuildCache *c, const char *name, const char 
         std::error_code ec;
         fs::remove(c->root / "previous-library", ec);
         fs::remove(c->root / "previous-id", ec);
+        // (the library's fingerprint, runtime/gamelib.c lib_sum_write: the new one is taken at its first good start)
+        { auto sum = lib; sum += ".sum"; fs::remove(sum, ec); }
         // (old libraries a replace moved aside while they were in use: gone once nothing holds them)
         for (auto it = fs::directory_iterator(lib.parent_path(), ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
             auto f = it->path().filename().u8string();

@@ -3313,6 +3313,13 @@ extern "C" void launcher_run(const char *root) {
                     shader_code_kick();
                     party_panel(dl, x, ty + 68 + 34, w);
                     if (g_play_pending) pressed = true, g_play_pending = false;
+                    // (the files checked again at PLAY: the status is from when the screen opened, and #332's library
+                    // was deleted - or damaged - meanwhile: "the game code hasn't been built" at boot. Not ready now:
+                    // back to the setup button, "Compile now")
+                    if (pressed && !(status = check_game_files(g_root)).empty()) {
+                        rt_launcher_log("[launcher] PLAY: the game files aren't ready any more (%s)\n", status.c_str());
+                        pressed = false;
+                    }
                     // (a settings file from before the recommendation that already holds it: nothing to offer)
                     if (g_settings.video_rec == VREC_ASK && g_video_rec.known && settings_video_matches_recommended())
                         g_settings.video_rec = VREC_DONE, settings_save();

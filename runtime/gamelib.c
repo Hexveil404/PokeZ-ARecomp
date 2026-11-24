@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <time.h>
+#include <sys/stat.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -89,11 +92,85 @@ static bool lib_intact(const char *path, char *why, size_t why_size) {
     return true;
 }
 
+// The library's fingerprint, <library>.sum: its size and a hash of each of 64 regions of the whole file, written after
+// its first good load and dropped by each build (build_cache.cpp). #332 came back on v0.1.26 with a library the header /
+// section checks passed - damaged inside - so a start now also hashes the file (8 bytes a step: ~0.1 s for 340 MB once
+// it's in the file cache, and the load reads it anyway): one that changed since is damaged, and the log says how (size,
+// how many regions and where, when the file was last written: what happened to it then).
+#define SUM_N 64
+static bool lib_sample(const char *path, long long *size, uint32_t h[SUM_N], long long *mtime) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    struct stat sb;
+    *mtime = stat(path, &sb) == 0 ? (long long)sb.st_mtime : 0;
+    *size = stat(path, &sb) == 0 ? (long long)sb.st_size : 0;
+    enum { CH = 1 << 16 };
+    long long region = ((*size + SUM_N - 1) / SUM_N + CH - 1) / CH * CH;  // (a whole number of reads per region)
+    if (region < CH) region = CH;
+    static uint64_t buf[CH / 8];
+    uint64_t x[SUM_N];
+    for (int i = 0; i < SUM_N; i++) x[i] = 14695981039346656037ull;
+    long long at = 0;
+    for (size_t n; (n = fread(buf, 1, CH, f)) > 0; at += (long long)n) {
+        int r = (int)(at / region);
+        if (r >= SUM_N) r = SUM_N - 1;
+        uint64_t v = x[r];
+        size_t w = n / 8;
+        for (size_t k = 0; k < w; k++) v = (v ^ buf[k]) * 1099511628211ull;
+        for (size_t k = w * 8; k < n; k++) v = (v ^ ((unsigned char *)buf)[k]) * 1099511628211ull;
+        x[r] = v;
+    }
+    fclose(f);
+    for (int i = 0; i < SUM_N; i++) h[i] = (uint32_t)(x[i] ^ x[i] >> 32);
+    return *size > 0;
+}
+static void lib_sum_write(const char *path) {
+    char sp[1120];
+    snprintf(sp, sizeof sp, "%s.sum", path);
+    if (exists(sp)) return;  // (kept: the first good load's)
+    long long size, mt;
+    uint32_t h[SUM_N];
+    if (!lib_sample(path, &size, h, &mt)) return;
+    FILE *f = fopen(sp, "wb");
+    if (!f) return;
+    fprintf(f, "LASSUM1 %lld %lld", size, mt);
+    for (int i = 0; i < SUM_N; i++) fprintf(f, " %08x", h[i]);
+    fputc('\n', f);
+    fclose(f);
+}
+// false (and why): the library differs from its fingerprint; true when it matches or has none yet
+static bool lib_sum_ok(const char *path, char *why, size_t why_size) {
+    char sp[1120];
+    snprintf(sp, sizeof sp, "%s.sum", path);
+    FILE *f = fopen(sp, "rb");
+    if (!f) return true;
+    long long size0 = -1, mt0 = 0;
+    uint32_t h0[SUM_N];
+    int n = fscanf(f, "LASSUM1 %lld %lld", &size0, &mt0) == 2 ? 0 : -1;
+    for (int i = 0; n == 0 && i < SUM_N; i++) if (fscanf(f, " %x", &h0[i]) != 1) n = -1;
+    fclose(f);
+    if (n < 0) return true;  // (unreadable: no verdict)
+    long long size, mt;
+    uint32_t h[SUM_N];
+    if (!lib_sample(path, &size, h, &mt)) return true;
+    int diff = 0, first = -1;
+    for (int i = 0; i < SUM_N; i++) if (h[i] != h0[i]) diff++, first = first < 0 ? i : first;
+    if (size == size0 && !diff) return true;
+    time_t t = (time_t)mt;
+    struct tm *tm = localtime(&t);
+    char when[32] = "?";
+    if (tm) strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", tm);
+    snprintf(why, why_size, "changed since its first good start: size %lld -> %lld, %d of %d regions differ (the first %d%% in), "
+             "file last written %s%s", size0, size, diff, SUM_N, first < 0 ? 0 : first * 100 / (SUM_N - 1), when,
+             mt != mt0 ? "" : ", the same time as then");
+    return false;
+}
+
 // A library whose .id matches but whose file is damaged: told once, then taken for not built (and moved aside so the
 // build writes a fresh one; the build's pieces in .gamebuild are kept)
 static bool lib_usable(const char *path) {
-    char why[128];
-    if (lib_intact(path, why, sizeof why)) return true;
+    char why[256];
+    if (lib_intact(path, why, sizeof why) && lib_sum_ok(path, why, sizeof why)) return true;
     static char told[1100];
     if (strcmp(told, path)) {
         snprintf(told, sizeof told, "%s", path);
@@ -102,6 +179,8 @@ static bool lib_usable(const char *path) {
         snprintf(bad, sizeof bad, "%s.damaged", path);
         remove(bad);
         rename(path, bad);
+        snprintf(bad, sizeof bad, "%s.sum", path);  // (the next build's library gets its own)
+        remove(bad);
     }
     return false;
 }
@@ -193,6 +272,7 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
                 continue;
             }
             g_tables = open_lib(c[i], want);
+            if (g_tables) lib_sum_write(c[i]);
             if (g_tables) LOG("[gamelib] %s (%llu + %llu functions)\n", c[i], (unsigned long long)*g_tables->main_count,
                               (unsigned long long)*g_tables->sdk_count);
         }

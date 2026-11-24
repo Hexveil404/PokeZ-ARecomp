@@ -108,6 +108,7 @@ static bool build_is_za(const uint8_t id[8]) { return build_version(id) && memcm
 // it): ZA Recomp's v<major>.<minor>.<patch> (Hexveil404/PokeZ-ARecomp releases).
 #define LARECOMP_VERSION "v0.1.27"
 extern "C" void rt_launcher_log(const char *fmt, ...);  // runtime/launcher_log.c: logs/launcher.log and stderr
+extern "C" void launcher_log_open(void);
 extern "C" const char *rt_version(void) { return LARECOMP_VERSION; }  // (runtime/main.c: the log's first line)
 extern "C" const char *larecomp_version(void) { return LARECOMP_VERSION; }  // (the shader caches' tag)
 
@@ -419,9 +420,14 @@ static std::string g_src;           // the picked folder
 static std::string g_job;           // current setup step / result for the status line
 static std::string g_job_hint;      // a failure: what to do about it (shown under it)
 static bool g_busy, g_job_failed;
+static bool g_headless;
 static bool g_confirm_delete;       // game-files page: "Delete the game files?" shown
 
 static void set_job(const std::string &s, bool failed = false, const std::string &hint = "") {
+    if (g_headless) {
+        fprintf(stdout, "%s\n", s.c_str());
+        fflush(stdout);
+    }
     pthread_mutex_lock(&g_lock);
     g_job = s;
     g_job_failed = failed;
@@ -701,6 +707,7 @@ static bool import_packages(const std::vector<std::string> &pkgs, const std::str
     if (!p) { err = "the game file importer didn't start"; return false; }
     int r;
     char last[512] = "";
+    unsigned poll = 0;
     for (;;) {
         r = plat_proc_wait(p, false);
         FILE *f = fopen(log.c_str(), "rb");
@@ -721,6 +728,11 @@ static bool import_packages(const std::vector<std::string> &pkgs, const std::str
             if (pl && sscanf(pl, "progress %llu %llu", &d, &t) == 2) g_total = t, g_done = d;
         }
         if (r >= 0) break;
+        if (g_headless && ++poll % 10 == 0) {
+            unsigned long long total = g_total, done = g_done;
+            fprintf(stdout, "progress %.3f Reading game packages\n", total ? 0.25 * (double)done / total : 0.0);
+            fflush(stdout);
+        }
         SDL_Delay(100);
     }
     rt_launcher_log("[launcher] zaimport: exit %d, %s\n", r, last);
@@ -1105,8 +1117,21 @@ static std::atomic<bool> g_cancel_build{false};  // (the Play page's Cancel whil
 static std::atomic<bool> g_mods_only{false};     // (the game code is built: only code mods' libraries to compile)
 static bool build_cancelled(void) { return g_cancel_build.load(); }
 static bool g_copy_skipped;                  // (only the game code to build: the bar is all of that)
-static void setup_progress(uint64_t done, uint64_t) { g_done = g_phase_base + done; }
+static void setup_progress(uint64_t done, uint64_t total) {
+    g_done = g_phase_base + done;
+    static uint64_t last;
+    uint64_t now = SDL_GetTicks();
+    if (g_headless && now - last >= 1000) {
+        last = now;
+        fprintf(stdout, "progress %.3f Copying game files\n", total ? 0.25 * (double)done / total : 0.0);
+        fflush(stdout);
+    }
+}
 static void build_progress(double f, const char *step) {
+    if (g_headless) {
+        fprintf(stdout, "progress %.3f %s\n", 0.25 + 0.7 * f, step);
+        fflush(stdout);
+    }
     g_build_frac = (float)f;
     static const char *last;
     if (step != last) last = step, set_job(step);
@@ -1254,6 +1279,8 @@ done:
     pthread_mutex_unlock(&g_lock);
     return NULL;
 }
+
+#include "launcher_prepare.h"
 
 // ------------------------------------------------------------------ folder dialog (SDL calls back on any thread)
 static void SDLCALL picked(void *, const char *const *files, int) {
@@ -2765,7 +2792,7 @@ extern "C" void launcher_run(const char *root) {
     launcher_verify_kick();    // (the game files checked once for each copy: damaged_prompt)
     g_damaged_looked = false;
     static bool update_checked;  // (once per launch, not again after a "Title screen" reboot)
-    if (!update_checked && !getenv("LARECOMP_NO_UPDATE_CHECK")) {
+    if (!update_checked && !getenv("LARECOMP_NO_UPDATE_CHECK") && !getenv("RECOMPLAUNCHER")) {
         update_checked = true;
         pthread_t t;
         if (pthread_create(&t, NULL, update_thread, NULL) == 0) pthread_detach(t);

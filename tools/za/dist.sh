@@ -94,7 +94,7 @@ cp tools/za/za-default.ini "$D/za-default.ini"  # (not larecomp.ini: the first r
 # isn't there is skipped: what an antivirus injects into every process lists too - Kaspersky's klhkum.dll, at a
 # "/c/BALROOT/Device/..." path with spaces - and isn't ours to ship)
 PATH="$PWD/build/deps-win/bin:/c/msys64/ucrt64/bin:$PATH" ldd $B/lasrecomp.exe | awk 'tolower($3) !~ /^\/c\/windows\// && !/vulkan-1/ {print $3}' | sort -u |
-    while read -r f; do [ -f "$f" ] && cp "$f" "$D/"; done
+    while read -r f; do if [ -f "$f" ]; then cp "$f" "$D/"; fi; done
 for f in SDL3.dll libshaderc_shared.dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do
     [ -f "$D/$f" ] || { echo "dist.sh: $f missing from the package (ldd didn't find it)"; exit 1; }
 done

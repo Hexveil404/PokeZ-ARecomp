@@ -9086,7 +9086,7 @@ static void draw_(CmdRec *r, bool indexed) {
                                    .imageOffset = {px, py, 0}, .imageExtent = {64, 64, 1}};
             VkCommandBuffer pcb = vk_cmd();
             vk_full_barrier(pcb);
-            vkCmdCopyImageToBuffer(pcb, tb->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
+            rec_CmdCopyImageToBuffer(pcb, tb->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
             renderer_flush();
             uint64_t h = 1469598103934665603ull;
             const uint8_t *q = out.ptr;
@@ -9151,7 +9151,7 @@ static void fc_grid(TexBackend *tb, VkImageAspectFlags aspect, uint8_t *out) {  
         }
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
-    vkCmdCopyImageToBuffer(cb, tb->image, VK_IMAGE_LAYOUT_GENERAL, rb.buf, FC_GW * FC_GH, c);
+    rec_CmdCopyImageToBuffer(cb, tb->image, VK_IMAGE_LAYOUT_GENERAL, rb.buf, FC_GW * FC_GH, c);
     renderer_flush();
     memcpy(out, rb.ptr, FC_GW * FC_GH * 16);
 }
@@ -9220,6 +9220,86 @@ static FILE *fc_open_as(const char *name, uint64_t at) {  // this frame's captur
     }
     return f;
 }
+// A compute dispatch's textures with their texels (the writers' capture, 'DISA': the culling's depth pyramid - its
+// occlusion test reads it, so a re-run elsewhere needs it): kind 26 per texture, a header (FcTexImg: the image, the
+// scale and part the shader was told, the pool entry's view, the sampler's settings) and then every level of layer 0,
+// tightly packed. Formats of unknown texel size get the header only.
+typedef struct {
+    uint32_t index, vkformat, width, height, layers, levels, samples, aspect;
+    float sc[2], fr[2];
+    uint32_t wh[2], has_view, view_base, view_levels, view_format, view_mask, data_bytes;
+    uint8_t sampler[40];
+} FcTexImg;
+static uint32_t fc_texel_bytes(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_UINT: return 1;
+    case VK_FORMAT_R16_SFLOAT: case VK_FORMAT_R16_UNORM: case VK_FORMAT_R16_UINT: case VK_FORMAT_D16_UNORM: case VK_FORMAT_R8G8_UNORM: return 2;
+    case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32_UINT: case VK_FORMAT_D32_SFLOAT: case VK_FORMAT_D24_UNORM_S8_UINT:
+    case VK_FORMAT_X8_D24_UNORM_PACK32: case VK_FORMAT_D32_SFLOAT_S8_UINT: case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_A2B10G10R10_UNORM_PACK32: case VK_FORMAT_B10G11R11_UFLOAT_PACK32: return 4;
+    case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_R32G32_UINT: return 8;
+    case VK_FORMAT_R32G32B32A32_SFLOAT: case VK_FORMAT_R32G32B32A32_UINT: return 16;
+    default: return 0;
+    }
+}
+static void fc_teximages(FILE *f, ShaderInfo *si, uint32_t *nb) {
+    if (!si) return;
+    for (int i = 0; i < si->ntex && i < 64; i++) {
+        FcTexImg h;
+        memset(&h, 0, sizeof h);
+        h.index = (uint32_t)i;
+        h.sc[0] = tex_sc[0][i][0], h.sc[1] = tex_sc[0][i][1], h.fr[0] = tex_fr[0][i][0], h.fr[1] = tex_fr[0][i][1];
+        h.wh[0] = tex_wh[0][i][0], h.wh[1] = tex_wh[0][i][1];
+        int slot = ((int)si->tex[i].handle_offset - 0x20) / 8;
+        uint64_t hd = (slot >= 0 && slot < 32) ? st.tex[5][slot] : 0;
+        uint32_t tic = hd & 0xFFFFF, tsc = (uint32_t)(hd >> 20) & 0xFFF;
+        if (hd && st.tpool && tic < (uint32_t)st.tpool->count) {
+            NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
+            h.has_view = e->has_view;
+            h.view_base = e->view.base_level, h.view_levels = e->view.num_levels, h.view_format = e->view.format, h.view_mask = e->view.setmask;
+        }
+        if (hd && st.spool && tsc < (uint32_t)st.spool->count) memcpy(h.sampler, &((NvnSamplerDesc *)st.spool->entries)[tsc], 40);
+        NvnTexture *o = shader_texture_object(5, &si->tex[i]);
+        TexBackend *tb = o ? (TexBackend *)o->backend : NULL;
+        uint64_t total = 0;
+        uint32_t tx = 0;
+        VkImageAspectFlags asp = 0;
+        if (tb && tb->image && tb->samples <= 1) {
+            h.vkformat = tb->format, h.width = tb->width, h.height = tb->height, h.layers = tb->layers, h.levels = tb->levels;
+            h.samples = tb->samples, h.aspect = tb->aspect;
+            tx = fc_texel_bytes(tb->format);
+            asp = tb->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+            for (uint32_t l = 0; tx && l < tb->levels; l++) {
+                uint32_t w = tb->width >> l ? tb->width >> l : 1, ht = tb->height >> l ? tb->height >> l : 1;
+                total += (uint64_t)w * ht * tx;
+            }
+            if (total > (32u << 20)) total = 0;  // (not a depth pyramid: header only)
+        }
+        h.data_bytes = (uint32_t)total;
+        uint8_t *buf = malloc(sizeof h + total);
+        if (!buf) continue;
+        memcpy(buf, &h, sizeof h);
+        if (total) {
+            VkSpan rb = vk_readback(total);
+            VkBufferImageCopy c[16];
+            uint64_t off = 0;
+            uint32_t nl = tb->levels < 16 ? tb->levels : 16;
+            for (uint32_t l = 0; l < nl; l++) {
+                uint32_t w = tb->width >> l ? tb->width >> l : 1, ht = tb->height >> l ? tb->height >> l : 1;
+                c[l] = (VkBufferImageCopy){.bufferOffset = rb.off + off, .imageSubresource = {asp, l, 0, 1}, .imageExtent = {w, ht, 1}};
+                off += (uint64_t)w * ht * tx;
+            }
+            VkCommandBuffer cb = vk_cmd();
+            vk_full_barrier(cb);
+            rec_CmdCopyImageToBuffer(cb, tb->image, VK_IMAGE_LAYOUT_GENERAL, rb.buf, nl, c);
+            renderer_flush();
+            memcpy(buf + sizeof h, rb.ptr, off);
+        }
+        fc_blob_mem(f, 26, (uint32_t)i, o ? (o->addr ? o->addr : (uint64_t)(uintptr_t)o) : 4, sizeof h + total, buf, sizeof h + total, nb);
+        free(buf);
+    }
+}
+
 // A dispatch, as two records around it: 'DISB' (before: its constant buffers, kind 22 per slot, and storage buffers,
 // kind 20) and 'DISA' (after, once it ran: the storage buffers again, kind 21). Header: u32 magic, u32 bytes after,
 // u64 shader code address, u32 groups x y z, u32 block count, then blocks as in a draw record.
@@ -9248,6 +9328,7 @@ static void fullcap_dispatch(bool after, uint32_t gx, uint32_t gy, uint32_t gz) 
         NvnShaderStage *ss = &st.program->stages[5];
         if (ss->code_addr && ss->const_size) fc_blob(f, 25, 5, ss->code_addr + ss->const_offset, ss->const_size, 65536, &nb);
     }
+    if (after && gw) fc_teximages(f, compute_program(st.program) ? compute_program(st.program)->si : NULL, &nb);  // (as bound for it)
     // (the writers' capture keeps a dispatch's output only where it holds indirect parameters: the rest is its input)
     for (int i = 0; i < 16; i++)
         if (!after || !gw || (st.sbuf[5][i].addr && ind_pages_hit(st.sbuf[5][i].addr, st.sbuf[5][i].size)))

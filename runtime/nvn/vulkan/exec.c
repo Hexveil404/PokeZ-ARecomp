@@ -569,6 +569,7 @@ static int gp_n;
 // minutes in (seconds on an RX 550), the GPU is on them 7-10 s and the game stops on its fence; none of it shows on
 // NVIDIA with AMD's paths forced, so the next such log names the writer. A ring of 16k entries, a few hundred notes a
 // frame. =0: off.
+static void gwc_bad(uint64_t frame);  // (the capture of the writers, at fullcap_dispatch)
 #define GW_N 16384  // (a power of two)
 static struct { uint64_t lo, hi, frame, prog; const char *what; } gw_ring[GW_N];
 static unsigned gw_n;
@@ -590,6 +591,7 @@ static void gw_explain(uint64_t pa) {
     n++;
     extern uint64_t renderer_exec_frame(void);
     uint64_t f = renderer_exec_frame(), plo = pa & ~0xFFFull;
+    if (n == 1) gwc_bad(f + 1);  // (the next frame's writers, in and out: below, fullcap_dispatch)
     LOG("[gpuw] frame %llu: block %llx overwritten; GPU writes over its page %llx in the last 8 frames:\n", (unsigned long long)f,
         (unsigned long long)pa, (unsigned long long)plo);
     unsigned lo = gw_n > GW_N ? gw_n - GW_N : 0, shown = 0;
@@ -7690,6 +7692,57 @@ static void snap_merge_back(VkCommandBuffer cb) {
     if (set) vk_full_barrier(cb);
 }
 
+// The writers' capture (#345, with the GPU write report on: AMD). v0.1.27's first report named the culling dispatches
+// (three programs, every frame) as the only GPU writers over the overwritten blocks: their storage range spans the
+// parameter records, and once the blocks go bad every word of them holds small counts, not only the instance count those
+// dispatches add to. Which input sends their adds there doesn't show in a log, so the dispatches that store over pages
+// of indirect parameters are recorded as fullcap does ('DISB' constant buffers, storage buffers, GLSL, local size,
+// compiler constants; 'DISA' the storage over parameter pages after it ran) into logs/: once a minute or so a good
+// frame (gpuw-good-<frame>.bin, the last two kept) and, after the first overwritten block, the next frame
+// (gpuw-bad-<frame>.bin). Offline both run again on another GPU (tools/devtools/analysis/fcread.py reads them).
+// LARECOMP_GPUW_CAPTURE=0: off; =<frame>: also take that frame as a bad one (tests).
+static uint64_t gwc_bad_at, gwc_now;
+static char gwc_name[96], gwc_keep[2][96];
+static void gwc_bad(uint64_t frame) {
+    if (!gwc_bad_at) gwc_bad_at = frame;
+}
+static bool gwc_want(void) {
+    static int on = -1;
+    static uint64_t test_at;
+    if (on < 0) {
+        const char *e = ENV("LARECOMP_GPUW_CAPTURE");
+        on = !e || atoll(e) != 0;
+        if (e && atoll(e) > 1) test_at = (uint64_t)atoll(e);
+    }
+    if (gw_on < 0) gw_note("", 0, 0, 0);  // (decides gw_on)
+    // (not under the GPU overlap: its mid-frame waits crashed NVIDIA's driver in a test - and AMD runs without it)
+    if (!on || gw_on <= 0 || overlap_on()) return false;
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t f = renderer_exec_frame();
+    bool bad = (gwc_bad_at && f == gwc_bad_at) || (test_at && f == test_at);
+    bool good = !bad && !gwc_bad_at && f >= 900 && f % 1800 == 0;
+    if (!bad && !good) return false;
+    bool hit = false;
+    for (int i = 0; i < 16 && !hit; i++)
+        hit = st.sbuf[5][i].addr && st.sbuf[5][i].size && ind_pages_hit(st.sbuf[5][i].addr, st.sbuf[5][i].size);
+    if (!hit) return false;
+    if (gwc_now != f + 1) {  // (this frame's file: named once)
+        gwc_now = f + 1;
+        mkdir("logs", 0755);
+        snprintf(gwc_name, sizeof gwc_name, "logs/gpuw-%s-%llu.bin", bad ? "bad" : "good", (unsigned long long)f);
+        if (good) {  // (the last two good ones kept)
+            if (gwc_keep[0][0]) remove(gwc_keep[0]);
+            memcpy(gwc_keep[0], gwc_keep[1], sizeof gwc_keep[0]);
+            snprintf(gwc_keep[1], sizeof gwc_keep[1], "%s", gwc_name);
+        } else
+            LOG("[gpuw] frame %llu: recording the dispatches that store over indirect parameters to %s - attach it with "
+                "the log (and the gpuw-good-*.bin next to it)\n", (unsigned long long)f, gwc_name);
+    }
+    return true;
+}
+static FILE *fc_open_as(const char *name, uint64_t at);
+static FILE *gwc_file(void) { return gwc_now ? fc_open_as(gwc_name, gwc_now) : NULL; }
+
 static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz);
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     dispatch_compute_(gx, gy, gz);
@@ -7713,7 +7766,8 @@ static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz) {
         if (skip == ~0ull) { const char *e = getenv("LARECOMP_SKIP_CS"); skip = e ? strtoull(e, NULL, 16) : 0; }
         if (skip && st.program->stages[5].code_addr == skip) { SKIP_CS(SK_DEBUG_SKIP); return; }
     }
-    if (g_debug_frame && g_fullcap) fullcap_dispatch(false, gx, gy, gz);
+    bool gwc = !(g_debug_frame && g_fullcap) && cp->si->uses_gmem_store && gwc_want();
+    if ((g_debug_frame && g_fullcap) || gwc) fullcap_dispatch(false, gx, gy, gz);
     if (cp->si->uses_gmem && ENV("LARECOMP_LOG_CS_SBUF")) {  // (debug) the storage buffers bound to gmem dispatches
         static uint64_t seen_cs[16];
         static int seen_n[16];
@@ -7782,7 +7836,7 @@ static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz) {
     if (cp->si->uses_gmem_store) snap_merge_back(cb), vc_mark_sbufs(5);
     stat_dispatches++;
     subr_now.dispatches++, subr_now.cs = cp->code;
-    if (g_debug_frame && g_fullcap) fullcap_dispatch(true, gx, gy, gz);  // (after: gfast's copy back included)
+    if ((g_debug_frame && g_fullcap) || gwc) fullcap_dispatch(true, gx, gy, gz);  // (after: gfast's copy back included)
     ia_refresh(cb);  // (the instance counts it may have written, into the private records; under the overlap only)
 }
 
@@ -9147,14 +9201,16 @@ static void fc_textures(FILE *f, uint32_t kind, int stage, ShaderInfo *si, uint3
     fwrite(t, 1, len, f);
     (*n)++;
 }
-static FILE *fc_open(void) {  // this frame's capture file (draws and dispatches)
+static FILE *fc_open(void) { return fc_open_as(NULL, renderer_present_count()); }
+static FILE *fc_open_as(const char *name, uint64_t at) {  // this frame's capture file (draws and dispatches)
     static FILE *f;
     static uint64_t frame = ~0ull;
-    if (renderer_present_count() != frame) {
+    if (at != frame) {
         if (f) fclose(f);
-        frame = renderer_present_count();
-        char path[64];
-        snprintf(path, sizeof path, "build/fullcap_%llu.bin", (unsigned long long)frame);
+        frame = at;
+        char path[96];
+        if (name) snprintf(path, sizeof path, "%s", name);
+        else snprintf(path, sizeof path, "build/fullcap_%llu.bin", (unsigned long long)frame);
         f = fopen(path, "wb");
         if (!f) return NULL;
         fwrite("ZAFC3\0\0\0", 1, 8, f);
@@ -9168,7 +9224,8 @@ static FILE *fc_open(void) {  // this frame's capture file (draws and dispatches
 // kind 20) and 'DISA' (after, once it ran: the storage buffers again, kind 21). Header: u32 magic, u32 bytes after,
 // u64 shader code address, u32 groups x y z, u32 block count, then blocks as in a draw record.
 static void fullcap_dispatch(bool after, uint32_t gx, uint32_t gy, uint32_t gz) {
-    FILE *f = fc_open();
+    bool gw = !(g_debug_frame && g_fullcap);  // (the writers' capture, not F9's)
+    FILE *f = gw ? gwc_file() : fc_open();
     if (!f || !st.program) return;
     probe_busy = true;
     vk_end_pass();
@@ -9183,9 +9240,18 @@ static void fullcap_dispatch(bool after, uint32_t gx, uint32_t gy, uint32_t gz) 
     long nat = ftell(f);
     uint32_t nb = 0;
     fwrite(&nb, 4, 1, f);
-    if (!after)
+    if (!after) {
         for (int i = 0; i < 18; i++) fc_blob(f, 22, i, st.ubuf[5][i].addr, st.ubuf[5][i].size, 65536, &nb);
-    for (int i = 0; i < 16; i++) fc_blob(f, after ? 21 : 20, i, st.sbuf[5][i].addr, st.sbuf[5][i].size, 8u << 20, &nb);
+        CsProg *cp = compute_program(st.program);  // (the GLSL as translated, its local size, the compiler's constants)
+        if (cp && cp->si && cp->si->msl) fc_blob_mem(f, 23, 5, code ? code : 1, strlen(cp->si->msl), cp->si->msl, 1 << 20, &nb);
+        if (cp) { uint32_t l[4] = {cp->local[0], cp->local[1], cp->local[2], cp->shared}; fc_blob_mem(f, 24, 5, 3, sizeof l, l, sizeof l, &nb); }
+        NvnShaderStage *ss = &st.program->stages[5];
+        if (ss->code_addr && ss->const_size) fc_blob(f, 25, 5, ss->code_addr + ss->const_offset, ss->const_size, 65536, &nb);
+    }
+    // (the writers' capture keeps a dispatch's output only where it holds indirect parameters: the rest is its input)
+    for (int i = 0; i < 16; i++)
+        if (!after || !gw || (st.sbuf[5][i].addr && ind_pages_hit(st.sbuf[5][i].addr, st.sbuf[5][i].size)))
+            fc_blob(f, after ? 21 : 20, i, st.sbuf[5][i].addr, st.sbuf[5][i].size, 8u << 20, &nb);
     long end = ftell(f);
     fseek(f, nat, SEEK_SET), fwrite(&nb, 4, 1, f);
     head[1] = (uint32_t)(end - at - 8);

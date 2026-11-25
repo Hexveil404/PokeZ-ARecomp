@@ -89,9 +89,15 @@ cp -R build/dx12/dx12 build/dx12/D3D12 "$D/"
 cp build/dx12/Mesa-LICENSE.rst build/dx12/D3D12-Agility-LICENSE.txt "$D/dx12/"
 cp tools/dx12/dozen-za.patch "$D/dx12/"  # (the changes to Mesa 26.2.5, as its MIT licence lets us ship them)
 cp tools/za/za-default.ini "$D/za-default.ini"  # (not larecomp.ini: the first run copies it, runtime/paths.c - a new zip unzipped over an install keeps the player's own)
-# (every DLL but Windows' own and the Vulkan loader: also when copies sit next to the exe in $B, a dev setup)
-PATH="$PWD/build/deps-win/bin:$PATH" ldd $B/lasrecomp.exe | awk 'tolower($3) !~ /^\/c\/windows\// && !/vulkan-1/ {print $3}' | sort -u |
-    while read -r f; do cp "$f" "$D/"; done
+# (every DLL but Windows' own and the Vulkan loader: also when copies sit next to the exe in $B, a dev setup. MSYS2's
+# UCRT64 runtime first: Git Bash's own /mingw64 has an older libgcc / libstdc++ of another C runtime. A file that
+# isn't there is skipped: what an antivirus injects into every process lists too - Kaspersky's klhkum.dll, at a
+# "/c/BALROOT/Device/..." path with spaces - and isn't ours to ship)
+PATH="$PWD/build/deps-win/bin:/c/msys64/ucrt64/bin:$PATH" ldd $B/lasrecomp.exe | awk 'tolower($3) !~ /^\/c\/windows\// && !/vulkan-1/ {print $3}' | sort -u |
+    while read -r f; do [ -f "$f" ] && cp "$f" "$D/"; done
+for f in SDL3.dll libshaderc_shared.dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do
+    [ -f "$D/$f" ] || { echo "dist.sh: $f missing from the package (ldd didn't find it)"; exit 1; }
+done
 ! ls "$D" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
 # AMD FSR 3.1 (runtime/nvn/vulkan/fsr3.cpp, loaded at run time; third_party/ffx_api/README.ZARecomp.md): AMD's signed
 # DLLs from the SDK's v2.4.0 tag, downloaded once, hash checked, with the SDK's licence (it asks for its notice)

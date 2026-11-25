@@ -6745,6 +6745,7 @@ static void shadow_slot_check(int stage, const ShaderTexture *st_, int i, uint64
     *view = vk_dummy_depth_view(st_->type);
 }
 
+static bool cs_tex_dummy[64];  // (a compute dispatch's texture i got the 1x1 dummy view: fc_teximages)
 static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo *out, float sc[2], uint32_t wh[2], float fr[2]) {
     ShaderTexture *st_ = &si->tex[i];
     int slot = ((int)st_->handle_offset - 0x20) / 8;  // 64-bit handles from offset 0x20
@@ -6842,6 +6843,7 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     }
     if (st_->shadow)
         shadow_slot_check(stage, st_, i, h, tic, ent, ent && ent->tex ? (naliases ? alias_read(ent->tex) : ent->tex) : NULL, &view);
+    if (stage == 5 && i < 64) cs_tex_dummy[i] = !view;  // (the writers' capture: what the dispatch really sampled)
     if (!view) view = vk_dummy_view(st_->type);
     if (!smp) smp = vk_default_sampler(!st_->stencil && !st_->sint);
     *out = (VkDescriptorImageInfo){smp, view, VK_IMAGE_LAYOUT_GENERAL};
@@ -9223,7 +9225,8 @@ static FILE *fc_open_as(const char *name, uint64_t at) {  // this frame's captur
 // A compute dispatch's textures with their texels (the writers' capture, 'DISA': the culling's depth pyramid - its
 // occlusion test reads it, so a re-run elsewhere needs it): kind 26 per texture, a header (FcTexImg: the image, the
 // scale and part the shader was told, the pool entry's view, the sampler's settings) and then every level of layer 0,
-// tightly packed. Formats of unknown texel size get the header only.
+// tightly packed. Formats of unknown texel size get the header only, and so does a texture the dispatch sampled as the
+// 1x1 dummy (view_mask bit 31: the depth pyramid at a non-integer scale, occlusion culling off - texture_info).
 typedef struct {
     uint32_t index, vkformat, width, height, layers, levels, samples, aspect;
     float sc[2], fr[2];
@@ -9264,6 +9267,7 @@ static void fc_teximages(FILE *f, ShaderInfo *si, uint32_t *nb) {
         uint64_t total = 0;
         uint32_t tx = 0;
         VkImageAspectFlags asp = 0;
+        if (cs_tex_dummy[i]) h.view_mask |= 0x80000000u;
         if (tb && tb->image && tb->samples <= 1) {
             h.vkformat = tb->format, h.width = tb->width, h.height = tb->height, h.layers = tb->layers, h.levels = tb->levels;
             h.samples = tb->samples, h.aspect = tb->aspect;
@@ -9273,7 +9277,7 @@ static void fc_teximages(FILE *f, ShaderInfo *si, uint32_t *nb) {
                 uint32_t w = tb->width >> l ? tb->width >> l : 1, ht = tb->height >> l ? tb->height >> l : 1;
                 total += (uint64_t)w * ht * tx;
             }
-            if (total > (32u << 20)) total = 0;  // (not a depth pyramid: header only)
+            if (total > (32u << 20) || cs_tex_dummy[i]) total = 0;  // (not a depth pyramid, or not sampled: header only)
         }
         h.data_bytes = (uint32_t)total;
         uint8_t *buf = malloc(sizeof h + total);

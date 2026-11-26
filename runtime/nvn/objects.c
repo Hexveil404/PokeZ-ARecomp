@@ -980,8 +980,30 @@ NVN(nvnWindowSetPresentInterval) {  // (the game's 60 / 30 fps mode: 1 / 2; LARE
 }
 NVN(nvnWindowSetCrop) { int *cr = WIN->crop; cr[0] = (int)A(1); cr[1] = (int)A(2); cr[2] = (int)A(3); cr[3] = (int)A(4); }
 NVN(nvnWindowGetCrop) { memcpy(AP(1), WIN->crop, 16); }
+// The presents' fence numbers, newest last (nvnQueuePresentTexture), for the acquire's own wait below
+static uint64_t pres_q[8];
+static uint64_t pres_n;
+// A fence number's wait: the render thread's item (translated and submitted), then its GPU work - as nvnSyncWait
+static void fence_wait(uint64_t seq) {
+    if (seq && rq_on()) seq = rq_wait_item(seq);
+    renderer_wait_seq(seq);
+}
 NVN(nvnWindowAcquireTexture) {
     NvnWindow *w = WIN;
+    // The console's acquire hands out a texture only once the display is done with it, and the display only after the
+    // GPU finished the frame that drew it: the game is never more than a frame or two ahead of the GPU, and Z-A relies
+    // on it - its culling counts into one of two halves picked by the frame's parity, and the CPU clears the half for
+    // the frame after next. With the render thread and the recorder between them, the GPU could fall 2+ frames behind
+    // (a slow GPU: AMD, #340 #345 #347 #210 #339 #336), the clear landed before the GPU's adds of two frames back, the
+    // counts ran on over the indirect draws' parameters and the device was lost. Here the acquire waits for the GPU to
+    // finish the frame presented LARECOMP_ACQUIRE_WAIT presents ago (default 1; 0: no wait). Reproduced on an RTX 4060 Ti
+    // with the AMD paths forced (overlap, xfb mirror, dynamic vertex input off, 512 MB windows, compute by address):
+    // 12 of 13 city replays broke within 4.5 min; 2 presents back, still 2 of 2; 1 back, 0 of 3 (45.6 fps either way,
+    // and 59.6 against 59.5 at the default settings).
+    static int depth = -1;
+    if (depth < 0) depth = ENV("LARECOMP_ACQUIRE_WAIT") ? atoi(ENV("LARECOMP_ACQUIRE_WAIT")) : 1;
+    if (depth > 0 && depth <= 8 && pres_n >= (uint64_t)depth) fence_wait(pres_q[(pres_n - (uint64_t)depth) % 8]);
+    { static int n; if (!n++) LOG("[nvn] WindowAcquireTexture: waits for the GPU %d present(s) back\n", depth); }
     // The texture-available sync: on the console it signals once the GPU is done with the frame that last presented
     // this texture, which holds the game at most a couple of frames ahead of the GPU. Signalled at once, the CPU ran
     // ahead and rewrote per-frame buffers the GPU had yet to read (an indirect draw's instance count became a float:
@@ -993,6 +1015,7 @@ NVN(nvnWindowAcquireTexture) {
 }
 NVN(nvnQueueAcquireTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
+    { static int n; if (!n++) LOG("[nvn] QueueAcquireTexture used\n"); }
     *(int32_t *)AP(2) = w->next;
     w->next = (w->next + 1) % (w->active ? w->active : 1);
     RET(0);
@@ -1036,7 +1059,12 @@ NVN(nvnQueuePresentTexture) {
         }
         present_pace(w->interval);
         backend_present(HOST(NvnTexture, w->textures[i]));
-        if (i < 8) w->present_seq[i] = renderer_fence_seq();  // (the submission just presented)
+        // (the fence number of this present: with the render thread an item number, as nvnQueueFenceSync's - the
+        // backend's submission number here was read as an item long done, and the texture-available sync never held
+        // the game back)
+        uint64_t q = rq_on() ? rq_fence_seq() : renderer_fence_seq();
+        if (i < 8) w->present_seq[i] = q;
+        pres_q[pres_n++ % 8] = q;
     }
 }
 
